@@ -5,3 +5,18 @@
 .venv/
 __pycache__/
 *.pyc
+
+# ===== 前端 =====
+node_modules/
+web-ui/dist/
+web-ui/.eslintcache
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+doc/
+# ===== 测试 =====
+.pytest_cache/

@@ -2,4 +2,29 @@
 name = "verityagent"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "argon2",
+    "argon2-cffi>=23.1",
+    "fastapi[standard]==0.141.1",
+    "minio>=7.2.0,<8.0.0",
+    "psycopg[binary,pool]>=3.2,<4.0",
+    "pyjwt>=2.8",
+    "redis>=5.0,<6.0",
+    "weaviate-client[grpc]>=4.5.0,<5.0.0",
+]
+
+# uv 镜像源专属配置段
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: 需要真实 PostgreSQL 的集成测试",
+]
