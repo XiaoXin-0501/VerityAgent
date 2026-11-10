@@ -39,6 +39,7 @@ from .repositories import (
 )
 from .schema import (
     DEFAULT_USERS,
+    MIGRATIONS_SQL,
     SCHEMA_SQL,
     init_schema,
     schema_statements,
@@ -54,6 +55,7 @@ __all__ = [
     "close_pg",
     # 建表
     "SCHEMA_SQL",
+    "MIGRATIONS_SQL",
     "DEFAULT_USERS",
     "init_schema",
     "seed_default_users",

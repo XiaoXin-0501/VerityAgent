@@ -20,22 +20,22 @@ from .base import VerityError
 class MessageError(VerityError):
     """消息相关异常基类。"""
 
-    code = "message_error"
-    http_status = 400
+    code = "MESSAGE_ERROR"
+    http_status = 422
     default_message = "消息数据不合法"
 
 
 class MessageValidationError(MessageError):
     """消息内容不满足业务约束。"""
 
-    code = "message_validation_error"
+    code = "MESSAGE_VALIDATION_ERROR"
     default_message = "消息数据不合法"
 
 
 class MessageEncodeError(MessageError):
     """领域消息序列化为存储协议失败。"""
 
-    code = "message_encode_error"
+    code = "MESSAGE_ENCODE_ERROR"
     http_status = 500
     default_message = "消息序列化失败"
 
@@ -43,7 +43,7 @@ class MessageEncodeError(MessageError):
 class MessageDecodeError(MessageError):
     """存储协议反序列化为领域消息失败。"""
 
-    code = "message_decode_error"
+    code = "MESSAGE_DECODE_ERROR"
     http_status = 500
     default_message = "消息反序列化失败"
 
@@ -51,7 +51,7 @@ class MessageDecodeError(MessageError):
 class UnsupportedMessageVersionError(MessageDecodeError):
     """content 的协议版本不在支持范围内。"""
 
-    code = "unsupported_message_version"
+    code = "UNSUPPORTED_MESSAGE_VERSION"
     default_message = "不支持的消息版本"
 
     def __init__(
@@ -68,7 +68,7 @@ class UnsupportedMessageVersionError(MessageDecodeError):
 class UnknownMessageRoleError(MessageDecodeError):
     """role 不在 user / assistant / tool / system 范围内。"""
 
-    code = "unknown_message_role"
+    code = "UNKNOWN_MESSAGE_ROLE"
     default_message = "未知的消息角色"
 
     def __init__(

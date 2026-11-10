@@ -149,8 +149,10 @@ class SessionFileRepository(BaseRepository):
                 resource="会话文件",
             )
 
-            sets = ["status = %s"]
+            sets = ["status = %s", "updated_at = now()"]
             params: list[Any] = [_param(status)]
+            if status in (SessionFileStatus.DELETING, SessionFileStatus.DELETED):
+                sets.append("deleted_at = COALESCE(deleted_at, now())")
             if token_count is not _UNSET:
                 sets.append("token_count = %s")
                 params.append(token_count)
@@ -203,6 +205,32 @@ class SessionFileRepository(BaseRepository):
         self, file_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> SessionFile:
         return await self.set_status(file_id, SessionFileStatus.DELETED, conn=conn)
+
+    async def record_delete_failure(
+        self,
+        file_id: UUID | str,
+        error: str,
+        *,
+        retry_at: Any | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> SessionFile:
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE session_files
+                SET delete_attempts = delete_attempts + 1,
+                    delete_error = %s,
+                    delete_next_retry_at = %s,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (error, retry_at, as_uuid(file_id)),
+            )
+        if row is None:
+            raise NotFoundError("会话文件", file_id)
+        return SessionFile.model_validate(row)
 
 
 __all__ = ["SessionFileRepository"]

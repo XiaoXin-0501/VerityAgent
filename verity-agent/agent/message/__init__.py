@@ -1,33 +1,18 @@
-"""消息领域模型。
-
-结构：
-
-- ``enum.py``   ：消息角色/状态/来源等枚举；
-- ``models.py`` ：5 个消息类 + 图片/文件/工具/产物等支撑模型 + ``StoredMessage``；
-- ``codec.py``  ：领域消息 ↔ ``conversation_messages.content`` JSONB 的编解码。
-
-典型用法::
-
-    from agent.message import UserMessage, ImageRef, encode_content
-
-    message = UserMessage(
-        conversation_id=conversation_id,
-        content="这张图里是什么？",
-        images=[ImageRef(url="https://cdn.example.com/a.png", detail="high")],
-    )
-    payload = encode_content(message)   # 写入 conversation_messages.content
-"""
+"""消息领域模型 v2 与存储编解码。"""
 
 from .codec import (
     MESSAGE_CONTENT_VERSION,
+    content_version,
     decode_content,
     decode_row,
     decode_stored_row,
     encode_content,
 )
+from config.message import MessageConfig
 from .enum import (
     ArtifactKind,
     ImageDetail,
+    MessageContentVersion,
     MessageRole,
     MessageStatus,
     SystemOrigin,
@@ -40,9 +25,7 @@ from .models import (
     BaseMessage,
     FileRef,
     ImageRef,
-    Message,
-    MessageModel,
-    PromptSection,
+    RawMessage,
     StoredMessage,
     SystemMessage,
     Thinking,
@@ -52,17 +35,19 @@ from .models import (
     ToolMessage,
     Turn,
     UserMessage,
-    utcnow,
 )
 
 __all__ = [
-    # 编解码
+    # codec
     "MESSAGE_CONTENT_VERSION",
     "encode_content",
     "decode_content",
     "decode_row",
     "decode_stored_row",
-    # 枚举
+    "content_version",
+    # config
+    "MessageConfig",
+    # enums
     "MessageRole",
     "MessageStatus",
     "SystemOrigin",
@@ -70,15 +55,16 @@ __all__ = [
     "ToolCallStatus",
     "ArtifactKind",
     "TurnStatus",
-    # 消息类
-    "MessageModel",
+    "MessageContentVersion",
+    # models
     "BaseMessage",
     "SystemMessage",
     "UserMessage",
     "AssistantMessage",
     "ToolMessage",
-    "Message",
-    # 支撑模型
+    "RawMessage",
+    "StoredMessage",
+    "Turn",
     "ImageRef",
     "FileRef",
     "Thinking",
@@ -86,8 +72,4 @@ __all__ = [
     "Artifact",
     "ToolFile",
     "ToolImage",
-    "StoredMessage",
-    "Turn",
-    "PromptSection",
-    "utcnow",
 ]

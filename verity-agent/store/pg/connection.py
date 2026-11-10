@@ -40,7 +40,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
 
 from exception import PGConnectionError
-from setting import PGConfig, settings
+from config import PGConfig, settings
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class PGConnectionManager:
             host=str(self._config.server),
             port=str(self._config.port),
             user=str(self._config.user),
-            password=str(self._config.password),
+            password=self._config.password.get_secret_value(),
             dbname=str(self._config.db),
             connect_timeout=str(self._connect_timeout),
         )

@@ -70,7 +70,7 @@ def test_user_message_roundtrip() -> None:
     )
     payload = encode_content(message)
 
-    assert payload["v"] == 1
+    assert payload["v"] == 2
     assert payload["text"] == message.content
     assert payload["images"][0]["url"] == "https://cdn.example.com/a.png"
     assert "id" not in payload
@@ -113,7 +113,7 @@ def test_assistant_message_roundtrip() -> None:
     message = AssistantMessage(
         conversation_id=CONVERSATION_ID,
         content="我先查一下。",
-        thinking=Thinking(text="需要检索知识库", signature="sig-1"),
+        thinking=[Thinking(text="需要检索知识库", signature="sig-1")],
         tool_calls=[
             ToolCall(
                 call_id="call_1",
@@ -135,7 +135,7 @@ def test_assistant_message_roundtrip() -> None:
 
     assert payload["is_prefix"] is True
     assert payload["tool_calls"][0]["call_id"] == "call_1"
-    assert payload["thinking"]["signature"] == "sig-1"
+    assert payload["thinking"][0]["signature"] == "sig-1"
 
     decoded = _decode(
         message.role,

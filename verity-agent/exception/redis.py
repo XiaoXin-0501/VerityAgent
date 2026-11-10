@@ -15,7 +15,7 @@ from .base import VerityError
 class RedisError(VerityError):
     """Redis 相关异常基类。"""
 
-    code = "redis_error"
+    code = "REDIS_ERROR"
     http_status = 500
     default_message = "Redis 操作失败"
 
@@ -23,15 +23,16 @@ class RedisError(VerityError):
 class RedisConnectionError(RedisError):
     """连接不上 Redis、连接中断或命令超时。"""
 
-    code = "redis_connection_error"
+    code = "REDIS_CONNECTION_ERROR"
     http_status = 503
     default_message = "Redis 连接失败"
+    retryable = True
 
 
 class RedisCommandError(RedisError):
     """Redis 命令执行失败（参数、类型、服务端错误等）。"""
 
-    code = "redis_command_error"
+    code = "REDIS_COMMAND_ERROR"
     http_status = 500
     default_message = "Redis 命令执行失败"
 
@@ -39,7 +40,7 @@ class RedisCommandError(RedisError):
 class RedisKeyError(RedisError):
     """Redis key 前缀或后缀不合法。"""
 
-    code = "redis_key_error"
+    code = "REDIS_KEY_ERROR"
     http_status = 400
     default_message = "Redis key 不合法"
 

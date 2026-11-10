@@ -1,12 +1,30 @@
 """与 PostgreSQL 表字段一一对应的状态枚举与状态机。
 
-所有枚举都是 ``str`` 子类，既方便直接写进 SQL，也便于 JSON 序列化。
-状态机只描述"允许的迁移"，真正的校验在仓库层（``repositories/base.py``）。
+所有枚举都是 ``StrEnum``：既能直接作为 SQL 参数，也能 JSON 序列化。
+状态机只描述允许的迁移；真正的校验在仓库层。
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
+
+__all__ = [
+    "UserRole",
+    "UserStatus",
+    "KnowledgeBaseStatus",
+    "DocumentStatus",
+    "ConversationStatus",
+    "RunStatus",
+    "MessageRole",
+    "MessageStatus",
+    "UserMessageStatus",
+    "SessionFileStatus",
+    "IndexingStage",
+    "IndexingStatus",
+    "DOCUMENT_TRANSITIONS",
+    "SESSION_FILE_TRANSITIONS",
+    "MAX_USER_FACTS",
+]
 
 
 class UserRole(StrEnum):
@@ -18,6 +36,9 @@ class UserStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
     LOCKED = "locked"
+    # 跨存储删除状态机（先软删 PG，再删 Weaviate/Neo4j/MinIO）
+    DELETING = "deleting"
+    DELETED = "deleted"
 
 
 class KnowledgeBaseStatus(StrEnum):
@@ -29,7 +50,7 @@ class KnowledgeBaseStatus(StrEnum):
 class DocumentStatus(StrEnum):
     """documents.status 状态机。
 
-    ``completed`` 的语义是"解析 + Weaviate 写入 + Neo4j 引用建完"三者都成功，
+    ``completed`` 的语义是“解析 + Weaviate 写入 + Neo4j 建图”三者都成功（D-56），
     解析完不能直接置 completed。
     """
 
@@ -44,11 +65,12 @@ class DocumentStatus(StrEnum):
 class ConversationStatus(StrEnum):
     ACTIVE = "active"
     ARCHIVED = "archived"
+    DELETING = "deleting"
     DELETED = "deleted"
 
 
 class RunStatus(StrEnum):
-    """conversations.current_run_status：单次 Agent 运行的状态。"""
+    """conversations.current_run_status：单次 Agent 运行的状态（租约投影）。"""
 
     IDLE = "idle"
     RUNNING = "running"
@@ -56,6 +78,7 @@ class RunStatus(StrEnum):
     PAUSED = "paused"
     FAILED = "failed"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 class MessageRole(StrEnum):
@@ -73,11 +96,12 @@ class MessageStatus(StrEnum):
 
 
 class UserMessageStatus(StrEnum):
-    """user_messages 暂存行状态：worker 领走 pending 后置 processing。"""
+    """user_messages 暂存行状态；dead 表示超过重试上限。"""
 
     PENDING = "pending"
     PROCESSING = "processing"
     FAILED = "failed"
+    DEAD = "dead"
 
 
 class SessionFileStatus(StrEnum):
@@ -87,6 +111,42 @@ class SessionFileStatus(StrEnum):
     FAILED = "failed"
     DELETING = "deleting"
     DELETED = "deleted"
+
+
+class IndexingStage(StrEnum):
+    """documents.index_stage：入库/删除任务阶段（RAG 文档 §8）。"""
+
+    ACCEPTED = "ACCEPTED"
+    FETCHING = "FETCHING"
+    PARSING = "PARSING"
+    NORMALIZING = "NORMALIZING"
+    CLASSIFYING = "CLASSIFYING"
+    PROCESSING = "PROCESSING"
+    CHUNKING = "CHUNKING"
+    DEDUPING = "DEDUPING"
+    ENRICHING = "ENRICHING"
+    DESCRIBING = "DESCRIBING"
+    EMBEDDING = "EMBEDDING"
+    VECTOR_UPSERT = "VECTOR_UPSERT"
+    GRAPH_UPSERT = "GRAPH_UPSERT"
+    COMMITTING = "COMMITTING"
+    DONE = "DONE"
+    # 删除 job
+    DELETING_PG = "DELETING_PG"
+    DELETING_VECTOR = "DELETING_VECTOR"
+    DELETING_GRAPH = "DELETING_GRAPH"
+    DELETING_OBJECT = "DELETING_OBJECT"
+
+
+class IndexingStatus(StrEnum):
+    """IndexingJobView.status 的代码映射；不落 documents 列（D-77）。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    DEAD = "dead"
 
 
 # —— 允许的状态迁移 ——

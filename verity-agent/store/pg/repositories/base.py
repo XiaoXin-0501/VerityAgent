@@ -111,24 +111,48 @@ def to_jsonb(value: Any) -> Jsonb:
 
 
 def normalize_message_content(content: Any) -> dict[str, Any]:
-    """校验并规范化消息 content（固定 JSON 协议）。"""
-    from ..models.conversation import MessageContent  # 延迟导入，避免模型层反向依赖
+    """校验并规范化消息 content（只做存储层的最低限度检查）。
 
-    if isinstance(content, str):
-        content = {"type": "text", "text": content}
+    消息协议的完整校验在 ``agent.message.codec``（v2；v1 兼容读取）。
+    仓储层允许调用方直接传字符串、领域消息或已序列化的 dict，避免存储层
+    反向依赖消息领域模型而破坏分层。
+    """
+    # 领域消息走统一 codec，保证落库一定是 v2 协议
     try:
-        if isinstance(content, MessageContent):
-            model = content
-        elif isinstance(content, Mapping):
-            model = MessageContent.model_validate(content)
-        else:
-            raise TypeError(type(content).__name__)
-    except (TypeError, ValueError) as exc:
+        from agent.message import BaseMessage, encode_content
+
+        if isinstance(content, BaseMessage):
+            return encode_content(content)
+    except ImportError:  # pragma: no cover - 消息模块总是可用
+        pass
+
+    if isinstance(content, BaseModel):
+        content = content.model_dump(mode="json", by_alias=True)
+    if isinstance(content, str):
+        content = {"v": 2, "text": content}
+    if not isinstance(content, Mapping):
         raise ValidationError(
-            "消息 content 不符合固定 JSON 协议",
-            detail={"error": str(exc)},
-        ) from exc
-    return model.model_dump(mode="json")
+            "消息 content 必须是对象或字符串",
+            detail={"type": type(content).__name__},
+        )
+
+    payload = dict(content)
+    version = payload.setdefault("v", 2)
+    if not isinstance(version, int) or version < 1:
+        raise ValidationError(
+            "消息 content 缺少合法的协议版本 v",
+            detail={"v": version},
+        )
+    text = payload.get("text", "")
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        raise ValidationError(
+            "消息 content.text 必须是字符串",
+            detail={"type": type(text).__name__},
+        )
+    payload["text"] = text
+    return payload
 
 
 def normalize_extension(extension: str) -> str:

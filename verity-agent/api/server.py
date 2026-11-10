@@ -1,22 +1,41 @@
-# main.py
+"""开发启动入口。
+
+从 ``verity-agent`` 目录运行::
+
+    uv run python -m api.server
+
+等价于 ``uvicorn api.app:app --reload``。生产环境使用进程管理器启动
+``api.app:app``，不要开 reload。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+
 import uvicorn
-from fastapi import FastAPI
 
-import routers
-from exception import register_exception_handlers
+from config import settings
 
-app = FastAPI()
+from .app import app
 
-register_exception_handlers(app)
+__all__ = ["app", "main"]
 
-app.include_router(routers.router)
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+def main() -> None:
+    uvicorn.run(
+        "api.app:app",
+        host=settings.server.host,
+        port=settings.server.port,
+        reload=settings.server.reload,
+        workers=None if settings.server.reload else settings.server.workers,
+        root_path=settings.server.root_path,
+        loop="none" if sys.platform == "win32" else "auto",
+    )
+
 
 if __name__ == "__main__":
-    # 推荐传入字符串形式 "main:app"，可保证热重载正常生效
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,  # 开发环境开启
-        # workers=4   # 生产环境开启多进程，与 reload 不可同时生效
-    )
+    main()

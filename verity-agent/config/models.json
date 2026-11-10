@@ -1,0 +1,45 @@
+{
+  "models": [
+    {
+      "id": "chat-main",
+      "provider": "openai",
+      "model": "deepseek-flash",
+      "kind": "chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "api_style": "openai_chat",
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "max_context_tokens": 1048576,
+        "max_output_tokens": 393216
+      },
+      "pricing": {
+        "input_per_million": 2,
+        "output_per_million": 8,
+        "currency": "CNY"
+      },
+      "defaults": {
+        "temperature": 0.3
+      }
+    },
+    {
+      "id": "embed-default",
+      "provider": "openai",
+      "model": "qwen3.7-text-embedding-flash",
+      "kind": "embedding",
+      "base_url": "https://maas.qianwenaiapi.com/compatible-mode/v1",
+      "api_key_env": "QWEN_API_KEY",
+      "enabled": true,
+      "capabilities": {
+        "dimensions": 1024,
+        "max_batch_size": 64,
+        "supports_dimensions": true
+      },
+      "pricing": {
+        "input_per_million": 0.125,
+        "currency": "CNY"
+      }
+    }
+  ]
+}

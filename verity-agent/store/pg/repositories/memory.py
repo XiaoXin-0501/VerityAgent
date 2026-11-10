@@ -1,8 +1,9 @@
 """user_memory / user_messages 仓库。
 
 - ``user_memory`` 走独立 ``revision`` 列做乐观锁，冲突重试；
-- ``user_messages`` 是长期记忆 worker 的任务队列，用
-  ``FOR UPDATE SKIP LOCKED`` 领取，重启后重新扫 pending 即可断点续跑。
+  ``facts_revision`` 是事实集版本，用于事实缓存失效（D-50）。
+- ``user_messages`` 是长期记忆 worker 的任务队列：回合终态置 ``ready_at``，
+  worker 按用户分批领取，``FOR UPDATE SKIP LOCKED`` + 租约 + 退避重试。
 """
 
 from __future__ import annotations
@@ -37,8 +38,11 @@ from .base import (
     as_uuid,
     normalize_message_content,
     pagination,
+    require_text,
     to_jsonb,
 )
+
+__all__ = ["UserMemoryRepository", "UserMessageRepository"]
 
 
 class UserMemoryRepository(BaseRepository):
@@ -85,13 +89,10 @@ class UserMemoryRepository(BaseRepository):
         expected_revision: int,
         value: Any = _UNSET,
         fact_count: Any = _UNSET,
+        facts_revision: Any = _UNSET,
         conn: AsyncConnection[Row] | None = None,
     ) -> UserMemory:
-        """带版本号的更新。
-
-        冲突（无行返回但记录存在）抛 :class:`OptimisticLockError`，
-        调用方可以重读后重试，或直接用 :meth:`update_with_retry`。
-        """
+        """带版本号的更新；冲突抛 :class:`OptimisticLockError`。"""
         if expected_revision < 0:
             raise ValidationError("expected_revision 不能为负数")
 
@@ -115,6 +116,11 @@ class UserMemoryRepository(BaseRepository):
                 raise MemoryFactLimitExceeded(fact_count, MAX_USER_FACTS)
             sets.append("fact_count = %s")
             params.append(fact_count)
+        if facts_revision is not _UNSET:
+            if facts_revision < 0:
+                raise ValidationError("facts_revision 不能为负数")
+            sets.append("facts_revision = %s")
+            params.append(facts_revision)
         if len(sets) == 2:  # 只加了 revision / updated_at，说明没有任何业务字段
             raise ValidationError("没有需要更新的字段")
 
@@ -166,7 +172,9 @@ class UserMemoryRepository(BaseRepository):
             current = await self.get_or_create(user_id)
             change = mutate(current)
             if change is None or (
-                change.value is None and change.fact_count is None
+                change.value is None
+                and change.fact_count is None
+                and change.facts_revision is None
             ):
                 return current
             try:
@@ -176,6 +184,11 @@ class UserMemoryRepository(BaseRepository):
                     value=change.value if change.value is not None else _UNSET,
                     fact_count=(
                         change.fact_count if change.fact_count is not None else _UNSET
+                    ),
+                    facts_revision=(
+                        change.facts_revision
+                        if change.facts_revision is not None
+                        else _UNSET
                     ),
                 )
             except OptimisticLockError:
@@ -195,10 +208,20 @@ class UserMemoryRepository(BaseRepository):
 
 
 class UserMessageRepository(BaseRepository):
-    """长期记忆暂存队列。
+    """长期记忆暂存队列（可恢复、可重试）。
 
-    状态机：``pending -> processing -> (成功删除 | 失败置 failed)``。
-    删除只允许在 ``user_memory`` 更新成功之后执行，失败留 failed 待重试。
+    状态机::
+
+        pending ──(回合终态 ready_at)──> pending(ready)
+           └─(claim)─> processing ──(成功)──> 删除
+                         ├─(失败)─> failed ──(退避后 claim)──> processing
+                         └─(超过上限)─> dead
+
+    - 只领取 ``ready_at IS NOT NULL`` 的行，避免在助手回复前抽“再优化一下”
+      这类指代句；
+    - ``processing`` 有租约，过期可被重新领取；
+    - 一批只包含一个用户，保证画像/事实 apply 目标唯一；
+    - 成功删除暂存行，失败保留证据并按退避重试。
     """
 
     async def enqueue(
@@ -238,42 +261,204 @@ class UserMessageRepository(BaseRepository):
         assert row is not None
         return UserMessage.model_validate(row)
 
-    async def claim_batch(
+    async def mark_ready(
         self,
-        limit: int = 20,
+        conversation_id: UUID | str,
         *,
         conn: AsyncConnection[Row] | None = None,
+    ) -> int:
+        """回合终态：把该会话所有未置位的暂存行标为可抽取。"""
+        async with self._transaction(conn) as c:
+            return await self._execute(
+                c,
+                """
+                UPDATE user_messages
+                SET ready_at = now(), updated_at = now()
+                WHERE conversation_id = %s
+                  AND ready_at IS NULL
+                  AND status <> 'dead'
+                """,
+                (as_uuid(conversation_id),),
+            )
+
+    async def claim_batch(
+        self,
+        worker_id: str,
+        *,
+        user_id: UUID | str | None = None,
+        limit: int = 20,
+        lease_seconds: int = 60,
+        conn: AsyncConnection[Row] | None = None,
     ) -> list[UserMessage]:
-        """领取一批 pending 消息并置为 processing（SKIP LOCKED，多 worker 安全）。"""
+        """领取一个用户的一批可处理消息并置为 processing。
+
+        - ``user_id`` 为空时，优先选择最早有可处理消息的用户；
+        - ``FOR UPDATE SKIP LOCKED`` 保证多 worker 不重复领取；
+        - ``processing`` 租约过期（``locked_until < now()``）可重新领取。
+        """
         limit, _ = pagination(limit, 0)
+        if lease_seconds <= 0:
+            raise ValidationError("lease_seconds 必须 > 0")
+        worker = require_text(worker_id, "worker_id")
+        scope = as_uuid(user_id) if user_id is not None else None
         async with self._transaction(conn) as c:
             rows = await self._fetch_all(
                 c,
                 """
-                UPDATE user_messages SET status = 'processing'
-                WHERE id IN (
-                    SELECT id FROM user_messages
-                    WHERE status = 'pending'
+                WITH candidate_user AS (
+                    SELECT user_id
+                    FROM user_messages
+                    WHERE (
+                            (status IN ('pending', 'failed')
+                             AND ready_at IS NOT NULL
+                             AND (next_retry_at IS NULL OR next_retry_at <= now()))
+                         OR (status = 'processing'
+                             AND (locked_until IS NULL OR locked_until < now()))
+                          )
+                      AND (%s::uuid IS NULL OR user_id = %s::uuid)
+                    ORDER BY created_at
+                    LIMIT 1
+                ),
+                claimed AS (
+                    SELECT id
+                    FROM user_messages
+                    WHERE user_id = (SELECT user_id FROM candidate_user)
+                      AND (
+                            (status IN ('pending', 'failed')
+                             AND ready_at IS NOT NULL
+                             AND (next_retry_at IS NULL OR next_retry_at <= now()))
+                         OR (status = 'processing'
+                             AND (locked_until IS NULL OR locked_until < now()))
+                          )
                     ORDER BY created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING *
+                UPDATE user_messages um
+                SET status = 'processing',
+                    locked_by = %s,
+                    locked_until = now() + make_interval(secs => %s),
+                    updated_at = now()
+                FROM claimed
+                WHERE um.id = claimed.id
+                RETURNING um.*
                 """,
-                (limit,),
+                (scope, scope, limit, worker, lease_seconds),
             )
         rows.sort(key=lambda row: row["created_at"])
         return self._models(UserMessage, rows)
 
-    async def list_pending(
+    async def mark_processing_done(
+        self,
+        message_ids: Sequence[UUID | str],
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> int:
+        """完成后删除暂存行（成功路径）。"""
+        ids = [as_uuid(mid) for mid in message_ids]
+        if not ids:
+            return 0
+        async with self._transaction(conn) as c:
+            return await self._execute(
+                c,
+                "DELETE FROM user_messages WHERE id = ANY(%s) AND status = 'processing'",
+                (ids,),
+            )
+
+    async def mark_failed(
+        self,
+        message_ids: Sequence[UUID | str],
+        *,
+        error: str,
+        retry_backoff_s: float = 30.0,
+        max_attempts: int = 5,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> int:
+        """失败回退：``attempt_count++``、写错误、按指数退避；超限置 dead。"""
+        ids = [as_uuid(mid) for mid in message_ids]
+        if not ids:
+            return 0
+        if retry_backoff_s <= 0:
+            raise ValidationError("retry_backoff_s 必须 > 0")
+        if max_attempts < 1:
+            raise ValidationError("max_attempts 必须 >= 1")
+        async with self._transaction(conn) as c:
+            return await self._execute(
+                c,
+                """
+                UPDATE user_messages
+                SET status = CASE
+                        WHEN attempt_count + 1 >= %s THEN 'dead'
+                        ELSE 'failed'
+                    END,
+                    attempt_count = attempt_count + 1,
+                    last_error = %s,
+                    next_retry_at = CASE
+                        WHEN attempt_count + 1 >= %s THEN NULL
+                        ELSE now() + make_interval(
+                            secs => %s * power(2, attempt_count)
+                        )
+                    END,
+                    locked_until = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id = ANY(%s) AND status = 'processing'
+                """,
+                (max_attempts, error, max_attempts, retry_backoff_s, ids),
+            )
+
+    async def delete_batch(
+        self,
+        message_ids: Sequence[UUID | str],
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> int:
+        """按 id 删除暂存行（不校验状态，管理/清理用）。"""
+        ids = [as_uuid(mid) for mid in message_ids]
+        if not ids:
+            return 0
+        async with self._transaction(conn) as c:
+            return await self._execute(
+                c, "DELETE FROM user_messages WHERE id = ANY(%s)", (ids,)
+            )
+
+    async def count_ready(
+        self,
+        *,
+        user_id: UUID | str | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> int:
+        conditions = [
+            "ready_at IS NOT NULL",
+            "(status IN ('pending', 'failed')"
+            " AND (next_retry_at IS NULL OR next_retry_at <= now()))",
+        ]
+        params: list[Any] = []
+        if user_id is not None:
+            conditions.append("user_id = %s")
+            params.append(as_uuid(user_id))
+        async with self._transaction(conn) as c:
+            value = await self._fetch_val(
+                c,
+                f"SELECT count(*) FROM user_messages WHERE {' AND '.join(conditions)}",
+                params,
+            )
+        return int(value or 0)
+
+    async def list_ready(
         self,
         limit: int = 20,
         *,
         user_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[UserMessage]:
+        """只读查看可处理行（不领取）；调试/监控用。"""
         limit, _ = pagination(limit, 0)
-        conditions = ["status = 'pending'"]
+        conditions = [
+            "ready_at IS NOT NULL",
+            "status IN ('pending', 'failed')",
+            "(next_retry_at IS NULL OR next_retry_at <= now())",
+        ]
         params: list[Any] = []
         if user_id is not None:
             conditions.append("user_id = %s")
@@ -299,6 +484,7 @@ class UserMessageRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> UserMessage:
+        """管理/恢复用：显式改状态；正常 worker 走 claim/failed/done。"""
         try:
             status = UserMessageStatus(status)
         except ValueError as exc:
@@ -307,7 +493,8 @@ class UserMessageRepository(BaseRepository):
             row = await self._fetch_one(
                 c,
                 """
-                UPDATE user_messages SET status = %s
+                UPDATE user_messages
+                SET status = %s, updated_at = now()
                 WHERE id = %s
                 RETURNING *
                 """,
@@ -316,60 +503,3 @@ class UserMessageRepository(BaseRepository):
         if row is None:
             raise NotFoundError("暂存消息", message_id)
         return UserMessage.model_validate(row)
-
-    async def mark_failed(
-        self,
-        message_ids: Sequence[UUID | str],
-        *,
-        conn: AsyncConnection[Row] | None = None,
-    ) -> int:
-        """把处理失败的消息置 failed，等待下一轮重试。"""
-        ids = [as_uuid(mid) for mid in message_ids]
-        if not ids:
-            return 0
-        async with self._transaction(conn) as c:
-            return await self._execute(
-                c,
-                """
-                UPDATE user_messages SET status = 'failed'
-                WHERE id = ANY(%s) AND status = 'processing'
-                """,
-                (ids,),
-            )
-
-    async def delete_batch(
-        self,
-        message_ids: Sequence[UUID | str],
-        *,
-        conn: AsyncConnection[Row] | None = None,
-    ) -> int:
-        """长期记忆 apply 成功后删除暂存行。"""
-        ids = [as_uuid(mid) for mid in message_ids]
-        if not ids:
-            return 0
-        async with self._transaction(conn) as c:
-            return await self._execute(
-                c, "DELETE FROM user_messages WHERE id = ANY(%s)", (ids,)
-            )
-
-    async def count_pending(
-        self,
-        *,
-        user_id: UUID | str | None = None,
-        conn: AsyncConnection[Row] | None = None,
-    ) -> int:
-        conditions = ["status = 'pending'"]
-        params: list[Any] = []
-        if user_id is not None:
-            conditions.append("user_id = %s")
-            params.append(as_uuid(user_id))
-        async with self._transaction(conn) as c:
-            value = await self._fetch_val(
-                c,
-                f"SELECT count(*) FROM user_messages WHERE {' AND '.join(conditions)}",
-                params,
-            )
-        return int(value or 0)
-
-
-__all__ = ["UserMemoryRepository", "UserMessageRepository"]

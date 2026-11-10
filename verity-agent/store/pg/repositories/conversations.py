@@ -73,7 +73,7 @@ class ConversationRepository(BaseRepository):
     ) -> Conversation | None:
         sql = "SELECT * FROM conversations WHERE id = %s"
         if not include_deleted:
-            sql += " AND status <> 'deleted'"
+            sql += " AND deleted_at IS NULL"
         async with self._transaction(conn) as c:
             row = await self._fetch_one(c, sql, (as_uuid(conversation_id),))
         return self._model(Conversation, row)
@@ -91,7 +91,7 @@ class ConversationRepository(BaseRepository):
                 c,
                 """
                 SELECT * FROM conversations
-                WHERE id = %s AND user_id = %s AND status <> 'deleted'
+                WHERE id = %s AND user_id = %s AND deleted_at IS NULL
                 """,
                 (as_uuid(conversation_id), as_uuid(user_id)),
             )
@@ -113,7 +113,7 @@ class ConversationRepository(BaseRepository):
         conditions = ["user_id = %s"]
         params: list[Any] = [as_uuid(user_id)]
         if status is None:
-            conditions.append("status <> 'deleted'")
+            conditions.append("deleted_at IS NULL")
         else:
             conditions.append("status = %s")
             params.append(_param(status))
@@ -144,7 +144,7 @@ class ConversationRepository(BaseRepository):
                 c,
                 """
                 UPDATE conversations SET title = %s
-                WHERE id = %s AND status <> 'deleted'
+                WHERE id = %s AND deleted_at IS NULL
                 RETURNING *
                 """,
                 (title, as_uuid(conversation_id)),
@@ -187,7 +187,7 @@ class ConversationRepository(BaseRepository):
                 c,
                 """
                 UPDATE conversations SET current_run_status = %s
-                WHERE id = %s AND status <> 'deleted'
+                WHERE id = %s AND deleted_at IS NULL
                 RETURNING *
                 """,
                 (_param(run_status), as_uuid(conversation_id)),
@@ -195,6 +195,134 @@ class ConversationRepository(BaseRepository):
         if row is None:
             raise NotFoundError("会话", conversation_id)
         return Conversation.model_validate(row)
+
+    # ——————————————————— run 租约（P0-8） ———————————————————
+
+    async def try_acquire_run(
+        self,
+        conversation_id: UUID | str,
+        run_id: UUID | str,
+        *,
+        lease_seconds: int,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Conversation | None:
+        """抢占会话的 run 租约；已被活跃 run 占用时返回 None。
+
+        条件更新保证同一会话同一时刻只有一个 run；调用方拿到 None 时应返回
+        409（或进入排队），不能并行写消息/工具链。
+        """
+        if lease_seconds <= 0:
+            raise ValidationError("lease_seconds 必须 > 0")
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE conversations
+                SET current_run_id = %s,
+                    run_started_at = now(),
+                    lock_expires_at = now() + make_interval(secs => %s),
+                    current_run_status = 'running'
+                WHERE id = %s
+                  AND deleted_at IS NULL
+                  AND (current_run_id IS NULL OR lock_expires_at < now())
+                RETURNING *
+                """,
+                (as_uuid(run_id), lease_seconds, as_uuid(conversation_id)),
+            )
+        return self._model(Conversation, row)
+
+    async def acquire_run(
+        self,
+        conversation_id: UUID | str,
+        run_id: UUID | str,
+        *,
+        lease_seconds: int,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Conversation:
+        conversation = await self.try_acquire_run(
+            conversation_id, run_id, lease_seconds=lease_seconds, conn=conn
+        )
+        if conversation is None:
+            raise ConflictError(
+                "会话已有活跃 run",
+                detail={
+                    "conversation_id": str(conversation_id),
+                    "run_id": str(run_id),
+                },
+            )
+        return conversation
+
+    async def heartbeat_run(
+        self,
+        conversation_id: UUID | str,
+        run_id: UUID | str,
+        *,
+        lease_seconds: int,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> bool:
+        """续租；只有仍持有该 run 租约时返回 True。"""
+        if lease_seconds <= 0:
+            raise ValidationError("lease_seconds 必须 > 0")
+        async with self._transaction(conn) as c:
+            affected = await self._execute(
+                c,
+                """
+                UPDATE conversations
+                SET lock_expires_at = now() + make_interval(secs => %s)
+                WHERE id = %s AND current_run_id = %s AND deleted_at IS NULL
+                """,
+                (lease_seconds, as_uuid(conversation_id), as_uuid(run_id)),
+            )
+        return affected > 0
+
+    async def release_run(
+        self,
+        conversation_id: UUID | str,
+        run_id: UUID | str,
+        *,
+        final_status: RunStatus,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Conversation | None:
+        """释放租约并置终态；租约已不属于该 run 时返回 None。"""
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE conversations
+                SET current_run_id = NULL,
+                    lock_expires_at = NULL,
+                    current_run_status = %s
+                WHERE id = %s AND current_run_id = %s
+                RETURNING *
+                """,
+                (_param(final_status), as_uuid(conversation_id), as_uuid(run_id)),
+            )
+        return self._model(Conversation, row)
+
+    async def clear_expired_run(
+        self,
+        conversation_id: UUID | str,
+        *,
+        final_status: RunStatus = RunStatus.FAILED,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Conversation | None:
+        """进程崩溃后的收敛：租约过期时清空 current_run_id。"""
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE conversations
+                SET current_run_id = NULL,
+                    lock_expires_at = NULL,
+                    current_run_status = %s
+                WHERE id = %s
+                  AND current_run_id IS NOT NULL
+                  AND lock_expires_at < now()
+                RETURNING *
+                """,
+                (_param(final_status), as_uuid(conversation_id)),
+            )
+        return self._model(Conversation, row)
 
     async def record_turn(
         self,
@@ -221,7 +349,7 @@ class ConversationRepository(BaseRepository):
                 SET turn_count = turn_count + %s,
                     total_input_tokens = total_input_tokens + %s,
                     total_output_tokens = total_output_tokens + %s
-                WHERE id = %s AND status <> 'deleted'
+                WHERE id = %s AND deleted_at IS NULL
                 RETURNING *
                 """,
                 (
@@ -245,10 +373,75 @@ class ConversationRepository(BaseRepository):
     async def mark_deleted(
         self, conversation_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> Conversation:
-        """软删除会话；原始消息保留在 conversation_messages 供审计。"""
-        return await self.set_status(
-            conversation_id, ConversationStatus.DELETED, conn=conn
-        )
+        """发起删除：先软删 PG，读路径立即过滤；跨存储清理由 worker 继续。
+
+        原始消息保留在 ``conversation_messages``，直到删除状态机完成硬删。
+        """
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE conversations
+                SET status = 'deleting',
+                    deleted_at = COALESCE(deleted_at, now())
+                WHERE id = %s AND status <> 'deleted'
+                RETURNING *
+                """,
+                (as_uuid(conversation_id),),
+            )
+        if row is None:
+            raise NotFoundError("会话", conversation_id)
+        return Conversation.model_validate(row)
+
+    async def record_delete_failure(
+        self,
+        conversation_id: UUID | str,
+        error: str,
+        *,
+        retry_at: Any | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Conversation:
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE conversations
+                SET delete_attempts = delete_attempts + 1,
+                    delete_error = %s,
+                    delete_next_retry_at = %s
+                WHERE id = %s
+                RETURNING *
+                """,
+                (error, retry_at, as_uuid(conversation_id)),
+            )
+        if row is None:
+            raise NotFoundError("会话", conversation_id)
+        return Conversation.model_validate(row)
+
+    async def finish_deletion(
+        self,
+        conversation_id: UUID | str,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Conversation:
+        """跨存储清理完成：置 deleted tombstone，读路径永久过滤。"""
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE conversations
+                SET status = 'deleted',
+                    deleted_at = COALESCE(deleted_at, now()),
+                    delete_error = NULL,
+                    delete_next_retry_at = NULL
+                WHERE id = %s
+                RETURNING *
+                """,
+                (as_uuid(conversation_id),),
+            )
+        if row is None:
+            raise NotFoundError("会话", conversation_id)
+        return Conversation.model_validate(row)
 
 
 class ConversationMessageRepository(BaseRepository):
@@ -270,11 +463,18 @@ class ConversationMessageRepository(BaseRepository):
         *,
         status: MessageStatus = MessageStatus.COMPLETED,
         seq_no: int | None = None,
+        client_message_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> ConversationMessage:
         async with self._transaction(conn) as c:
             return await self._append(
-                c, conversation_id, role, content, status=status, seq_no=seq_no
+                c,
+                conversation_id,
+                role,
+                content,
+                status=status,
+                seq_no=seq_no,
+                client_message_id=client_message_id,
             )
 
     async def _append(
@@ -286,13 +486,14 @@ class ConversationMessageRepository(BaseRepository):
         *,
         status: MessageStatus,
         seq_no: int | None,
+        client_message_id: UUID | str | None = None,
     ) -> ConversationMessage:
         conversation_uuid = as_uuid(conversation_id)
         payload = normalize_message_content(content)
 
         locked = await self._fetch_one(
             conn,
-            "SELECT id FROM conversations WHERE id = %s FOR UPDATE",
+            "SELECT id FROM conversations WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
             (conversation_uuid,),
         )
         if locked is None:
@@ -314,13 +515,14 @@ class ConversationMessageRepository(BaseRepository):
             conn,
             """
             INSERT INTO conversation_messages
-                (conversation_id, seq_no, role, content, status)
-            VALUES (%s, %s, %s, %s, %s)
+                (conversation_id, seq_no, client_message_id, role, content, status)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
                 conversation_uuid,
                 seq_no,
+                as_uuid(client_message_id) if client_message_id is not None else None,
                 _param(role),
                 to_jsonb(payload),
                 _param(status),
@@ -335,18 +537,38 @@ class ConversationMessageRepository(BaseRepository):
         assert row is not None
         return ConversationMessage.model_validate(row)
 
+    async def find_by_client_message_id(
+        self,
+        conversation_id: UUID | str,
+        client_message_id: UUID | str,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> ConversationMessage | None:
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                SELECT * FROM conversation_messages
+                WHERE conversation_id = %s AND client_message_id = %s
+                """,
+                (as_uuid(conversation_id), as_uuid(client_message_id)),
+            )
+        return self._model(ConversationMessage, row)
+
     async def append_user_turn(
         self,
         user_id: UUID | str,
         conversation_id: UUID | str,
         content: Any,
         *,
+        client_message_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> tuple[ConversationMessage, UserMessage]:
         """写用户消息 + 同步写入长期记忆暂存表（同一事务双写）。
 
         设计文档要求落原始消息和落 ``user_messages`` 必须一次事务完成，
-        否则 worker 会漏扫或产生无主暂存行。
+        否则 worker 会漏扫或产生无主暂存行。暂存行此时 ``ready_at=NULL``，
+        回合终态后再置位。
         """
         async with self._transaction(conn) as c:
             message = await self._append(
@@ -356,6 +578,7 @@ class ConversationMessageRepository(BaseRepository):
                 content,
                 status=MessageStatus.COMPLETED,
                 seq_no=None,
+                client_message_id=client_message_id,
             )
             queued = await self._user_messages.enqueue(
                 user_id,
@@ -482,11 +705,41 @@ class ConversationMessageRepository(BaseRepository):
             row = await self._fetch_one(
                 c,
                 """
-                UPDATE conversation_messages SET status = %s
+                UPDATE conversation_messages
+                SET status = %s, updated_at = now()
                 WHERE id = %s
                 RETURNING *
                 """,
                 (_param(status), as_uuid(message_id)),
+            )
+        if row is None:
+            raise NotFoundError("消息", message_id)
+        return ConversationMessage.model_validate(row)
+
+    async def finalize(
+        self,
+        message_id: UUID | str,
+        *,
+        content: Any,
+        status: MessageStatus,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> ConversationMessage:
+        """assistant 流式消息的**一次**终态写入（D-01/D-25）。
+
+        流式过程中不逐 delta 写库；结束时把完整 content、thinking、
+        tool_calls、generation 与 status 一并写回。
+        """
+        payload = normalize_message_content(content)
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE conversation_messages
+                SET content = %s, status = %s, updated_at = now()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (to_jsonb(payload), _param(status), as_uuid(message_id)),
             )
         if row is None:
             raise NotFoundError("消息", message_id)
@@ -516,12 +769,16 @@ class ConversationSummaryRepository(BaseRepository):
         summary: SessionSummary | Mapping[str, Any],
         covered_through_seq: int,
         *,
+        expected_covered_through_seq: int | None = None,
+        increment_compression: bool = True,
         conn: AsyncConnection[Row] | None = None,
     ) -> ConversationSummary:
-        """单语句同时写摘要与覆盖序号。
+        """同事务写摘要、覆盖序号与压缩次数。
 
-        带 ``covered_through_seq`` 单调递增检查：先提交新摘要再推进序号，
-        或者序号回退，都会让消息"既没进摘要、也不再进上下文"，所以必须挡住。
+        - 传入 ``expected_covered_through_seq`` 时按 CAS 更新（P0-4）：水位线
+          已被其他压缩推进则 0 行，抛 ``ConflictError``，不要复用旧 LLM 输出；
+        - 未传时使用单调递增保护，拒绝序号回退；
+        - 压缩成功才 ``compression_count + 1``。
         """
         if covered_through_seq < 0:
             raise ValidationError("covered_through_seq 不能为负数")
@@ -537,23 +794,79 @@ class ConversationSummaryRepository(BaseRepository):
                 ) from exc
 
         payload = to_jsonb(model)
+        increment = 1 if increment_compression else 0
         async with self._transaction(conn) as c:
-            row = await self._fetch_one(
-                c,
-                """
-                INSERT INTO conversation_summaries
-                    (conversation_id, summary_json, covered_through_seq)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (conversation_id) DO UPDATE
-                   SET summary_json = EXCLUDED.summary_json,
-                       covered_through_seq = EXCLUDED.covered_through_seq,
-                       updated_at = now()
-                 WHERE conversation_summaries.covered_through_seq
-                       <= EXCLUDED.covered_through_seq
-                RETURNING *
-                """,
-                (as_uuid(conversation_id), payload, covered_through_seq),
-            )
+            if expected_covered_through_seq is not None:
+                if expected_covered_through_seq > 0:
+                    row = await self._fetch_one(
+                        c,
+                        """
+                        UPDATE conversation_summaries
+                        SET summary_json = %s,
+                            covered_through_seq = %s,
+                            compression_count = compression_count + %s,
+                            updated_at = now()
+                        WHERE conversation_id = %s
+                          AND covered_through_seq = %s
+                        RETURNING *
+                        """,
+                        (
+                            payload,
+                            covered_through_seq,
+                            increment,
+                            as_uuid(conversation_id),
+                            expected_covered_through_seq,
+                        ),
+                    )
+                else:
+                    row = await self._fetch_one(
+                        c,
+                        """
+                        INSERT INTO conversation_summaries
+                            (conversation_id, summary_json, covered_through_seq,
+                             compression_count)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (conversation_id) DO UPDATE
+                           SET summary_json = EXCLUDED.summary_json,
+                               covered_through_seq = EXCLUDED.covered_through_seq,
+                               compression_count = conversation_summaries.compression_count
+                                                    + EXCLUDED.compression_count,
+                               updated_at = now()
+                         WHERE conversation_summaries.covered_through_seq = 0
+                        RETURNING *
+                        """,
+                        (
+                            as_uuid(conversation_id),
+                            payload,
+                            covered_through_seq,
+                            increment,
+                        ),
+                    )
+            else:
+                row = await self._fetch_one(
+                    c,
+                    """
+                    INSERT INTO conversation_summaries
+                        (conversation_id, summary_json, covered_through_seq,
+                         compression_count)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (conversation_id) DO UPDATE
+                       SET summary_json = EXCLUDED.summary_json,
+                           covered_through_seq = EXCLUDED.covered_through_seq,
+                           compression_count = conversation_summaries.compression_count
+                                                + EXCLUDED.compression_count,
+                           updated_at = now()
+                     WHERE conversation_summaries.covered_through_seq
+                           <= EXCLUDED.covered_through_seq
+                    RETURNING *
+                    """,
+                    (
+                        as_uuid(conversation_id),
+                        payload,
+                        covered_through_seq,
+                        increment,
+                    ),
+                )
             if row is None:
                 current = await self._fetch_val(
                     c,
@@ -564,10 +877,11 @@ class ConversationSummaryRepository(BaseRepository):
                     (as_uuid(conversation_id),),
                 )
                 raise ConflictError(
-                    "摘要覆盖序号不能回退",
+                    "摘要覆盖序号冲突",
                     detail={
                         "conversation_id": str(conversation_id),
                         "current_covered_through_seq": current,
+                        "expected_covered_through_seq": expected_covered_through_seq,
                         "new_covered_through_seq": covered_through_seq,
                     },
                 )

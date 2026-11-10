@@ -14,7 +14,7 @@ if str(_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENT_ROOT))
 
 from exception import ConfigurationError, RedisKeyError  # noqa: E402
-from setting import RedisConfig  # noqa: E402
+from config import RedisConfig  # noqa: E402
 from store.redis import (  # noqa: E402
     RedisConnectionManager,
     RedisKeyPrefix,

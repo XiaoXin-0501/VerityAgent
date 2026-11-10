@@ -36,7 +36,7 @@ from exception import (
     RedisCommandError,
     RedisConnectionError,
 )
-from setting import RedisConfig, settings
+from config import RedisConfig, settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,28 +55,44 @@ class RedisConnectionManager:
         self,
         config: RedisConfig | None = None,
         *,
-        decode_responses: bool = True,
-        socket_connect_timeout: float = 5.0,
-        socket_timeout: float = 5.0,
-        health_check_interval: int = 30,
+        decode_responses: bool | None = None,
+        socket_connect_timeout: float | None = None,
+        socket_timeout: float | None = None,
+        health_check_interval: int | None = None,
         max_connections: int | None = None,
     ) -> None:
         self._config = config or settings.redis
-        self._decode_responses = decode_responses
-        self._socket_connect_timeout = socket_connect_timeout
-        self._socket_timeout = socket_timeout
-        self._health_check_interval = health_check_interval
-        self._max_connections = max_connections
+        self._decode_responses = (
+            self._config.decode_responses
+            if decode_responses is None
+            else decode_responses
+        )
+        self._socket_connect_timeout = (
+            self._config.socket_connect_timeout
+            if socket_connect_timeout is None
+            else socket_connect_timeout
+        )
+        self._socket_timeout = (
+            self._config.socket_timeout if socket_timeout is None else socket_timeout
+        )
+        self._health_check_interval = (
+            self._config.health_check_interval
+            if health_check_interval is None
+            else health_check_interval
+        )
+        self._max_connections = (
+            self._config.max_connections if max_connections is None else max_connections
+        )
 
         if not self._config.url.strip():
             raise ConfigurationError("Redis URL 不能为空")
-        if socket_connect_timeout <= 0:
+        if self._socket_connect_timeout <= 0:
             raise ValueError("socket_connect_timeout 必须 > 0")
-        if socket_timeout <= 0:
+        if self._socket_timeout <= 0:
             raise ValueError("socket_timeout 必须 > 0")
-        if health_check_interval < 0:
+        if self._health_check_interval < 0:
             raise ValueError("health_check_interval 不能为负数")
-        if max_connections is not None and max_connections < 1:
+        if self._max_connections < 1:
             raise ValueError("max_connections 必须 >= 1")
 
         self._client: Redis | None = None
@@ -118,6 +134,11 @@ class RedisConnectionManager:
             if self._client is not None:
                 return
 
+            auth_kwargs = {}
+            if self._config.username:
+                auth_kwargs["username"] = self._config.username
+            if self._config.password.get_secret_value():
+                auth_kwargs["password"] = self._config.password.get_secret_value()
             try:
                 client = Redis.from_url(
                     self._config.url,
@@ -127,6 +148,7 @@ class RedisConnectionManager:
                     health_check_interval=self._health_check_interval,
                     max_connections=self._max_connections,
                     client_name=_CLIENT_NAME,
+                    **auth_kwargs,
                 )
             except (TypeError, ValueError) as exc:
                 raise ConfigurationError(
@@ -142,7 +164,7 @@ class RedisConnectionManager:
                 except Exception:  # pragma: no cover - 关闭失败不掩盖原始异常
                     logger.warning("关闭未就绪的 Redis 客户端失败", exc_info=True)
                 raise RedisConnectionError(
-                    "无法连接 Redis",
+                    f"无法连接 Redis: {exc}",
                     detail={"target": self._safe_target, "cause": str(exc)},
                 ) from exc
 

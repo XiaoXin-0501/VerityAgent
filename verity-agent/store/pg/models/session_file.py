@@ -8,6 +8,8 @@ from uuid import UUID
 from .base import DBModel
 from .enums import SessionFileStatus
 
+__all__ = ["SessionFile"]
+
 
 class SessionFile(DBModel):
     id: UUID
@@ -23,3 +25,8 @@ class SessionFile(DBModel):
     status: SessionFileStatus
     token_count: int | None = None
     created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None = None
+    delete_attempts: int = 0
+    delete_error: str | None = None
+    delete_next_retry_at: datetime | None = None

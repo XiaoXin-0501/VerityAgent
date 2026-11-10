@@ -13,6 +13,7 @@ from ..connection import Row
 from ..models.enums import (
     DOCUMENT_TRANSITIONS,
     DocumentStatus,
+    IndexingStage,
     KnowledgeBaseStatus,
 )
 from ..models.knowledge import Document, KnowledgeBase
@@ -41,6 +42,9 @@ class KnowledgeBaseRepository(BaseRepository):
         name: str,
         required_permission_code: str,
         *,
+        embedding_model_id: str,
+        embedding_dimensions: int,
+        embedding_version: str = "v1",
         description: str | None = None,
         status: KnowledgeBaseStatus = KnowledgeBaseStatus.ACTIVE,
         conn: AsyncConnection[Row] | None = None,
@@ -49,16 +53,30 @@ class KnowledgeBaseRepository(BaseRepository):
         required_permission_code = require_text(
             required_permission_code, "required_permission_code"
         )
+        embedding_model_id = require_text(embedding_model_id, "embedding_model_id")
+        embedding_version = require_text(embedding_version, "embedding_version")
+        if embedding_dimensions <= 0:
+            raise ValidationError("embedding_dimensions 必须 > 0")
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
                 """
                 INSERT INTO knowledge_bases
-                    (name, description, required_permission_code, status)
-                VALUES (%s, %s, %s, %s)
+                    (name, description, required_permission_code,
+                     embedding_model_id, embedding_dimensions, embedding_version,
+                     status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
-                (name, description, required_permission_code, _param(status)),
+                (
+                    name,
+                    description,
+                    required_permission_code,
+                    embedding_model_id,
+                    embedding_dimensions,
+                    embedding_version,
+                    _param(status),
+                ),
             )
         assert row is not None
         return KnowledgeBase.model_validate(row)
@@ -160,11 +178,100 @@ class KnowledgeBaseRepository(BaseRepository):
                 c,
                 """
                 UPDATE knowledge_bases
-                SET status = 'deleting', deleted_at = now(), updated_at = now()
-                WHERE id = %s AND deleted_at IS NULL
+                SET status = 'deleting',
+                    deleted_at = COALESCE(deleted_at, now()),
+                    index_version = index_version
+                        + CASE WHEN status = 'deleting' THEN 0 ELSE 1 END,
+                    updated_at = now()
+                WHERE id = %s
                 RETURNING *
                 """,
                 (as_uuid(kb_id),),
+            )
+        if row is None:
+            raise NotFoundError("知识库", kb_id)
+        return KnowledgeBase.model_validate(row)
+
+    async def bump_index_version(
+        self,
+        kb_id: UUID | str,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> int:
+        """KB 级索引版本 +1；缓存 key 用它失效（D-54）。"""
+        async with self._transaction(conn) as c:
+            value = await self._fetch_val(
+                c,
+                """
+                UPDATE knowledge_bases
+                SET index_version = index_version + 1, updated_at = now()
+                WHERE id = %s AND deleted_at IS NULL
+                RETURNING index_version
+                """,
+                (as_uuid(kb_id),),
+            )
+        if value is None:
+            raise NotFoundError("知识库", kb_id)
+        return int(value)
+
+    async def update_embedding(
+        self,
+        kb_id: UUID | str,
+        *,
+        embedding_model_id: str,
+        embedding_dimensions: int,
+        embedding_version: str,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> KnowledgeBase:
+        """切换 embedding 模型/维度；调用方负责整库重灌（D-57）。"""
+        embedding_model_id = require_text(embedding_model_id, "embedding_model_id")
+        embedding_version = require_text(embedding_version, "embedding_version")
+        if embedding_dimensions <= 0:
+            raise ValidationError("embedding_dimensions 必须 > 0")
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE knowledge_bases
+                SET embedding_model_id = %s,
+                    embedding_dimensions = %s,
+                    embedding_version = %s,
+                    index_version = index_version + 1,
+                    updated_at = now()
+                WHERE id = %s AND deleted_at IS NULL
+                RETURNING *
+                """,
+                (
+                    embedding_model_id,
+                    embedding_dimensions,
+                    embedding_version,
+                    as_uuid(kb_id),
+                ),
+            )
+        if row is None:
+            raise NotFoundError("知识库", kb_id)
+        return KnowledgeBase.model_validate(row)
+
+    async def record_delete_failure(
+        self,
+        kb_id: UUID | str,
+        error: str,
+        *,
+        retry_at: Any | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> KnowledgeBase:
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE knowledge_bases
+                SET delete_attempts = delete_attempts + 1,
+                    delete_error = %s,
+                    delete_next_retry_at = %s
+                WHERE id = %s
+                RETURNING *
+                """,
+                (error, retry_at, as_uuid(kb_id)),
             )
         if row is None:
             raise NotFoundError("知识库", kb_id)
@@ -293,6 +400,7 @@ class DocumentRepository(BaseRepository):
         uploaded_by: UUID | str,
         *,
         sha256: str | None = None,
+        description: str | None = None,
         parse_manifest_key: str | None = None,
         status: DocumentStatus = DocumentStatus.PENDING,
         conn: AsyncConnection[Row] | None = None,
@@ -306,14 +414,15 @@ class DocumentRepository(BaseRepository):
                 c,
                 """
                 INSERT INTO documents
-                    (kb_id, original_filename, extension, size_bytes, sha256,
-                     source_object_key, parse_manifest_key, uploaded_by, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (kb_id, original_filename, description, extension, size_bytes,
+                     sha256, source_object_key, parse_manifest_key, uploaded_by, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
                     as_uuid(kb_id),
                     original_filename,
+                    description,
                     normalize_extension(extension),
                     size_bytes,
                     normalize_sha256(sha256),
@@ -430,7 +539,7 @@ class DocumentRepository(BaseRepository):
         async with self._transaction(conn) as c:
             current = await self._fetch_one(
                 c,
-                "SELECT * FROM documents WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
+                "SELECT * FROM documents WHERE id = %s FOR UPDATE",
                 (as_uuid(doc_id),),
             )
             if current is None:
@@ -453,7 +562,7 @@ class DocumentRepository(BaseRepository):
                 params.append(parse_manifest_key)
             if status is DocumentStatus.COMPLETED:
                 sets.append("parsed_at = now()")
-            elif status is DocumentStatus.DELETED:
+            elif status in (DocumentStatus.DELETING, DocumentStatus.DELETED):
                 sets.append("deleted_at = COALESCE(deleted_at, now())")
             params.append(as_uuid(doc_id))
 
@@ -464,6 +573,253 @@ class DocumentRepository(BaseRepository):
             )
         assert row is not None
         return Document.model_validate(row)
+
+    # ——————————————————— 入库任务（D-77） ———————————————————
+
+    async def set_description(
+        self,
+        doc_id: UUID | str,
+        description: str | None,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Document:
+        """写入/清空文档描述；``None`` 表示待人工补充（P1-17）。"""
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE documents
+                SET description = %s, updated_at = now()
+                WHERE id = %s AND deleted_at IS NULL
+                RETURNING *
+                """,
+                (description, as_uuid(doc_id)),
+            )
+        if row is None:
+            raise NotFoundError("文档", doc_id)
+        return Document.model_validate(row)
+
+    async def claim_index_jobs(
+        self,
+        worker_id: str,
+        *,
+        limit: int = 1,
+        lease_seconds: int = 300,
+        doc_id: UUID | str | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[Document]:
+        """领取待入库/失败重试/租约过期的文档。
+
+        - ``index_attempts`` 在领取时 +1；
+        - 只有 ``index_locked_until`` 为空或已过期的文档可被领取；
+        - ``FOR UPDATE SKIP LOCKED`` 支持多 worker。
+        """
+        limit, _ = pagination(limit, 0)
+        if lease_seconds <= 0:
+            raise ValidationError("lease_seconds 必须 > 0")
+        worker = require_text(worker_id, "worker_id")
+        scope = as_uuid(doc_id) if doc_id is not None else None
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                WITH claimed AS (
+                    SELECT id
+                    FROM documents
+                    WHERE deleted_at IS NULL
+                      AND status IN ('pending', 'processing', 'failed')
+                      AND (index_next_retry_at IS NULL OR index_next_retry_at <= now())
+                      AND (index_locked_until IS NULL OR index_locked_until < now())
+                      -- failed + 有错误 + 无下次重试时间 = 超过上限的 dead，不再领取
+                      AND NOT (status = 'failed'
+                               AND index_error IS NOT NULL
+                               AND index_next_retry_at IS NULL)
+                      AND (%s::uuid IS NULL OR id = %s::uuid)
+                    ORDER BY
+                        CASE status WHEN 'pending' THEN 0
+                                    WHEN 'failed' THEN 1
+                                    ELSE 2 END,
+                        created_at
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE documents d
+                SET status = 'processing',
+                    index_attempts = index_attempts + 1,
+                    index_locked_by = %s,
+                    index_locked_until = now() + make_interval(secs => %s),
+                    updated_at = now()
+                FROM claimed
+                WHERE d.id = claimed.id
+                RETURNING d.*
+                """,
+                (scope, scope, limit, worker, lease_seconds),
+            )
+        return self._models(Document, rows)
+
+    async def claim_index_job(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int = 300,
+        doc_id: UUID | str | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Document | None:
+        docs = await self.claim_index_jobs(
+            worker_id,
+            limit=1,
+            lease_seconds=lease_seconds,
+            doc_id=doc_id,
+            conn=conn,
+        )
+        return docs[0] if docs else None
+
+    async def update_index_progress(
+        self,
+        doc_id: UUID | str,
+        *,
+        stage: IndexingStage,
+        progress: float,
+        worker_id: str | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Document:
+        if not 0.0 <= progress <= 1.0:
+            raise ValidationError("index_progress 必须在 0~1 之间")
+        conditions = ["id = %s", "deleted_at IS NULL"]
+        params: list[Any] = [_param(stage), progress, as_uuid(doc_id)]
+        if worker_id is not None:
+            conditions.append("index_locked_by = %s")
+            params.append(worker_id)
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                f"""
+                UPDATE documents
+                SET index_stage = %s, index_progress = %s, updated_at = now()
+                WHERE {' AND '.join(conditions)}
+                RETURNING *
+                """,
+                params,
+            )
+        if row is None:
+            raise NotFoundError("文档", doc_id)
+        return Document.model_validate(row)
+
+    async def mark_index_failed(
+        self,
+        doc_id: UUID | str,
+        *,
+        error: str,
+        worker_id: str | None = None,
+        retry_backoff_s: float = 30.0,
+        max_attempts: int = 5,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Document:
+        """入库失败：写错误、清租约、按指数退避；超限不再排期（dead）。
+
+        ``documents.status`` 仍为 failed；job 的 dead 语义由
+        ``index_error`` + ``index_next_retry_at IS NULL`` 投影（D-77）。
+        """
+        if retry_backoff_s <= 0:
+            raise ValidationError("retry_backoff_s 必须 > 0")
+        if max_attempts < 1:
+            raise ValidationError("max_attempts 必须 >= 1")
+        conditions = ["id = %s", "deleted_at IS NULL"]
+        params: list[Any] = [error, max_attempts, retry_backoff_s, as_uuid(doc_id)]
+        if worker_id is not None:
+            conditions.append("index_locked_by = %s")
+            params.append(worker_id)
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                f"""
+                UPDATE documents
+                SET status = 'failed',
+                    index_error = %s,
+                    index_next_retry_at = CASE
+                        WHEN index_attempts >= %s THEN NULL
+                        ELSE now() + make_interval(secs => %s * power(2, index_attempts))
+                    END,
+                    index_locked_until = NULL,
+                    index_locked_by = NULL,
+                    updated_at = now()
+                WHERE {' AND '.join(conditions)}
+                RETURNING *
+                """,
+                params,
+            )
+        if row is None:
+            raise NotFoundError("文档", doc_id)
+        return Document.model_validate(row)
+
+    async def mark_index_completed(
+        self,
+        doc_id: UUID | str,
+        *,
+        token_count: int | None = None,
+        chunk_count: int | None = None,
+        parse_manifest_key: str | None = None,
+        index_version: int | None = None,
+        worker_id: str | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Document:
+        """三者全部成功后才置 completed（D-56）。"""
+        conditions = ["id = %s", "deleted_at IS NULL", "status = 'processing'"]
+        params: list[Any] = [
+            token_count,
+            chunk_count,
+            parse_manifest_key,
+            index_version,
+            as_uuid(doc_id),
+        ]
+        if worker_id is not None:
+            conditions.append("index_locked_by = %s")
+            params.append(worker_id)
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                f"""
+                UPDATE documents
+                SET status = 'completed',
+                    token_count = COALESCE(%s, token_count),
+                    chunk_count = COALESCE(%s, chunk_count),
+                    parse_manifest_key = COALESCE(%s, parse_manifest_key),
+                    index_version = COALESCE(%s, index_version),
+                    index_stage = 'DONE',
+                    index_progress = 1,
+                    index_error = NULL,
+                    index_next_retry_at = NULL,
+                    index_locked_until = NULL,
+                    index_locked_by = NULL,
+                    parsed_at = now(),
+                    updated_at = now()
+                WHERE {' AND '.join(conditions)}
+                RETURNING *
+                """,
+                params,
+            )
+        if row is None:
+            raise NotFoundError("文档", doc_id)
+        return Document.model_validate(row)
+
+    async def release_index_lease(
+        self,
+        doc_id: UUID | str,
+        *,
+        worker_id: str,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> bool:
+        async with self._transaction(conn) as c:
+            affected = await self._execute(
+                c,
+                """
+                UPDATE documents
+                SET index_locked_until = NULL, index_locked_by = NULL, updated_at = now()
+                WHERE id = %s AND index_locked_by = %s
+                """,
+                (as_uuid(doc_id), worker_id),
+            )
+        return affected > 0
 
     async def mark_processing(
         self, doc_id: UUID | str, *, conn: AsyncConnection[Row] | None = None

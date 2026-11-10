@@ -30,11 +30,18 @@ class RedisKeyPrefix(StrEnum):
     MEMORY = "verity:memory"
     CACHE = "verity:cache"
     TOOL_CACHE = "verity:tool_cache"
+    TOOL_CIRCUIT = "verity:tool_circuit"
     IDEMPOTENCY = "verity:idempotency"
     LOCK = "verity:lock"
     RATE_LIMIT = "verity:rate_limit"
     QUEUE = "verity:queue"
     STREAM = "verity:stream"
+    # Agent 运行期状态 / SSE 重放缓冲
+    RUN = "verity:run"
+    # Hooks 用量/成本聚合（Redis 仅作短期缓冲；权威在日志/PG 投影）
+    USAGE = "verity:usage"
+    # Provider 探活结果（只做观测，不自动摘除；D-66）
+    PROVIDER_HEALTH = "verity:provider:health"
 
 
 def make_key(prefix: RedisKeyPrefix, *suffix: Any) -> str:

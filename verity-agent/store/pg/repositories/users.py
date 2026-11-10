@@ -155,6 +155,80 @@ class UserRepository(BaseRepository):
             raise NotFoundError("用户", user_id)
         return User.model_validate(row)
 
+    async def soft_delete(
+        self,
+        user_id: UUID | str,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> User:
+        """发起用户删除：先软删 PG，worker 再清理 Weaviate UserFact/对象存储。"""
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE users
+                SET status = 'deleting',
+                    deleted_at = COALESCE(deleted_at, now()),
+                    updated_at = now()
+                WHERE id = %s AND status <> 'deleted'
+                RETURNING *
+                """,
+                (as_uuid(user_id),),
+            )
+        if row is None:
+            raise NotFoundError("用户", user_id)
+        return User.model_validate(row)
+
+    async def mark_deleted(
+        self,
+        user_id: UUID | str,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> User:
+        """跨存储清理完成后的终态；保留 tombstone 供审计。"""
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE users
+                SET status = 'deleted',
+                    deleted_at = COALESCE(deleted_at, now()),
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (as_uuid(user_id),),
+            )
+        if row is None:
+            raise NotFoundError("用户", user_id)
+        return User.model_validate(row)
+
+    async def record_delete_failure(
+        self,
+        user_id: UUID | str,
+        error: str,
+        *,
+        retry_at: datetime | None = None,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> User:
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE users
+                SET delete_attempts = delete_attempts + 1,
+                    delete_error = %s,
+                    delete_next_retry_at = %s,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (error, retry_at, as_uuid(user_id)),
+            )
+        if row is None:
+            raise NotFoundError("用户", user_id)
+        return User.model_validate(row)
+
     async def delete(
         self, user_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> bool:

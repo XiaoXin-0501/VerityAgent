@@ -31,7 +31,7 @@ from pathlib import Path
 
 # 让测试既能被 pytest 收集，也能 `python tests/test_auth.py` 直接运行
 _ROOT = Path(__file__).resolve().parents[1]
-for _path in (_ROOT / "verity-agent", _ROOT / "verity-agent" / "api"):
+for _path in (_ROOT / "verity-agent",):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
@@ -39,9 +39,10 @@ import pytest
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from routers.auth import require_permission, verify_password
-from routers.auth import router as auth_router
-from setting import settings
+from exception import register_exception_handlers
+from api.routers.auth import require_permission, verify_password
+from api.routers.auth import router as auth_router
+from config import settings
 from store.pg import (
     PGConnectionManager,
     close_pg,
@@ -60,6 +61,7 @@ FORBIDDEN_PERMISSION = "kb:manage"
 
 # 测试用 app：挂真实 auth 路由 + 两条受权限保护的验证路由
 app = FastAPI(title="auth-integration-test")
+register_exception_handlers(app)
 app.include_router(auth_router)
 
 
@@ -170,7 +172,8 @@ async def _run() -> None:
                 json={"username": TEST_USERNAME, "password": "wrong-password"},
             )
             assert resp.status_code == 401, resp.text
-            assert resp.json()["detail"] == "用户名或密码错误"
+            assert resp.json()["error"]["code"] == "UNAUTHENTICATED"
+            assert resp.json()["error"]["message"] == "用户名或密码错误"
             print("2. 错误密码 -> 401")
 
             # 3) 不存在的用户（与错误密码同一提示）
@@ -179,7 +182,8 @@ async def _run() -> None:
                 json={"username": "not_exists_user", "password": TEST_PASSWORD},
             )
             assert resp.status_code == 401, resp.text
-            assert resp.json()["detail"] == "用户名或密码错误"
+            assert resp.json()["error"]["code"] == "UNAUTHENTICATED"
+            assert resp.json()["error"]["message"] == "用户名或密码错误"
             print("3. 不存在用户 -> 401")
 
             # 4) 缺少 token / 伪造 token
@@ -205,7 +209,8 @@ async def _run() -> None:
             assert resp.json()["username"] == TEST_USERNAME
             resp = await client.get("/test/forbidden", headers=headers)
             assert resp.status_code == 403, resp.text
-            assert "kb:manage" in resp.json()["detail"]
+            assert resp.json()["error"]["code"] == "PERMISSION_DENIED"
+            assert "kb:manage" in resp.json()["error"]["message"]
             print("6. require_permission 放行已授权、拒绝未授权")
 
         # 7) last_login_at 已被更新

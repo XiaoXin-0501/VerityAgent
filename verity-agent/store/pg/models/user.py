@@ -8,6 +8,8 @@ from uuid import UUID
 from .base import DBModel
 from .enums import UserRole, UserStatus
 
+__all__ = ["User", "Permission", "UserPermission"]
+
 
 class User(DBModel):
     id: UUID
@@ -20,6 +22,11 @@ class User(DBModel):
     last_login_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    # 跨存储删除状态机（PG 软删 → Weaviate → MinIO → 完成）
+    deleted_at: datetime | None = None
+    delete_attempts: int = 0
+    delete_error: str | None = None
+    delete_next_retry_at: datetime | None = None
 
 
 class Permission(DBModel):

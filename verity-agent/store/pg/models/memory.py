@@ -1,8 +1,8 @@
 """user_memory / user_messages 行模型，以及长期记忆画像 JSON 协议。
 
 ``user_memory.value`` 固定 7 段（现在时 4 段 + 过去时 3 桶），每段自带
-``summary`` 与 ``updatedAt``。字段在 Python 侧用 snake_case，落库时通过
-``by_alias`` 序列化成文档约定的 camelCase。
+``summary / updatedAt / confidence``。字段在 Python 侧用 snake_case，落库时
+通过 ``by_alias`` 序列化成文档约定的 camelCase。
 """
 
 from __future__ import annotations
@@ -15,13 +15,24 @@ from uuid import UUID
 from pydantic import Field
 
 from .base import DBModel, DBJsonModel, utcnow
-from .conversation import MessageContent
 from .enums import UserMessageStatus
+
+__all__ = [
+    "MemorySection",
+    "MemoryUserSections",
+    "MemoryHistorySections",
+    "MemoryValue",
+    "MemoryChange",
+    "UserMemory",
+    "UserMessage",
+    "empty_memory_value",
+]
 
 
 class MemorySection(DBJsonModel):
     summary: str = ""
     updated_at: datetime = Field(default_factory=utcnow, alias="updatedAt")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class MemoryUserSections(DBJsonModel):
@@ -69,6 +80,8 @@ class UserMemory(DBModel):
     value: MemoryValue
     revision: int
     fact_count: int
+    # 事实集版本；每次 apply 后 +1，事实缓存失效用（D-50）
+    facts_revision: int = 0
     updated_at: datetime
 
 
@@ -79,35 +92,30 @@ class UserMessage(DBModel):
     user_id: UUID
     conversation_id: UUID
     message_id: UUID
-    content: MessageContent
+    content: dict[str, Any]
     status: UserMessageStatus
+    ready_at: datetime | None = None
+    attempt_count: int = 0
+    last_error: str | None = None
+    next_retry_at: datetime | None = None
+    locked_until: datetime | None = None
+    locked_by: str | None = None
     created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(slots=True)
 class MemoryChange:
     """``UserMemoryRepository.update_with_retry`` 的回调返回值。
 
-    字段为 ``None`` 表示"本次不修改该列"；两列都是 ``None`` 时视为无变更。
+    字段为 ``None`` 表示“本次不修改该列”；全为 ``None`` 时视为无变更。
     """
 
     value: MemoryValue | Mapping[str, Any] | None = None
     fact_count: int | None = None
+    facts_revision: int | None = None
 
 
 def empty_memory_value() -> MemoryValue:
     """新建用户时初始化一份空画像。"""
     return MemoryValue()
-
-
-__all__ = [
-    "MemorySection",
-    "MemoryUserSections",
-    "MemoryHistorySections",
-    "MemoryValue",
-    "MemoryChange",
-    "UserMemory",
-    "UserMessage",
-    "empty_memory_value",
-]
-

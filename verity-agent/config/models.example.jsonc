@@ -1,0 +1,370 @@
+// VerityAgent 模型目录完整注释示例（JSONC）
+//
+// 使用方式：
+//   MODELS_FILE=config/models.example.jsonc
+// 或复制为 config/models.jsonc 后指向它。
+//
+// 顶层只允许 models 数组；每个模型自带连接信息，不再单独配置 Provider。
+{
+  // 模型数组；每个元素是一条完整的模型配置
+  "models": [
+    // ======================================================
+    // Chat：OpenAI
+    // ======================================================
+    {
+      // 应用模型 id，全局唯一；LLM / RAG 配置引用它
+      "id": "chat-main",
+      // 适配器类型：chat 支持 openai / anthropic
+      "provider": "openai",
+      // 厂商实际模型名，调用 API 时发送
+      "model": "gpt-4.1",
+      // 模型类型：chat / embedding / rerank
+      "kind": "chat",
+      // chat wire 协议：openai_chat / openai_responses / anthropic_messages
+      "api_style": "openai_chat",
+      // API 基地址；每个模型可以不同
+      "base_url": "https://api.openai.com/v1",
+      // 密钥环境变量名（推荐）
+      "api_key_env": "OPENAI_API_KEY",
+      // 直接密钥；优先于 api_key_env，不建议提交仓库
+      // "api_key": "sk-...",
+      // 单次请求超时（秒）
+      "timeout_s": 60,
+      // transport 重试次数；不含 LLM 模型 fallback
+      "max_retries": 2,
+      // transport 重试退避基数（毫秒）
+      "retry_backoff_ms": 200,
+      // 额外非敏感 HTTP header；不得放密钥
+      "headers": {
+        // 自定义非敏感 header；不得放密钥
+        "X-Client": "verity-agent"
+      },
+      // 是否启用该模型
+      "enabled": true,
+      // 模型能力声明；chat 使用 ChatModelCapabilities 字段
+      "capabilities": {
+        // 是否支持流式输出
+        "streaming": true,
+        // 是否支持工具调用
+        "tool_calling": true,
+        // 是否支持并行工具调用
+        "parallel_tool_calls": true,
+        // 是否支持图片输入
+        "vision": true,
+        // 是否支持原生文件输入
+        "file_input": false,
+        // 是否支持 thinking / reasoning 块
+        "thinking": false,
+        // 是否支持 assistant 前缀续写
+        "prefix_completion": false,
+        // 是否支持 JSON object 输出
+        "json_object": true,
+        // 是否支持 JSON Schema 输出
+        "json_schema": true,
+        // 是否支持 prompt caching
+        "prompt_caching": true,
+        // 最大上下文 token
+        "max_context_tokens": 128000,
+        // 最大输出 token
+        "max_output_tokens": 16384,
+        // 单次请求最多工具数；null 表示不限制
+        "max_tools": 128,
+        // 单次请求最多图片数；null 表示不限制
+        "max_images": 16,
+        // 支持的输入模态：text / image / file / audio / video
+        "input_modalities": ["text", "image"],
+        // 支持的输出模态
+        "output_modalities": ["text"],
+        // tokenizer 族，供预算估算使用
+        "tokenizer": "o200k_base"
+      },
+      // 价格；供 Hooks 计算成本
+      "pricing": {
+        // 每百万输入 token 价格
+        "input_per_million": 2.0,
+        // 每百万输出 token 价格
+        "output_per_million": 8.0,
+        // 每百万缓存输入 token 价格；null 表示无单独价格
+        "cached_input_per_million": 0.5,
+        // 按请求计价（Rerank 等），chat 为 null
+        "per_request": null,
+        // 按文档计价（Rerank 等），chat 为 null
+        "per_document": null,
+        // 币种
+        "currency": "USD",
+        // 价格生效时间
+        "effective_from": "2026-11-01T00:00:00Z"
+      },
+      // chat 默认生成参数；请求级 GenerationOptions 优先覆盖
+      "defaults": {
+        // 采样温度
+        "temperature": 0.7,
+        // nucleus sampling
+        "top_p": 0.9,
+        // 默认输出 token 上限
+        "max_output_tokens": 4096,
+        // 停止词列表
+        "stop": [],
+        // 随机种子；null 表示不固定
+        "seed": null,
+        // 存在惩罚
+        "presence_penalty": 0.0,
+        // 频率惩罚
+        "frequency_penalty": 0.0,
+        // thinking 预算 token；null 表示不启用
+        "thinking_budget": null,
+        // 是否允许并行工具调用；null 表示交给 provider 默认
+        "parallel_tool_calls": true,
+        // 厂商专用参数；原样透传给 adapter
+        "provider_options": {}
+      },
+      // 扩展字段
+      "metadata": {}
+    },
+
+    // ======================================================
+    // Chat：Anthropic
+    // ======================================================
+    {
+      // 应用模型 id，全局唯一
+      "id": "chat-claude",
+      // chat 适配器：anthropic
+      "provider": "anthropic",
+      // 厂商实际模型名
+      "model": "claude-sonnet-5-5",
+      // 模型类型
+      "kind": "chat",
+      // Anthropic 固定使用 anthropic_messages
+      "api_style": "anthropic_messages",
+      // API 基地址
+      "base_url": "https://api.anthropic.com/v1",
+      // 密钥环境变量名
+      "api_key_env": "ANTHROPIC_API_KEY",
+      // 直接密钥（可选）
+      // "api_key": "sk-ant-...",
+      // 请求超时（秒）
+      "timeout_s": 60,
+      // transport 重试次数
+      "max_retries": 2,
+      // 重试退避基数（毫秒）
+      "retry_backoff_ms": 200,
+      // 额外非敏感 header
+      "headers": {},
+      // 是否启用
+      "enabled": true,
+      // 能力声明
+      "capabilities": {
+        // 是否支持流式
+        "streaming": true,
+        // 是否支持工具
+        "tool_calling": true,
+        // 是否支持并行工具
+        "parallel_tool_calls": true,
+        // 是否支持图片
+        "vision": true,
+        // 是否支持原生文件
+        "file_input": true,
+        // 是否支持 thinking
+        "thinking": true,
+        // 是否支持 assistant 前缀续写
+        "prefix_completion": true,
+        // 是否支持 JSON object
+        "json_object": false,
+        // 是否支持 JSON Schema
+        "json_schema": false,
+        // 是否支持 prompt caching
+        "prompt_caching": true,
+        // 最大上下文 token
+        "max_context_tokens": 200000,
+        // 最大输出 token
+        "max_output_tokens": 8192,
+        // 最多工具数
+        "max_tools": 64,
+        // 最多图片数
+        "max_images": 20,
+        // 输入模态
+        "input_modalities": ["text", "image", "file"],
+        // 输出模态
+        "output_modalities": ["text"],
+        // tokenizer 族
+        "tokenizer": "anthropic"
+      },
+      // 价格
+      "pricing": {
+        // 每百万输入 token
+        "input_per_million": 3.0,
+        // 每百万输出 token
+        "output_per_million": 15.0,
+        // 每百万缓存输入 token
+        "cached_input_per_million": 0.3,
+        // 按请求计价
+        "per_request": null,
+        // 按文档计价
+        "per_document": null,
+        // 币种
+        "currency": "USD",
+        // 生效时间
+        "effective_from": "2026-11-01T00:00:00Z"
+      },
+      // 默认生成参数
+      "defaults": {
+        // 采样温度
+        "temperature": 0.7,
+        // nucleus sampling
+        "top_p": 1.0,
+        // 输出 token 上限
+        "max_output_tokens": 4096,
+        // 停止词
+        "stop": [],
+        // 随机种子
+        "seed": null,
+        // 存在惩罚
+        "presence_penalty": null,
+        // 频率惩罚
+        "frequency_penalty": null,
+        // thinking 预算 token
+        "thinking_budget": 2048,
+        // 是否允许并行工具
+        "parallel_tool_calls": null,
+        // 厂商专用参数
+        "provider_options": {}
+      },
+      // 扩展字段
+      "metadata": {}
+    },
+
+    // ======================================================
+    // Embedding
+    // ======================================================
+    {
+      // 应用模型 id；RAG__INDEXER__EMBEDDING_MODEL_ID 引用它
+      "id": "embed-default",
+      // embedding 适配器：openai / bge
+      "provider": "openai",
+      // 厂商实际模型名
+      "model": "text-embedding-3-small",
+      // 模型类型
+      "kind": "embedding",
+      // embedding 不使用 api_style
+      "base_url": "https://api.openai.com/v1",
+      // 密钥环境变量名
+      "api_key_env": "OPENAI_API_KEY",
+      // 直接密钥（可选）
+      // "api_key": "sk-...",
+      // 请求超时（秒）
+      "timeout_s": 60,
+      // transport 重试次数
+      "max_retries": 2,
+      // 重试退避基数（毫秒）
+      "retry_backoff_ms": 200,
+      // 额外非敏感 header
+      "headers": {},
+      // 是否启用
+      "enabled": true,
+      // embedding 能力声明
+      "capabilities": {
+        // 向量维度；必须与 RAG/Weaviate 对齐
+        "dimensions": 1024,
+        // 单批最大文本数
+        "max_batch_size": 64,
+        // 单条文本最大 token
+        "max_input_tokens": 8192,
+        // 是否支持自定义 dimensions
+        "supports_dimensions": true,
+        // 是否支持 normalize
+        "supports_normalize": true,
+        // query/document 前缀要求；null 表示无
+        "input_type": null
+      },
+      // 价格；embedding 通常只按输入 token 计价
+      "pricing": {
+        // 每百万输入 token 价格
+        "input_per_million": 0.02,
+        // embedding 无输出 token 价格
+        "output_per_million": null,
+        // 缓存输入价格
+        "cached_input_per_million": null,
+        // 按请求计价
+        "per_request": null,
+        // 按文档计价
+        "per_document": null,
+        // 币种
+        "currency": "USD",
+        // 生效时间
+        "effective_from": "2026-11-01T00:00:00Z"
+      },
+      // embedding 不使用 defaults
+      "metadata": {
+        // 是否向服务发送 input_type
+        "send_input_type": false,
+        // 是否向服务发送 normalize
+        "send_normalize": false
+      }
+    },
+
+    // ======================================================
+    // Rerank
+    // ======================================================
+    {
+      // 应用模型 id；RAG__RETRIEVER__RERANK_MODEL_ID 引用它
+      "id": "rerank-default",
+      // rerank 适配器：cohere / bge
+      "provider": "cohere",
+      // 厂商实际模型名
+      "model": "rerank-v3.5",
+      // 模型类型
+      "kind": "rerank",
+      // API 基地址
+      "base_url": "https://api.cohere.com/v1",
+      // 密钥环境变量名
+      "api_key_env": "COHERE_API_KEY",
+      // 直接密钥（可选）
+      // "api_key": "...",
+      // 请求超时（秒）
+      "timeout_s": 60,
+      // transport 重试次数
+      "max_retries": 2,
+      // 重试退避基数（毫秒）
+      "retry_backoff_ms": 200,
+      // 额外非敏感 header
+      "headers": {},
+      // 是否启用；没有 rerank 服务时保持 false
+      "enabled": false,
+      // rerank 能力声明
+      "capabilities": {
+        // 单次最多文档数
+        "max_documents": 100,
+        // query 最大 token
+        "max_query_tokens": 512,
+        // 单文档最大 token
+        "max_document_tokens": 4096,
+        // 单批最大请求数
+        "max_batch_size": 32,
+        // 是否支持返回原文
+        "supports_return_documents": true
+      },
+      // 价格；rerank 可能按文档或请求计价
+      "pricing": {
+        // 每百万输入 token 价格
+        "input_per_million": null,
+        // 每百万输出 token 价格
+        "output_per_million": null,
+        // 缓存输入价格
+        "cached_input_per_million": null,
+        // 按请求计价
+        "per_request": null,
+        // 按文档计价
+        "per_document": 0.000002,
+        // 币种
+        "currency": "USD",
+        // 生效时间
+        "effective_from": "2026-11-01T00:00:00Z"
+      },
+      // rerank 不使用 defaults
+      "metadata": {
+        // 文档发送格式：text（字符串数组）/ object（[{"text":...}]）
+        "documents_format": "text"
+      }
+    }
+  ]
+}

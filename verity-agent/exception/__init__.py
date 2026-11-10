@@ -9,9 +9,12 @@ from .base import (
     AuthenticationError,
     ConflictError,
     ConfigurationError,
+    InternalError,
     InvalidStateTransitionError,
     NotFoundError,
     PermissionDeniedError,
+    RateLimitedError,
+    UnavailableError,
     ValidationError,
     VerityError,
 )
@@ -23,6 +26,20 @@ from .message import (
     MessageValidationError,
     UnknownMessageRoleError,
     UnsupportedMessageVersionError,
+)
+from .llm import LLMError, LLMErrorCode
+from .minio import (
+    MinioConnectionError,
+    MinioError,
+    MinioObjectNotFoundError,
+    MinioOperationError,
+)
+from .provider import ProviderError, ProviderErrorCode
+from .neo4j import (
+    Neo4jConnectionError,
+    Neo4jError,
+    Neo4jQueryError,
+    Neo4jSchemaError,
 )
 from .pg import (
     MemoryFactLimitExceeded,
@@ -43,6 +60,12 @@ from .redis import (
     RedisError,
     RedisKeyError,
 )
+from .weaviate import (
+    WeaviateConnectionError,
+    WeaviateError,
+    WeaviateOperationError,
+    WeaviateSchemaError,
+)
 
 __all__ = [
     # base
@@ -54,6 +77,9 @@ __all__ = [
     "NotFoundError",
     "ConflictError",
     "InvalidStateTransitionError",
+    "RateLimitedError",
+    "UnavailableError",
+    "InternalError",
     # handlers
     "register_exception_handlers",
     "verity_error_handler",
@@ -64,6 +90,26 @@ __all__ = [
     "MessageDecodeError",
     "UnsupportedMessageVersionError",
     "UnknownMessageRoleError",
+    # provider / llm
+    "ProviderError",
+    "ProviderErrorCode",
+    "LLMError",
+    "LLMErrorCode",
+    # minio
+    "MinioError",
+    "MinioConnectionError",
+    "MinioObjectNotFoundError",
+    "MinioOperationError",
+    # weaviate
+    "WeaviateError",
+    "WeaviateConnectionError",
+    "WeaviateSchemaError",
+    "WeaviateOperationError",
+    # neo4j
+    "Neo4jError",
+    "Neo4jConnectionError",
+    "Neo4jQueryError",
+    "Neo4jSchemaError",
     # pg
     "PGError",
     "PGConnectionError",
