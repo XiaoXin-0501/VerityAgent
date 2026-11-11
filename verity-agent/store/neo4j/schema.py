@@ -43,7 +43,7 @@ async def init_schema(manager: Neo4jConnectionManager) -> None:
     except Exception as exc:
         raise Neo4jSchemaError(
             "Neo4j schema 初始化失败",
-            detail={"cause": str(exc)},
+            details={"cause": str(exc)},
         ) from exc
 
 
@@ -54,7 +54,7 @@ async def check_schema(manager: Neo4jConnectionManager) -> dict[str, Any]:
         indexes = await manager.run("SHOW INDEXES")
     except Exception as exc:
         raise Neo4jSchemaError(
-            "Neo4j schema 检查失败", detail={"cause": str(exc)}
+            "Neo4j schema 检查失败", details={"cause": str(exc)}
         ) from exc
     return {
         "version": GRAPH_SCHEMA_VERSION,

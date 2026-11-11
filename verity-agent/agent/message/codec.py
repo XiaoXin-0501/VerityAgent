@@ -65,7 +65,7 @@ def content_version(payload: Mapping[str, Any]) -> int:
     value = payload.get("v", MessageContentVersion.V1)
     if not isinstance(value, int) or isinstance(value, bool):
         raise MessageDecodeError(
-            "content.v 必须是整数", detail={"v": repr(value)}
+            "content.v 必须是整数", details={"v": repr(value)}
         )
     return value
 
@@ -157,7 +157,7 @@ def decode_content(
     if not isinstance(payload, Mapping):
         raise MessageDecodeError(
             "content 必须是 JSON 对象",
-            detail={"type": type(payload).__name__},
+            details={"type": type(payload).__name__},
         )
 
     version = content_version(payload)
@@ -211,12 +211,12 @@ def decode_content(
     except KeyError as exc:
         raise MessageDecodeError(
             f"content 缺少必填字段: {exc.args[0]}",
-            detail={"role": role_enum.value, "v": version},
+            details={"role": role_enum.value, "v": version},
         ) from exc
     except PydanticValidationError as exc:
         raise MessageDecodeError(
             "content 不符合消息协议",
-            detail={
+            details={
                 "role": role_enum.value,
                 "v": version,
                 "errors": exc.errors(include_url=False),
@@ -431,10 +431,8 @@ def _raw(
         except ValueError:
             created_at = None
     return RawMessage(
-        id=UUID(str(row["id"])) if row.get("id") else UUID(int=0),
-        conversation_id=UUID(str(row["conversation_id"]))
-        if row.get("conversation_id")
-        else UUID(int=0),
+        id=_uuid_or_zero(row.get("id")),
+        conversation_id=_uuid_or_zero(row.get("conversation_id")),
         role=row.get("role", "unknown"),
         status=status,
         created_at=created_at or utcnow(),
@@ -442,3 +440,12 @@ def _raw(
         v=v,
         parse_error=parse_error,
     )
+
+
+def _uuid_or_zero(value: object) -> UUID:
+    if value is None:
+        return UUID(int=0)
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return UUID(int=0)

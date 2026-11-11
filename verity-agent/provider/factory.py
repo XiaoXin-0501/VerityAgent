@@ -39,7 +39,6 @@ def _base_kwargs(model: ModelConfig) -> dict:
         "api_key": model.api_key,
         "timeout_s": model.timeout_s,
         "max_retries": model.max_retries,
-        "retry_backoff_ms": model.retry_backoff_ms,
         "headers": dict(model.headers),
         "enabled": model.enabled,
         "metadata": dict(model.metadata),
@@ -54,7 +53,7 @@ def build_provider(model: ModelConfig) -> BaseProvider:
             if model.api_style not in (None, ChatApiStyle.ANTHROPIC_MESSAGES):
                 raise ConfigurationError(
                     f"Anthropic 模型 {model.id} 的 api_style 必须是 anthropic_messages",
-                    detail={"api_style": str(model.api_style)},
+                    details={"api_style": str(model.api_style)},
                 )
             api_style = ChatApiStyle.ANTHROPIC_MESSAGES
         elif provider == "openai":
@@ -66,13 +65,13 @@ def build_provider(model: ModelConfig) -> BaseProvider:
                 raise ConfigurationError(
                     f"OpenAI 模型 {model.id} 的 api_style 必须是 "
                     "openai_chat 或 openai_responses",
-                    detail={"api_style": str(model.api_style)},
+                    details={"api_style": str(model.api_style)},
                 )
             api_style = model.api_style or ChatApiStyle.OPENAI_CHAT
         else:
             raise ConfigurationError(
                 f"暂不支持的 chat provider: {model.provider}",
-                detail={"model_id": model.id},
+                details={"model_id": model.id},
             )
         config = ChatProviderConfig(
             kind=ProviderKind.CHAT,
@@ -88,7 +87,7 @@ def build_provider(model: ModelConfig) -> BaseProvider:
         if provider not in {"openai", "bge"}:
             raise ConfigurationError(
                 f"不支持的 embedding provider: {model.provider}",
-                detail={"model_id": model.id},
+                details={"model_id": model.id},
             )
         config = EmbeddingProviderConfig(kind=ProviderKind.EMBEDDING, **_base_kwargs(model))
         if provider == "bge":
@@ -98,7 +97,7 @@ def build_provider(model: ModelConfig) -> BaseProvider:
         if provider not in {"cohere", "bge"}:
             raise ConfigurationError(
                 f"不支持的 rerank provider: {model.provider}",
-                detail={"model_id": model.id},
+                details={"model_id": model.id},
             )
         config = RerankProviderConfig(kind=ProviderKind.RERANK, **_base_kwargs(model))
         if provider == "bge":

@@ -16,7 +16,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from string import hexdigits
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 from uuid import UUID
 
 import psycopg
@@ -59,7 +59,7 @@ _SQLSTATE_ERRORS: dict[str, type[PGError]] = {
 def translate_pg_error(exc: psycopg.Error) -> PGError:
     """把 psycopg 异常翻译成项目自定义异常。"""
     diag = getattr(exc, "diag", None)
-    detail: dict[str, Any] = {}
+    details: dict[str, Any] = {}
     if diag is not None:
         for key, attr in (
             ("sqlstate", "sqlstate"),
@@ -70,16 +70,16 @@ def translate_pg_error(exc: psycopg.Error) -> PGError:
         ):
             value = getattr(diag, attr, None) or getattr(exc, key, None)
             if value:
-                detail[key] = value
+                details[key] = value
 
     if isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError)):
-        return PGConnectionError(str(exc), detail=detail)
+        return PGConnectionError(str(exc), details=details)
 
     error_cls = _SQLSTATE_ERRORS.get(
         getattr(exc, "sqlstate", "") or "",
         PGIntegrityError if isinstance(exc, psycopg.IntegrityError) else PGQueryError,
     )
-    return error_cls(str(exc), detail=detail)
+    return error_cls(str(exc), details=details)
 
 
 # ——————————————————— JSONB / 类型适配 ———————————————————
@@ -133,7 +133,7 @@ def normalize_message_content(content: Any) -> dict[str, Any]:
     if not isinstance(content, Mapping):
         raise ValidationError(
             "消息 content 必须是对象或字符串",
-            detail={"type": type(content).__name__},
+            details={"type": type(content).__name__},
         )
 
     payload = dict(content)
@@ -141,7 +141,7 @@ def normalize_message_content(content: Any) -> dict[str, Any]:
     if not isinstance(version, int) or version < 1:
         raise ValidationError(
             "消息 content 缺少合法的协议版本 v",
-            detail={"v": version},
+            details={"v": version},
         )
     text = payload.get("text", "")
     if text is None:
@@ -149,7 +149,7 @@ def normalize_message_content(content: Any) -> dict[str, Any]:
     if not isinstance(text, str):
         raise ValidationError(
             "消息 content.text 必须是字符串",
-            detail={"type": type(text).__name__},
+            details={"type": type(text).__name__},
         )
     payload["text"] = text
     return payload
@@ -272,7 +272,7 @@ class BaseRepository:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> Row | None:
         try:
-            cursor = await conn.execute(sql, params)
+            cursor = await conn.execute(cast(Any, sql), params)
             return await cursor.fetchone()
         except psycopg.Error as exc:
             raise translate_pg_error(exc) from exc
@@ -284,7 +284,7 @@ class BaseRepository:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> list[Row]:
         try:
-            cursor = await conn.execute(sql, params)
+            cursor = await conn.execute(cast(Any, sql), params)
             return list(await cursor.fetchall())
         except psycopg.Error as exc:
             raise translate_pg_error(exc) from exc
@@ -307,15 +307,15 @@ class BaseRepository:
         params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> int:
         try:
-            cursor = await conn.execute(sql, params)
+            cursor = await conn.execute(cast(Any, sql), params)
             return cursor.rowcount
         except psycopg.Error as exc:
             raise translate_pg_error(exc) from exc
 
     @staticmethod
-    def _model(cls: type[_ModelT], row: Row | None) -> _ModelT | None:
-        return None if row is None else cls.model_validate(row)
+    def _model(model_cls: type[_ModelT], row: Row | None) -> _ModelT | None:
+        return None if row is None else model_cls.model_validate(row)
 
     @staticmethod
-    def _models(cls: type[_ModelT], rows: Sequence[Row]) -> list[_ModelT]:
-        return [cls.model_validate(row) for row in rows]
+    def _models(model_cls: type[_ModelT], rows: Sequence[Row]) -> list[_ModelT]:
+        return [model_cls.model_validate(row) for row in rows]

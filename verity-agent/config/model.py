@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import Field, SecretStr
+
+from .base import ConfigModel
 
 from .provider import ChatApiStyle, ProviderKind
 from .secrets import resolve_api_key
@@ -22,10 +24,8 @@ from .secrets import resolve_api_key
 __all__ = ["ModelConfig"]
 
 
-class ModelConfig(BaseModel):
+class ModelConfig(ConfigModel):
     """一个可调用模型的完整配置（连接 + 模型 + 参数）。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # 应用模型 id；LLM / RAG 配置引用它，全局唯一
     id: str = Field(min_length=1)
@@ -37,7 +37,8 @@ class ModelConfig(BaseModel):
     kind: ProviderKind = ProviderKind.CHAT
     # 可选 wire 协议；chat 为空时按 provider 自动选
     api_style: ChatApiStyle | None = None
-    # API 基地址；每个模型可以指向不同网关
+    # API 基地址；每个模型可以指向不同网关。
+    # OpenAI SDK 通常写 .../v1；Anthropic/Cohere SDK 会自动追加 /v1，不要重复。
     base_url: str = ""
     # 密钥环境变量名
     api_key_env: str = ""
@@ -45,10 +46,8 @@ class ModelConfig(BaseModel):
     api_key: SecretStr = SecretStr("")
     # 单次请求超时（秒）
     timeout_s: float = Field(default=60.0, gt=0)
-    # transport 重试次数；不含 LLM 模型 fallback
+    # SDK transport 重试次数；不含 LLM 模型 fallback
     max_retries: int = Field(default=2, ge=0, le=10)
-    # transport 重试退避基数（毫秒）
-    retry_backoff_ms: int = Field(default=200, ge=0)
     # 额外 HTTP header；不得放密钥
     headers: dict[str, str] = Field(default_factory=dict)
     # 是否启用该模型

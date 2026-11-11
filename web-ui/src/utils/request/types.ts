@@ -3,7 +3,7 @@ import type { AxiosRequestConfig } from 'axios'
 export interface ApiErrorOptions {
   /** HTTP 状态码 */
   status?: number
-  /** 后端业务错误码（当前后端主要返回 detail，保留扩展位） */
+  /** 后端业务错误码（统一错误信封 error.code） */
   code?: string
   /** 原始响应体 */
   data?: unknown

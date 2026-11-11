@@ -85,8 +85,10 @@ async def verity_error_handler(request: Request, exc: Exception) -> JSONResponse
 
 
 async def _validation_error_handler(
-    request: Request, exc: RequestValidationError
+    request: Request, exc: Exception
 ) -> JSONResponse:
+    if not isinstance(exc, RequestValidationError):
+        raise exc
     return _envelope(
         code="INVALID_REQUEST",
         message="请求参数校验失败",
@@ -97,8 +99,10 @@ async def _validation_error_handler(
 
 
 async def _http_error_handler(
-    request: Request, exc: StarletteHTTPException
+    request: Request, exc: Exception
 ) -> JSONResponse:
+    if not isinstance(exc, StarletteHTTPException):
+        raise exc
     code_by_status = {
         401: "UNAUTHENTICATED",
         403: "PERMISSION_DENIED",

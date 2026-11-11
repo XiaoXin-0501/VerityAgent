@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
+
+from .base import ConfigModel
 
 __all__ = ["MessageConfig"]
 
 _MB = 1024 * 1024
 
 
-class MessageConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class MessageConfig(ConfigModel):
     # content 协议的当前写入版本；读取时兼容 v1（D-22/v2）
     content_version: int = Field(default=2, ge=1)
     # 单条用户消息最多图片数

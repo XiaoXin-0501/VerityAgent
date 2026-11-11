@@ -87,7 +87,7 @@ class WeaviateConnectionManager:
             except Exception as exc:
                 raise WeaviateConnectionError(
                     "无法连接 Weaviate",
-                    detail={"url": self._config.url, "cause": str(exc)},
+                    details={"url": self._config.url, "cause": str(exc)},
                 ) from exc
 
     async def close(self) -> None:
@@ -106,7 +106,7 @@ class WeaviateConnectionManager:
             raise
         except Exception as exc:
             raise WeaviateConnectionError(
-                "Weaviate 探活失败", detail={"cause": str(exc)}
+                "Weaviate 探活失败", details={"cause": str(exc)}
             ) from exc
 
     async def health_check(self) -> dict[str, Any]:
@@ -123,7 +123,7 @@ class WeaviateConnectionManager:
             raise
         except Exception as exc:
             raise WeaviateOperationError(
-                "Weaviate 操作失败", detail={"cause": str(exc)}
+                "Weaviate 操作失败", details={"cause": str(exc)}
             ) from exc
 
 

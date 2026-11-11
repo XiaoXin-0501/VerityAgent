@@ -23,12 +23,11 @@ class RerankModel:
         raise NotImplementedError
 
 
-class RerankProvider(BaseProvider):
+class RerankProvider(BaseProvider[RerankProviderConfig]):
     kind = ProviderKind.RERANK
 
     def __init__(self, config: RerankProviderConfig) -> None:
         super().__init__(config)
-        self.config: RerankProviderConfig
 
     @abstractmethod
     def get_model(self, model_id: str) -> RerankModel:

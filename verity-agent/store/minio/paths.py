@@ -34,7 +34,7 @@ def _segment(value: Any, field: str) -> str:
     if not text or "/" in text or "\\" in text:
         raise ValidationError(
             f"{field} 不能为空且不能包含路径分隔符",
-            detail={"field": field, "value": text},
+            details={"field": field, "value": text},
         )
     return text
 
@@ -47,7 +47,7 @@ def sanitize_extension(extension: str | None, *, default: str = "bin") -> str:
     if not text:
         return default
     if "/" in text or "\\" in text or "." in text:
-        raise ValidationError("扩展名不合法", detail={"extension": extension})
+        raise ValidationError("扩展名不合法", details={"extension": extension})
     return text[:20]
 
 

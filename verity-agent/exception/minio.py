@@ -29,8 +29,8 @@ class MinioConnectionError(MinioError):
     retryable = True
 
 
-class MinioObjectNotFoundError(NotFoundError):
-    """对象不存在；删除场景由调用方视为幂等成功。"""
+class MinioObjectNotFoundError(NotFoundError, MinioError):
+    """对象不存在；同时属于 MinIO 错误族，删除场景视为幂等成功。"""
 
     code = "MINIO_OBJECT_NOT_FOUND"
 

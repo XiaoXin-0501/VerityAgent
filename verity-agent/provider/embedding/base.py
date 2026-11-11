@@ -23,12 +23,11 @@ class EmbeddingModel:
         raise NotImplementedError
 
 
-class EmbeddingProvider(BaseProvider):
+class EmbeddingProvider(BaseProvider[EmbeddingProviderConfig]):
     kind = ProviderKind.EMBEDDING
 
     def __init__(self, config: EmbeddingProviderConfig) -> None:
         super().__init__(config)
-        self.config: EmbeddingProviderConfig
 
     @abstractmethod
     def get_model(self, model_id: str) -> EmbeddingModel:

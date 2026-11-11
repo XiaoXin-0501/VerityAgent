@@ -55,7 +55,7 @@ def make_key(prefix: RedisKeyPrefix, *suffix: Any) -> str:
     if not isinstance(prefix, RedisKeyPrefix):
         raise RedisKeyError(
             "prefix 必须是 RedisKeyPrefix",
-            detail={"prefix": str(prefix)},
+            details={"prefix": str(prefix)},
         )
 
     parts: list[str] = [prefix.value]
@@ -63,7 +63,7 @@ def make_key(prefix: RedisKeyPrefix, *suffix: Any) -> str:
         if part is None:
             raise RedisKeyError(
                 "Redis key 后缀不能为 None",
-                detail={"prefix": prefix.value, "index": index},
+                details={"prefix": prefix.value, "index": index},
             )
         if isinstance(part, bytes):
             try:
@@ -71,7 +71,7 @@ def make_key(prefix: RedisKeyPrefix, *suffix: Any) -> str:
             except UnicodeDecodeError as exc:
                 raise RedisKeyError(
                     "Redis key 后缀不是合法 UTF-8",
-                    detail={"prefix": prefix.value, "index": index},
+                    details={"prefix": prefix.value, "index": index},
                 ) from exc
         else:
             text = str(part)
@@ -79,7 +79,7 @@ def make_key(prefix: RedisKeyPrefix, *suffix: Any) -> str:
         if not text:
             raise RedisKeyError(
                 "Redis key 后缀不能为空",
-                detail={"prefix": prefix.value, "index": index},
+                details={"prefix": prefix.value, "index": index},
             )
         parts.append(text)
 

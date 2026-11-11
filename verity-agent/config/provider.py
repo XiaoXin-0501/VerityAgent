@@ -12,7 +12,9 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import Field, SecretStr
+
+from .base import ConfigModel
 
 from .secrets import resolve_api_key
 
@@ -27,7 +29,6 @@ __all__ = [
 
 _DEFAULT_TIMEOUT_S = 60.0
 _DEFAULT_RETRIES = 2
-_DEFAULT_BACKOFF_MS = 200
 
 
 class ProviderKind(StrEnum):
@@ -46,16 +47,14 @@ class ChatApiStyle(StrEnum):
     ANTHROPIC_MESSAGES = "anthropic_messages"   # Anthropic Messages API
 
 
-class ProviderConfig(BaseModel):
+class ProviderConfig(ConfigModel):
     """所有 provider 的公共配置。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # provider 唯一名；注册表主键
     name: str = Field(min_length=1)
     # provider 类型：chat / embedding / rerank
     kind: ProviderKind
-    # API 基地址；不同厂商路径不同，由 adapter 拼接
+    # API 基地址；不同厂商路径由官方 SDK 拼接，Anthropic/Cohere 会自动追加 /v1
     base_url: str = ""
     # 只存环境变量/secret ref 名，不存原始 key
     api_key_env: str = ""
@@ -63,10 +62,8 @@ class ProviderConfig(BaseModel):
     api_key: SecretStr = SecretStr("")
     # 单次请求超时（秒）
     timeout_s: float = Field(default=_DEFAULT_TIMEOUT_S, gt=0)
-    # transport 层重试次数；不含 LLM 层模型 fallback
+    # SDK transport 重试次数；不含 LLM 层模型 fallback
     max_retries: int = Field(default=_DEFAULT_RETRIES, ge=0, le=10)
-    # transport 重试退避基数（毫秒）
-    retry_backoff_ms: int = Field(default=_DEFAULT_BACKOFF_MS, ge=0)
     # 额外 HTTP header；不得放密钥
     headers: dict[str, str] = Field(default_factory=dict)
     # 是否启用；禁用时仍注册但调用报 UNAVAILABLE
@@ -77,11 +74,12 @@ class ProviderConfig(BaseModel):
     def resolve_api_key(self, environ: dict[str, str] | None = None) -> str | None:
         return resolve_api_key(self.api_key, self.api_key_env, environ=environ)
 
+
 class ChatProviderConfig(ProviderConfig):
     """Chat provider 专有配置。"""
 
     # 类型固定为 chat
-    kind: Literal[ProviderKind.CHAT] = ProviderKind.CHAT
+    kind: Literal[ProviderKind.CHAT] = ProviderKind.CHAT  # pyright: ignore[reportIncompatibleVariableOverride]
     # wire 协议风格；决定使用哪个 adapter
     api_style: ChatApiStyle = ChatApiStyle.OPENAI_CHAT
 
@@ -94,7 +92,7 @@ class EmbeddingProviderConfig(ProviderConfig):
     """
 
     # 类型固定为 embedding
-    kind: Literal[ProviderKind.EMBEDDING] = ProviderKind.EMBEDDING
+    kind: Literal[ProviderKind.EMBEDDING] = ProviderKind.EMBEDDING  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class RerankProviderConfig(ProviderConfig):
@@ -104,4 +102,4 @@ class RerankProviderConfig(ProviderConfig):
     """
 
     # 类型固定为 rerank
-    kind: Literal[ProviderKind.RERANK] = ProviderKind.RERANK
+    kind: Literal[ProviderKind.RERANK] = ProviderKind.RERANK  # pyright: ignore[reportIncompatibleVariableOverride]

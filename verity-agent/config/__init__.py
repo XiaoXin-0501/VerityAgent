@@ -1,7 +1,7 @@
 """配置与 setting 的统一入口。
 
 所有配置类集中在 ``config`` 包内，按领域拆分文件；业务模块不再各自维护
-配置类。``setting.py`` 只是兼容导出。
+配置类，也不再保留兼容性的 ``setting.py``。
 
 - ``config.app``：App / Server / Auth
 - ``config.infrastructure``：PG / Redis / MinIO / Weaviate / Neo4j
@@ -12,6 +12,7 @@
 - ``config.agent``：Agent 运行限制与流式
 - ``config.rag``：Indexer / Retriever
 - ``config.hooks``：Hooks
+- ``config.tools``：工具选择/路由/批量/入参保护
 """
 
 from __future__ import annotations
@@ -24,7 +25,15 @@ from pydantic import Field, model_validator
 from .agent import AgentConfig, AgentPolicy, AgentStreamConfig
 from .app import AppConfig, AuthConfig, ServerConfig
 from .base import SOURCE_ROOT, EnvSettings
-from .hooks import HooksConfig, HookSinkConfig
+from .hooks import (
+    AuditHookConfig,
+    HooksConfig,
+    LoggingHookConfig,
+    MetricsHookConfig,
+    RedactionConfig,
+    TokenUsageHookConfig,
+    TracingHookConfig,
+)
 from .infrastructure import (
     MinioBuckets,
     MinioConfig,
@@ -44,7 +53,14 @@ from .provider import (
     ProviderKind,
     RerankProviderConfig,
 )
-from .rag import IndexerConfig, RagConfig, RetrieverConfig
+from .rag import (
+    DedupPolicyConfig,
+    IndexerConfig,
+    QualityPolicyConfig,
+    RagConfig,
+    RetrieverConfig,
+)
+from .tools import ToolRoutingConfig, ToolRoutingMode, ToolsConfig
 
 __all__ = [
     "Settings",
@@ -81,9 +97,20 @@ __all__ = [
     "RagConfig",
     "IndexerConfig",
     "RetrieverConfig",
+    "QualityPolicyConfig",
+    "DedupPolicyConfig",
     # hooks
     "HooksConfig",
-    "HookSinkConfig",
+    "LoggingHookConfig",
+    "TokenUsageHookConfig",
+    "MetricsHookConfig",
+    "TracingHookConfig",
+    "AuditHookConfig",
+    "RedactionConfig",
+    # tools
+    "ToolsConfig",
+    "ToolRoutingConfig",
+    "ToolRoutingMode",
 ]
 
 
@@ -123,6 +150,8 @@ class Settings(EnvSettings):
     rag: RagConfig = Field(default_factory=RagConfig)
     # Hooks 观察者
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    # 工具选择、路由、批量与入参保护
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
     @model_validator(mode="after")
     def _load_models_file(self) -> "Settings":
@@ -166,6 +195,14 @@ class Settings(EnvSettings):
         refs.extend(self.llm.fallback_model_ids)
         if self.rag.indexer.embedding_model_id:
             refs.append(self.rag.indexer.embedding_model_id)
+        for model_id in (
+            self.rag.indexer.description_model_id,
+            self.rag.indexer.table_summary_model_id,
+            self.rag.indexer.code_summary_model_id,
+            self.rag.indexer.graph_model_id,
+        ):
+            if model_id:
+                refs.append(model_id)
         if self.rag.retriever.rerank_model_id:
             refs.append(self.rag.retriever.rerank_model_id)
         if self.rag.retriever.query_rewrite_model_id:

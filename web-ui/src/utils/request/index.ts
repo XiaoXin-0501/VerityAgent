@@ -21,35 +21,23 @@ service.interceptors.request.use((config) => {
   return config
 })
 
-/** FastAPI 错误体：{ detail: string } 或 422 的 { detail: [{ msg }] }。 */
-function extractMessage(payload: unknown): string {
-  if (!payload) return ''
-  if (typeof payload === 'string') return payload
-  if (typeof payload !== 'object') return ''
+/** 后端统一错误信封：{ error: { code, message, details } }。 */
+function extractError(payload: unknown): { message: string; code?: string } {
+  if (!payload) return { message: '' }
+  if (typeof payload === 'string') return { message: payload }
+  if (typeof payload !== 'object') return { message: '' }
 
-  const detail = (payload as { detail?: unknown }).detail
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail)) {
-    return detail
-      .map((item) => {
-        if (item && typeof item === 'object' && 'msg' in item) {
-          return String((item as { msg: unknown }).msg)
-        }
-        return String(item)
-      })
-      .join('；')
+  const envelope = (payload as { error?: unknown }).error
+  if (envelope && typeof envelope === 'object') {
+    const error = envelope as { code?: unknown; message?: unknown }
+    return {
+      message: typeof error.message === 'string' ? error.message : '',
+      code: typeof error.code === 'string' ? error.code : undefined,
+    }
   }
 
   const message = (payload as { message?: unknown }).message
-  return typeof message === 'string' ? message : ''
-}
-
-function extractCode(payload: unknown): string | undefined {
-  if (payload && typeof payload === 'object' && 'code' in payload) {
-    const code = (payload as { code?: unknown }).code
-    if (typeof code === 'string') return code
-  }
-  return undefined
+  return { message: typeof message === 'string' ? message : '' }
 }
 
 let redirecting = false
@@ -81,7 +69,8 @@ service.interceptors.response.use(
     const status = error.response?.status
     const payload = error.response?.data
 
-    let message = extractMessage(payload)
+    const { message: backendMessage, code } = extractError(payload)
+    let message = backendMessage
     if (!message) {
       if (error.code === 'ECONNABORTED') {
         message = '请求超时，请稍后重试'
@@ -97,9 +86,7 @@ service.interceptors.response.use(
     }
     ElMessage.error(message)
 
-    return Promise.reject(
-      new ApiError(message, { status, code: extractCode(payload), data: payload }),
-    )
+    return Promise.reject(new ApiError(message, { status, code, data: payload }))
   },
 )
 

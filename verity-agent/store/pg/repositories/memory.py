@@ -105,7 +105,7 @@ class UserMemoryRepository(BaseRepository):
                 except ValueError as exc:
                     raise ValidationError(
                         "user_memory.value 不符合固定 7 段结构",
-                        detail={"error": str(exc)},
+                        details={"error": str(exc)},
                     ) from exc
             sets.append("value = %s")
             params.append(to_jsonb(value))
@@ -146,7 +146,7 @@ class UserMemoryRepository(BaseRepository):
                     raise NotFoundError("用户长期记忆", user_id)
                 raise OptimisticLockError(
                     "长期记忆已被并发修改，请重新读取后重试",
-                    detail={
+                    details={
                         "user_id": str(user_id),
                         "expected_revision": expected_revision,
                         "current_revision": current,

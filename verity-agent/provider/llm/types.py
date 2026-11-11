@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -89,7 +89,9 @@ class ModelThinkingPart(WireModel):
     redacted: bool = False
 
 
-ModelContentPart = ModelTextPart | ModelImagePart | ModelFilePart | ModelThinkingPart
+ModelContentPart: TypeAlias = (
+    ModelTextPart | ModelImagePart | ModelFilePart | ModelThinkingPart
+)
 
 
 class ModelToolCall(WireModel):
@@ -196,7 +198,7 @@ class ChatModelResponse(WireModel):
 # ——————————————————— 流式事件 ———————————————————
 
 class _StreamEvent(WireModel):
-    type: str
+    """流式事件公共基类；具体 ``type`` 由各子类用 Literal 声明。"""
 
 
 class ChatStreamStart(_StreamEvent):
@@ -263,7 +265,7 @@ class ChatStreamError(_StreamEvent):
     error: ProviderError
 
 
-ChatStreamEvent = (
+ChatStreamEvent: TypeAlias = (
     ChatStreamStart
     | ChatTextDelta
     | ChatThinkingDelta

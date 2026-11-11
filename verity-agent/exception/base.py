@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any
 
 __all__ = [
     "VerityError",
@@ -39,31 +39,26 @@ __all__ = [
 class VerityError(Exception):
     """项目内所有可预期异常的基类。"""
 
-    code: ClassVar[str] = "INTERNAL"
-    http_status: ClassVar[int] = 500
-    default_message: ClassVar[str] = "服务内部错误"
-    user_visible: ClassVar[bool] = True
-    retryable: ClassVar[bool] = False
+    code: str = "INTERNAL"
+    http_status: int = 500
+    default_message: str = "服务内部错误"
+    user_visible: bool = True
+    retryable: bool = False
 
     def __init__(
         self,
         message: str | None = None,
         *,
-        detail: Mapping[str, Any] | None = None,
+        # 对外错误信封中的 details 字段；也是唯一的内部存储
         details: Mapping[str, Any] | None = None,
         user_visible: bool | None = None,
         retryable: bool | None = None,
         retry_after_s: float | None = None,
     ) -> None:
         self.message = message or self.default_message
-        merged: dict[str, Any] = {}
-        if detail:
-            merged.update(detail)
-        if details:
-            merged.update(details)
+        self.details: dict[str, Any] = dict(details or {})
         if retry_after_s is not None:
-            merged["retry_after_s"] = retry_after_s
-        self.details: dict[str, Any] = merged
+            self.details["retry_after_s"] = retry_after_s
         self.retry_after_s = retry_after_s
         if user_visible is not None:
             self.user_visible_value = user_visible
@@ -74,11 +69,6 @@ class VerityError(Exception):
         else:
             self.retryable_value = self.retryable
         super().__init__(self.message)
-
-    @property
-    def detail(self) -> dict[str, Any]:
-        """兼容旧代码的别名。"""
-        return self.details
 
     def to_dict(self, *, request_id: str | None = None) -> dict[str, Any]:
         """转成《API 与流式契约》§0.2 的错误信封。"""
@@ -145,7 +135,6 @@ class NotFoundError(VerityError):
         resource: str,
         identifier: object | None = None,
         *,
-        detail: Mapping[str, Any] | None = None,
         details: Mapping[str, Any] | None = None,
     ) -> None:
         message = (
@@ -156,8 +145,6 @@ class NotFoundError(VerityError):
         merged: dict[str, Any] = {"resource": resource}
         if identifier is not None:
             merged["identifier"] = str(identifier)
-        if detail:
-            merged.update(detail)
         if details:
             merged.update(details)
         super().__init__(message, details=merged)
@@ -184,15 +171,15 @@ class InvalidStateTransitionError(ConflictError):
         current: object,
         target: object,
         *,
-        detail: Mapping[str, Any] | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         merged: dict[str, Any] = {
             "resource": resource,
             "current": str(current),
             "target": str(target),
         }
-        if detail:
-            merged.update(detail)
+        if details:
+            merged.update(details)
         super().__init__(
             f"{resource}状态不能从 {current} 变更为 {target}",
             details=merged,

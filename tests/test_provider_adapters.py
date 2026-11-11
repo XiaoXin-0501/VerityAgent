@@ -7,7 +7,10 @@ import json
 import sys
 from pathlib import Path
 
+import anthropic
+import cohere
 import httpx
+import openai
 
 _ROOT = Path(__file__).resolve().parents[1]
 _AGENT_ROOT = _ROOT / "verity-agent"
@@ -23,6 +26,7 @@ from provider.llm.types import (  # noqa: E402
     ModelTextPart,
 )
 from provider.reranker.types import RerankDocument, RerankRequest  # noqa: E402
+from provider.sdk import close_cohere_client  # noqa: E402
 
 
 def _chat_model(
@@ -32,6 +36,7 @@ def _chat_model(
     api_style: str | None = None,
     capabilities: dict | None = None,
     defaults: dict | None = None,
+    base_url: str = "https://provider.test/v1",
 ) -> ModelConfig:
     return ModelConfig(
         id=model_id,
@@ -39,7 +44,7 @@ def _chat_model(
         model="test-model",
         kind="chat",
         api_style=api_style,
-        base_url="https://provider.test/v1",
+        base_url=base_url,
         capabilities=capabilities or {},
         defaults=defaults or {},
     )
@@ -55,6 +60,30 @@ def _request() -> ChatModelRequest:
     return ChatModelRequest(
         model="test-model",
         messages=[ModelMessage(role="user", content=[ModelTextPart(text="hi")])],
+    )
+
+
+def _openai_client(handler) -> openai.AsyncOpenAI:
+    return openai.AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://provider.test/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
+def _anthropic_client(handler) -> anthropic.AsyncAnthropic:
+    return anthropic.AsyncAnthropic(
+        api_key="test-key",
+        base_url="https://provider.test",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
+def _cohere_client(handler) -> cohere.AsyncClient:
+    return cohere.AsyncClient(
+        api_key="test-key",
+        base_url="https://provider.test",
+        httpx_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
 
 
@@ -97,14 +126,11 @@ def test_openai_chat_complete() -> None:
             )
 
         registry, provider = _registry_with(_chat_model())
-        provider._http = httpx.AsyncClient(
-            base_url="https://provider.test/v1/",
-            transport=httpx.MockTransport(handler),
-        )
+        provider._client = _openai_client(handler)
         try:
             response = await registry.get_model_by_id("test-model").complete(_request())
         finally:
-            await provider._http.aclose()
+            await provider._client.close()
         assert response.finish_reason.value == "tool_calls"
         assert response.message.content[0].text == "hello"
         assert response.message.tool_calls[0].arguments == {"query": "x"}
@@ -133,10 +159,7 @@ def test_openai_chat_stream() -> None:
             )
 
         registry, provider = _registry_with(_chat_model())
-        provider._http = httpx.AsyncClient(
-            base_url="https://provider.test/v1/",
-            transport=httpx.MockTransport(handler),
-        )
+        provider._client = _openai_client(handler)
         try:
             events = [
                 event
@@ -145,7 +168,7 @@ def test_openai_chat_stream() -> None:
                 )
             ]
         finally:
-            await provider._http.aclose()
+            await provider._client.close()
         assert "".join(
             event.text for event in events if type(event).__name__ == "ChatTextDelta"
         ) == "hello"
@@ -180,16 +203,17 @@ def test_anthropic_complete() -> None:
             )
 
         registry, provider = _registry_with(
-            _chat_model(provider="anthropic", api_style="anthropic_messages")
+            _chat_model(
+                provider="anthropic",
+                api_style="anthropic_messages",
+                base_url="https://provider.test",
+            )
         )
-        provider._http = httpx.AsyncClient(
-            base_url="https://provider.test/v1/",
-            transport=httpx.MockTransport(handler),
-        )
+        provider._client = _anthropic_client(handler)
         try:
             response = await registry.get_model_by_id("test-model").complete(_request())
         finally:
-            await provider._http.aclose()
+            await provider._client.close()
         assert response.finish_reason.value == "tool_calls"
         assert response.message.tool_calls[0].arguments == {"query": "x"}
         assert response.usage.total_tokens == 5
@@ -222,16 +246,13 @@ def test_embedding_complete() -> None:
             capabilities={"dimensions": 2},
         )
         registry, provider = _registry_with(model)
-        provider._http = httpx.AsyncClient(
-            base_url="https://provider.test/v1/",
-            transport=httpx.MockTransport(handler),
-        )
+        provider._client = _openai_client(handler)
         try:
             result = await registry.get_model_by_id("emb").embed(
                 EmbeddingRequest(model="emb", inputs=["a", "b"])
             )
         finally:
-            await provider._http.aclose()
+            await provider._client.close()
         assert result.dimensions == 2
         assert result.vectors[1] == [0.3, 0.4]
 
@@ -257,13 +278,10 @@ def test_rerank_complete() -> None:
             provider="cohere",
             model="rr",
             kind="rerank",
-            base_url="https://provider.test/v1",
+            base_url="https://provider.test",
         )
         registry, provider = _registry_with(model)
-        provider._http = httpx.AsyncClient(
-            base_url="https://provider.test/v1/",
-            transport=httpx.MockTransport(handler),
-        )
+        provider._client = _cohere_client(handler)
         try:
             result = await registry.get_model_by_id("rr").rerank(
                 RerankRequest(
@@ -276,7 +294,7 @@ def test_rerank_complete() -> None:
                 )
             )
         finally:
-            await provider._http.aclose()
+            await close_cohere_client(provider._client)
         assert [item.id for item in result.results] == ["b", "a"]
 
     asyncio.run(run())

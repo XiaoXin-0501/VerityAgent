@@ -8,10 +8,18 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+import cohere
+
 from config.provider import RerankProviderConfig
 from exception.provider import ProviderError, ProviderErrorCode
-from api.network import HttpProviderMixin
 from provider.reranker.base import RerankModel, RerankProvider
+from provider.sdk import (
+    build_cohere_client,
+    close_cohere_client,
+    sdk_dump,
+    sdk_error,
+)
+from cohere.core.request_options import RequestOptions
 from provider.reranker.types import (
     RerankRequest,
     RerankResponse,
@@ -27,32 +35,44 @@ class CohereRerankModel(RerankModel):
         super().__init__(spec)
         self.provider = provider
 
-    def _payload(self, request: RerankRequest) -> dict[str, Any]:
+    async def rerank(self, request: RerankRequest) -> RerankResponse:
         object_format = self.provider.config.metadata.get("documents_format") == "object"
         documents = (
             [{"text": doc.text} for doc in request.documents]
             if object_format
             else [doc.text for doc in request.documents]
         )
-        payload: dict[str, Any] = {
+        extra_body: dict[str, Any] = {}
+        if self.provider.config.metadata.get("send_input_type"):
+            extra_body["input_type"] = self.provider.config.metadata.get("input_type")
+        options: RequestOptions = {
+            "max_retries": self.provider.config.max_retries,
+            "timeout_in_seconds": int(self.provider.config.timeout_s),
+        }
+        if self.provider.config.headers:
+            options["additional_headers"] = dict(self.provider.config.headers)
+        if extra_body:
+            options["additional_body_parameters"] = extra_body
+        kwargs: dict[str, Any] = {
             "model": self.spec.model,
             "query": request.query,
             "documents": documents,
             "return_documents": request.return_documents,
         }
         if request.top_k is not None:
-            payload["top_n"] = min(request.top_k, len(request.documents))
-        if self.provider.config.metadata.get("send_input_type"):
-            payload["input_type"] = self.provider.config.metadata.get("input_type")
-        return payload
-
-    async def rerank(self, request: RerankRequest) -> RerankResponse:
-        data = await self.provider.request_json(
-            "POST",
-            "rerank",
-            payload=self._payload(request),
-            model=self.spec.model,
-        )
+            kwargs["top_n"] = min(request.top_k, len(request.documents))
+        try:
+            response = await self.provider.client.rerank(
+                request_options=options,
+                **kwargs,
+            )
+        except Exception as exc:
+            raise sdk_error(
+                exc,
+                provider=self.provider.config.name,
+                model=self.spec.model,
+            ) from exc
+        data = sdk_dump(response)
         results = data.get("results")
         if not isinstance(results, list):
             raise ProviderError(
@@ -92,7 +112,7 @@ class CohereRerankModel(RerankModel):
         )
 
 
-class CohereRerankProvider(RerankProvider, HttpProviderMixin):
+class CohereRerankProvider(RerankProvider):
     model_class = CohereRerankModel
     default_capabilities = {
         "supports_return_documents": True,
@@ -101,15 +121,28 @@ class CohereRerankProvider(RerankProvider, HttpProviderMixin):
 
     def __init__(self, config: RerankProviderConfig) -> None:
         super().__init__(config)
-        self._init_http()
+        self._client: cohere.AsyncClient | None = None
         self._handles: dict[str, RerankModel] = {}
 
+    @property
+    def client(self) -> cohere.AsyncClient:
+        if self._client is None:
+            raise ProviderError(
+                ProviderErrorCode.UNAVAILABLE,
+                "Cohere SDK 客户端尚未初始化",
+                provider=self.config.name,
+            )
+        return self._client
+
     async def open(self) -> None:
+        client = build_cohere_client(self.config)
         await super().open()
-        await self.open_http()
+        self._client = client
 
     async def close(self) -> None:
-        await self.close_http()
+        if self._client is not None:
+            await close_cohere_client(self._client)
+            self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> RerankModel:

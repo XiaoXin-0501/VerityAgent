@@ -52,7 +52,7 @@ _POOL_NAME = "verity-agent-pg"
 class PGConnectionManager:
     """PostgreSQL 连接池封装。
 
-    所有池参数都来自 :class:`setting.PGConfig`（``PG__POOL_*`` /
+    所有池参数都来自 :class:`config.PGConfig`（``PG__POOL_*`` /
     ``PG__CONNECT_TIMEOUT``），构造时只需传入 config；不传则使用全局
     ``settings.pg``。对外只暴露 ``open/close/ping/connection/transaction``，
     池的创建推迟到 ``open()``（即在运行中的事件循环里），避免在 import 阶段
@@ -80,7 +80,7 @@ class PGConnectionManager:
         if self._max_idle < 0 or self._max_lifetime < 0:
             raise ValueError("pool_max_idle / pool_max_lifetime 不能为负数")
 
-        self._pool: AsyncConnectionPool[Row] | None = None
+        self._pool: AsyncConnectionPool[psycopg.AsyncConnection[Row]] | None = None
         self._lock = asyncio.Lock()
 
     # ——————————————————— 生命周期 ———————————————————
@@ -97,13 +97,13 @@ class PGConnectionManager:
         )
 
     @property
-    def pool(self) -> AsyncConnectionPool[Row]:
+    def pool(self) -> AsyncConnectionPool[psycopg.AsyncConnection[Row]]:
         """底层连接池（必须先 ``open()`` 或用过一次连接）。"""
         if self._pool is None or self._pool.closed:
             raise PGConnectionError("连接池尚未初始化，请先调用 open()/init_pg()")
         return self._pool
 
-    def _build_pool(self) -> AsyncConnectionPool[Row]:
+    def _build_pool(self) -> AsyncConnectionPool[psycopg.AsyncConnection[Row]]:
         return AsyncConnectionPool(
             conninfo=self.conninfo,
             min_size=self._min_size,
@@ -137,7 +137,7 @@ class PGConnectionManager:
                 raise PGConnectionError(
                     f"无法连接 PostgreSQL {self._config.server}:{self._config.port}"
                     f"/{self._config.db}",
-                    detail={
+                    details={
                         "host": str(self._config.server),
                         "port": self._config.port,
                         "db": str(self._config.db),
@@ -161,7 +161,7 @@ class PGConnectionManager:
         except psycopg.Error as exc:
             raise PGConnectionError(
                 "PostgreSQL 探活失败",
-                detail={"host": str(self._config.server), "db": str(self._config.db)},
+                details={"host": str(self._config.server), "db": str(self._config.db)},
             ) from exc
         return True
 
@@ -185,7 +185,7 @@ class PGConnectionManager:
         except (PoolTimeout, PoolClosed) as exc:
             raise PGConnectionError(
                 "获取 PostgreSQL 连接失败（超时或连接池已关闭）",
-                detail={
+                details={
                     "host": str(self._config.server),
                     "db": str(self._config.db),
                     "cause": str(exc),

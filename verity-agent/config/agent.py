@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
+
+from .base import ConfigModel
 
 __all__ = ["AgentConfig", "AgentPolicy", "AgentStreamConfig"]
 
 
-class AgentStreamConfig(BaseModel):
+class AgentStreamConfig(ConfigModel):
     """SSE 流式输出配置。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # SSE 心跳间隔（秒）；空闲时发送 keepalive
     heartbeat_interval_s: float = Field(default=15.0, gt=0)
@@ -20,10 +20,8 @@ class AgentStreamConfig(BaseModel):
     replay_buffer_size: int = Field(default=1024, ge=64)
 
 
-class AgentPolicy(BaseModel):
+class AgentPolicy(ConfigModel):
     """内部运行限制；由 AgentConfig 派生，不直接暴露给调用方。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # 单次 run 最多回合数；防止无限循环
     max_turns_per_run: int = Field(default=20, ge=1)
@@ -41,9 +39,7 @@ class AgentPolicy(BaseModel):
     turn_timeout_s: float = Field(default=900.0, gt=0)
 
 
-class AgentConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class AgentConfig(ConfigModel):
     # 运行限制（回合/工具/LLM 次数/租约）
     policy: AgentPolicy = Field(default_factory=AgentPolicy)
     # SSE 心跳与重放缓冲

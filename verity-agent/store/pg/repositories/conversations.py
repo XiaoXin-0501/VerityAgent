@@ -110,11 +110,9 @@ class ConversationRepository(BaseRepository):
     ) -> list[Conversation]:
         """会话列表按 last_message_at 倒序，避免子查 conversation_messages。"""
         limit, offset = pagination(limit, offset)
-        conditions = ["user_id = %s"]
+        conditions = ["user_id = %s", "deleted_at IS NULL"]
         params: list[Any] = [as_uuid(user_id)]
-        if status is None:
-            conditions.append("deleted_at IS NULL")
-        else:
+        if status is not None:
             conditions.append("status = %s")
             params.append(_param(status))
         params.extend([limit, offset])
@@ -245,7 +243,7 @@ class ConversationRepository(BaseRepository):
         if conversation is None:
             raise ConflictError(
                 "会话已有活跃 run",
-                detail={
+                details={
                     "conversation_id": str(conversation_id),
                     "run_id": str(run_id),
                 },
@@ -790,7 +788,7 @@ class ConversationSummaryRepository(BaseRepository):
             except ValueError as exc:
                 raise ValidationError(
                     "summary_json 不符合固定结构",
-                    detail={"error": str(exc)},
+                    details={"error": str(exc)},
                 ) from exc
 
         payload = to_jsonb(model)
@@ -878,7 +876,7 @@ class ConversationSummaryRepository(BaseRepository):
                 )
                 raise ConflictError(
                     "摘要覆盖序号冲突",
-                    detail={
+                    details={
                         "conversation_id": str(conversation_id),
                         "current_covered_through_seq": current,
                         "expected_covered_through_seq": expected_covered_through_seq,

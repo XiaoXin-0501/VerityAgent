@@ -271,6 +271,7 @@ class MinioStorage:
                 for item in self.manager.client.list_objects(
                     bucket, prefix=prefix, recursive=recursive
                 )
+                if item.object_name
             ]
 
         try:

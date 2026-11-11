@@ -343,12 +343,12 @@ class KnowledgeBaseRepository(BaseRepository):
         if kb.status is not KnowledgeBaseStatus.ACTIVE:
             raise PermissionDeniedError(
                 f"知识库当前不可用（status={kb.status}）",
-                detail={"kb_id": str(kb.id), "status": kb.status.value},
+                details={"kb_id": str(kb.id), "status": kb.status.value},
             )
         if not await self.is_accessible(user_id, kb_id, conn=conn):
             raise PermissionDeniedError(
                 "没有访问该知识库的权限（缺少 required_permission_code）",
-                detail={
+                details={
                     "kb_id": str(kb.id),
                     "required_permission_code": kb.required_permission_code,
                 },

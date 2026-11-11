@@ -6,7 +6,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 
 from provider.base import BaseProvider, ProviderModelSpec
-from config.provider import ChatProviderConfig
+from config.provider import ChatApiStyle, ChatProviderConfig
 from provider.enums import ProviderKind
 
 from .types import ChatModelRequest, ChatModelResponse, ChatStreamEvent
@@ -30,23 +30,26 @@ class ChatModel:
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
         raise NotImplementedError
 
-    def stream(self, request: ChatModelRequest) -> AsyncIterator[ChatStreamEvent]:
+    async def stream(
+        self, request: ChatModelRequest
+    ) -> AsyncIterator[ChatStreamEvent]:
+        """流式调用；实现方必须是 async generator。"""
         raise NotImplementedError
+        yield  # pragma: no cover - 仅用于声明 async generator 接口
 
     async def count_tokens(self, request: ChatModelRequest) -> int | None:
         """可选精确计数；默认返回 None，由 LLM 层用估算。"""
         return None
 
 
-class ChatProvider(BaseProvider):
+class ChatProvider(BaseProvider[ChatProviderConfig]):
     kind = ProviderKind.CHAT
 
     def __init__(self, config: ChatProviderConfig) -> None:
         super().__init__(config)
-        self.config: ChatProviderConfig
 
     @property
-    def api_style(self):
+    def api_style(self) -> ChatApiStyle:
         return self.config.api_style
 
     @abstractmethod

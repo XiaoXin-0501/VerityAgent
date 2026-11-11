@@ -76,7 +76,7 @@ class MinioConnectionManager:
             if not self._config.enabled:
                 logger.info("MinIO 未启用，跳过初始化")
                 return
-            self._client = Minio(
+            client = Minio(
                 self._config.endpoint,
                 access_key=self._config.access_key or None,
                 secret_key=self._config.secret_key.get_secret_value() or None,
@@ -85,8 +85,16 @@ class MinioConnectionManager:
                 http_client=_build_http_client(self._config),
                 cert_check=self._config.cert_check,
             )
-            if self._config.auto_create_buckets:
-                await self.ensure_buckets()
+            self._client = client
+            try:
+                if self._config.auto_create_buckets:
+                    await self.ensure_buckets()
+            except Exception:
+                http_client = getattr(client, "_http", None)
+                if http_client is not None and hasattr(http_client, "clear"):
+                    http_client.clear()
+                self._client = None
+                raise
 
     async def close(self) -> None:
         async with self._lock:
@@ -152,7 +160,7 @@ class MinioConnectionManager:
                 return MinioObjectNotFoundError("对象", exc.object_name or "")
             return MinioOperationError(
                 "MinIO S3 操作失败",
-                detail={"code": exc.code, "resource": exc.resource},
+                details={"code": exc.code, "resource": exc.resource},
             )
         import urllib3
 
@@ -166,8 +174,8 @@ class MinioConnectionManager:
                 OSError,
             ),
         ):
-            return MinioConnectionError("MinIO 连接失败", detail={"cause": str(exc)})
-        return MinioOperationError("MinIO 操作失败", detail={"cause": str(exc)})
+            return MinioConnectionError("MinIO 连接失败", details={"cause": str(exc)})
+        return MinioOperationError("MinIO 操作失败", details={"cause": str(exc)})
 
 
 _default_minio: MinioConnectionManager | None = None

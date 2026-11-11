@@ -32,8 +32,6 @@
       "timeout_s": 60,
       // transport 重试次数；不含 LLM 模型 fallback
       "max_retries": 2,
-      // transport 重试退避基数（毫秒）
-      "retry_backoff_ms": 200,
       // 额外非敏感 HTTP header；不得放密钥
       "headers": {
         // 自定义非敏感 header；不得放密钥
@@ -136,8 +134,8 @@
       "kind": "chat",
       // Anthropic 固定使用 anthropic_messages
       "api_style": "anthropic_messages",
-      // API 基地址
-      "base_url": "https://api.anthropic.com/v1",
+      // API 基地址；Anthropic SDK 会追加 /v1，不要重复写 /v1
+      "base_url": "https://api.anthropic.com",
       // 密钥环境变量名
       "api_key_env": "ANTHROPIC_API_KEY",
       // 直接密钥（可选）
@@ -146,8 +144,6 @@
       "timeout_s": 60,
       // transport 重试次数
       "max_retries": 2,
-      // 重试退避基数（毫秒）
-      "retry_backoff_ms": 200,
       // 额外非敏感 header
       "headers": {},
       // 是否启用
@@ -255,8 +251,6 @@
       "timeout_s": 60,
       // transport 重试次数
       "max_retries": 2,
-      // 重试退避基数（毫秒）
-      "retry_backoff_ms": 200,
       // 额外非敏感 header
       "headers": {},
       // 是否启用
@@ -314,8 +308,8 @@
       "model": "rerank-v3.5",
       // 模型类型
       "kind": "rerank",
-      // API 基地址
-      "base_url": "https://api.cohere.com/v1",
+      // API 基地址；Cohere SDK 会追加 /v1，不要重复写 /v1
+      "base_url": "https://api.cohere.com",
       // 密钥环境变量名
       "api_key_env": "COHERE_API_KEY",
       // 直接密钥（可选）
@@ -324,8 +318,6 @@
       "timeout_s": 60,
       // transport 重试次数
       "max_retries": 2,
-      // 重试退避基数（毫秒）
-      "retry_backoff_ms": 200,
       // 额外非敏感 header
       "headers": {},
       // 是否启用；没有 rerank 服务时保持 false

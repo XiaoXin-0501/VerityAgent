@@ -89,10 +89,3 @@ def deep_merge(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, A
 def without_none(value: Mapping[str, Any]) -> dict[str, Any]:
     """去掉值为 None 的键（PATCH 语义）。"""
     return {key: item for key, item in value.items() if item is not None}
-
-
-def ensure_json_object(value: Any, *, field: str = "value") -> dict[str, Any]:
-    """校验 JSON 对象；用于仓储层接收 dict 入参。"""
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{field} 必须是 JSON 对象")
-    return {str(key): item for key, item in value.items()}

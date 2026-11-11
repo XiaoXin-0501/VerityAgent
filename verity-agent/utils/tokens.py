@@ -12,7 +12,7 @@ v1 不引入 tiktoken / 厂商 tokenizer 依赖，先用保守的字符启发式
 
 from __future__ import annotations
 
-__all__ = ["estimate_tokens", "fits_budget", "truncate_to_tokens"]
+__all__ = ["estimate_tokens", "fits_budget", "truncate_to_tokens", "split_by_tokens"]
 
 _CJK_RANGES = (
     (0x4E00, 0x9FFF),    # CJK Unified Ideographs
@@ -54,22 +54,42 @@ def truncate_to_tokens(text: str, max_tokens: int, *, suffix: str = "…") -> st
     if budget <= 0:
         return suffix[:max_tokens]
 
-    # 逐字符累计，CJK 记 1、其余按 4 字符记 1；简单可靠，文本不会很长。
+    # 逐字符累计：CJK 记 1；非 CJK 每 4 字符记 1，但不足 4 字符的
+    # 尾组也按 1 token 估算（与 estimate_tokens 的 ceil 口径一致）。
     used = 0
     end = 0
     pending_ascii = 0
     for index, char in enumerate(text):
         if _is_cjk(char):
             if pending_ascii:
-                used += 1
                 pending_ascii = 0
             used += 1
         else:
             pending_ascii += 1
-            if pending_ascii == 4:
+            if pending_ascii == 1:
                 used += 1
+            elif pending_ascii == 4:
                 pending_ascii = 0
         if used > budget:
             break
         end = index + 1
     return text[:end].rstrip() + suffix
+
+
+def split_by_tokens(text: str, max_tokens: int) -> list[str]:
+    """把文本切成每段不超过 ``max_tokens`` 的片段，不丢字符。
+
+    用于切片器处理单个超长段落；优先调用 ``truncate_to_tokens``，保证
+    与 token 估算使用同一套口径。
+    """
+    if max_tokens <= 0:
+        raise ValueError("max_tokens 必须 > 0")
+    pieces: list[str] = []
+    rest = text
+    while rest:
+        piece = truncate_to_tokens(rest, max_tokens, suffix="")
+        if not piece:
+            break
+        pieces.append(piece)
+        rest = rest[len(piece):]
+    return pieces

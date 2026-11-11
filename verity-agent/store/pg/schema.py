@@ -20,7 +20,7 @@ from __future__ import annotations
 from argon2 import PasswordHasher
 from psycopg import AsyncConnection
 
-from .connection import PGConnectionManager, get_pg
+from .connection import PGConnectionManager, Row, get_pg
 
 # 仅用于开发/首次启动；生产环境必须改密或删除
 DEFAULT_USERS: tuple[tuple[str, str], ...] = (
@@ -409,7 +409,7 @@ async def init_schema(db: PGConnectionManager | None = None) -> None:
         await seed_default_users(conn)
 
 
-async def seed_default_users(conn: AsyncConnection) -> None:
+async def seed_default_users(conn: AsyncConnection[Row]) -> None:
     """插入默认账号；用户名已存在时保持原密码不动。"""
     for username, password in DEFAULT_USERS:
         await conn.execute(

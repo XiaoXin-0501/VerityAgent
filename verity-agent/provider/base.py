@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -30,6 +30,7 @@ __all__ = [
     "ProviderHealth",
     "ModelHandle",
     "BaseProvider",
+    "ConfigT",
 ]
 
 
@@ -148,7 +149,10 @@ class ModelHandle(Protocol):
     spec: ProviderModelSpec
 
 
-class BaseProvider(ABC):
+ConfigT = TypeVar("ConfigT", bound=ProviderConfig)
+
+
+class BaseProvider(ABC, Generic[ConfigT]):
     """Provider 生命周期与模型清单。
 
     启动时一次性注册，运行期只读；具体厂商在子类里实现 ``get_model``。
@@ -156,13 +160,13 @@ class BaseProvider(ABC):
 
     kind: ProviderKind
 
-    def __init__(self, config: ProviderConfig) -> None:
+    def __init__(self, config: ConfigT) -> None:
         if config.kind is not self.kind:
             raise ConfigurationError(
                 f"provider {config.name} 配置类型为 {config.kind}，"
                 f"但实例是 {self.kind}"
             )
-        self.config = config
+        self.config: ConfigT = config
         self._models: dict[str, ProviderModelSpec] = {}
         self._opened = False
 

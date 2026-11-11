@@ -104,5 +104,5 @@ class MemoryFactLimitExceeded(ConflictError):
     def __init__(self, fact_count: int, limit: int = 150) -> None:
         super().__init__(
             f"用户长期事实已达上限 {limit} 条（当前 {fact_count}），需先淘汰部分事实",
-            detail={"fact_count": fact_count, "limit": limit},
+            details={"fact_count": fact_count, "limit": limit},
         )

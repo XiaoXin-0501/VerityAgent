@@ -49,7 +49,7 @@ class WeaviateStore:
             return await asyncio.to_thread(func, *args, **kwargs)
         except Exception as exc:
             raise WeaviateOperationError(
-                "Weaviate 操作失败", detail={"cause": str(exc)}
+                "Weaviate 操作失败", details={"cause": str(exc)}
             ) from exc
 
     async def delete_doc_chunks(

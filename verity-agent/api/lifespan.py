@@ -14,6 +14,8 @@ from fastapi import FastAPI
 
 from config import settings
 from exception import RedisError
+from agent.hooks.builtin.factory import build_dispatcher
+from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 from provider.factory import build_registry
 from store.minio import close_minio, init_minio
 from store.neo4j import (
@@ -24,6 +26,7 @@ from store.neo4j import (
     init_schema as init_graph_schema,
 )
 from store.pg import close_pg, init_pg, init_schema
+from store.pg.repositories import ConversationRepository
 from store.redis import close_redis, init_redis
 from store.weaviate import (
     SchemaManager,
@@ -106,6 +109,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     registry = build_registry(settings.models)
     await registry.init_all()
     app.state.provider_registry = registry
+    hook_dispatcher = build_dispatcher(
+        settings.hooks,
+        conversation_repository=ConversationRepository(),
+    )
+    app.state.hook_dispatcher = hook_dispatcher
+    tool_registry = build_tool_registry()
+    app.state.tool_registry = tool_registry
+    app.state.tool_pipeline = build_tool_pipeline(tool_registry, settings.tools)
     app.state.redis_ready = redis_ready
     app.state.minio_ready = minio_ready
     app.state.weaviate_ready = weaviate_ready
@@ -115,6 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await registry.close_all()
+        await hook_dispatcher.close()
         # close_* 都是幂等的；即使初始化中途失败也要释放已建立的连接
         await close_neo4j()
         await close_weaviate()

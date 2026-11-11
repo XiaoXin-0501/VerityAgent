@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
+
+from .base import ConfigModel
 
 __all__ = ["LLMConfig", "StructuredOutputConfig"]
 
 
-class StructuredOutputConfig(BaseModel):
+class StructuredOutputConfig(ConfigModel):
     """结构化输出的默认策略（D-44）。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # 优先使用模型原生 JSON Schema；不支持时由 LLM 层决定降级
     prefer_native_schema: bool = True
@@ -22,10 +22,8 @@ class StructuredOutputConfig(BaseModel):
     max_repair_attempts: int = Field(default=1, ge=0, le=3)
 
 
-class LLMConfig(BaseModel):
+class LLMConfig(ConfigModel):
     """LLM 应用层默认策略。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # LLM 可使用的应用模型 id 列表（引用顶层 MODELS[].id）
     model_ids: list[str] = Field(default_factory=list)

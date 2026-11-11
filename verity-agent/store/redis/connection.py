@@ -122,7 +122,7 @@ class RedisConnectionManager:
         if self._client is None:
             raise RedisConnectionError(
                 "Redis 客户端尚未初始化，请先调用 open()/init_redis()",
-                detail={"target": self._safe_target},
+                details={"target": self._safe_target},
             )
         return self._client
 
@@ -153,7 +153,7 @@ class RedisConnectionManager:
             except (TypeError, ValueError) as exc:
                 raise ConfigurationError(
                     "Redis URL/连接参数不合法",
-                    detail={"target": self._safe_target, "cause": str(exc)},
+                    details={"target": self._safe_target, "cause": str(exc)},
                 ) from exc
 
             try:
@@ -165,7 +165,7 @@ class RedisConnectionManager:
                     logger.warning("关闭未就绪的 Redis 客户端失败", exc_info=True)
                 raise RedisConnectionError(
                     f"无法连接 Redis: {exc}",
-                    detail={"target": self._safe_target, "cause": str(exc)},
+                    details={"target": self._safe_target, "cause": str(exc)},
                 ) from exc
 
             self._client = client
@@ -250,6 +250,12 @@ class RedisConnectionManager:
     async def hgetall(self, name: str) -> dict[str, Any]:
         return await self._call("hgetall", name)
 
+    async def hincrby(self, name: str, key: str, amount: int = 1) -> int:
+        return await self._call("hincrby", name, key, amount)
+
+    async def hincrbyfloat(self, name: str, key: str, amount: float) -> float:
+        return await self._call("hincrbyfloat", name, key, amount)
+
     # ——————————————————— List / Set ———————————————————
 
     async def lpush(self, name: str, *values: Any) -> int:
@@ -294,17 +300,17 @@ class RedisConnectionManager:
         command: str,
         key: object | None = None,
     ) -> RedisConnectionError | RedisCommandError:
-        detail: dict[str, Any] = {"command": command}
+        details: dict[str, Any] = {"command": command}
         if key is not None:
-            detail["key"] = str(key)
-        detail["cause"] = str(exc)
+            details["key"] = str(key)
+        details["cause"] = str(exc)
 
         if isinstance(
             exc,
             (RedisConnectionException, RedisTimeoutException, OSError),
         ):
-            return RedisConnectionError("Redis 连接失败", detail=detail)
-        return RedisCommandError("Redis 命令执行失败", detail=detail)
+            return RedisConnectionError("Redis 连接失败", details=details)
+        return RedisCommandError("Redis 命令执行失败", details=details)
 
 
 # ——————————————————— 进程内单例 ———————————————————

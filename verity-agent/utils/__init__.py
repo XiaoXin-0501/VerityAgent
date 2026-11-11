@@ -31,6 +31,7 @@ from .pagination import (
     encode_cursor,
     normalize_limit,
 )
+from .sampling import stable_sample
 from .serialization import (
     canonical_json,
     deep_merge,
@@ -57,7 +58,7 @@ from .time import (
     to_utc,
     utcnow,
 )
-from .tokens import estimate_tokens, fits_budget, truncate_to_tokens
+from .tokens import estimate_tokens, fits_budget, split_by_tokens, truncate_to_tokens
 
 __all__ = [
     # ids
@@ -97,11 +98,13 @@ __all__ = [
     "estimate_tokens",
     "fits_budget",
     "truncate_to_tokens",
+    "split_by_tokens",
     # text
     "normalize_whitespace",
     "strip_control_chars",
     "truncate",
     "ensure_prefix",
+    "stable_sample",
     "mask_secret",
     # pagination
     "Page",

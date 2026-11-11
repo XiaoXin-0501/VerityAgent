@@ -6,7 +6,7 @@
 - :class:`MessageEncodeError`：领域消息无法序列化成存储协议（HTTP 500）；
 - :class:`MessageDecodeError`：存储协议无法还原成领域消息（HTTP 500）；
 - :class:`UnsupportedMessageVersionError` / :class:`UnknownMessageRoleError`：
-  解码时的两种常见协议错误，带机器可读 detail。
+  解码时的两种常见协议错误，带机器可读 details。
 """
 
 from __future__ import annotations
@@ -58,11 +58,11 @@ class UnsupportedMessageVersionError(MessageDecodeError):
         self,
         version: object,
         *,
-        detail: Mapping[str, Any] | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         merged: dict[str, Any] = {"version": version}
-        merged.update(detail or {})
-        super().__init__(f"不支持的消息版本: {version}", detail=merged)
+        merged.update(details or {})
+        super().__init__(f"不支持的消息版本: {version}", details=merged)
 
 
 class UnknownMessageRoleError(MessageDecodeError):
@@ -75,11 +75,11 @@ class UnknownMessageRoleError(MessageDecodeError):
         self,
         role: object,
         *,
-        detail: Mapping[str, Any] | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         merged: dict[str, Any] = {"role": str(role)}
-        merged.update(detail or {})
-        super().__init__(f"未知的消息角色: {role}", detail=merged)
+        merged.update(details or {})
+        super().__init__(f"未知的消息角色: {role}", details=merged)
 
 
 __all__ = [

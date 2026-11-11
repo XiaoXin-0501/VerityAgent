@@ -7,17 +7,23 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
+import openai
+
 from config.provider import ChatProviderConfig
 from provider.enums import (
     ChatFinishReason,
     ModelRole,
-    ProviderErrorCode,
     ResponseFormatType,
     ToolChoiceMode,
 )
-from exception.provider import ProviderError
-from api.network import HttpProviderMixin
+from exception.provider import ProviderError, ProviderErrorCode
 from provider.llm.base import ChatModel, ChatProvider
+from provider.sdk import (
+    build_openai_client,
+    sdk_dump,
+    sdk_error,
+    split_sdk_kwargs,
+)
 from provider.llm.types import (
     ChatModelRequest,
     ChatModelResponse,
@@ -42,6 +48,21 @@ from provider.llm.types import (
 )
 
 __all__ = ["OpenAIResponsesChatModel", "OpenAIResponsesChatProvider"]
+
+_RESPONSES_KWARGS = frozenset(
+    {
+        "model",
+        "input",
+        "stream",
+        "tools",
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "max_output_tokens",
+        "parallel_tool_calls",
+        "text",
+    }
+)
 
 
 def _usage(payload: Mapping[str, Any] | None) -> ChatUsage:
@@ -277,13 +298,18 @@ class OpenAIResponsesChatModel(ChatModel):
         )
 
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
-        data = await self.provider.request_json(
-            "POST",
-            "responses",
-            payload=self._payload(request, stream=False),
-            model=self.spec.model,
-        )
-        return self._response(data)
+        payload = self._payload(request, stream=False)
+        try:
+            response = await self.provider.client.responses.create(
+                **split_sdk_kwargs(payload, _RESPONSES_KWARGS)
+            )
+        except Exception as exc:
+            raise sdk_error(
+                exc,
+                provider=self.provider.config.name,
+                model=self.spec.model,
+            ) from exc
+        return self._response(sdk_dump(response))
 
     async def stream(self, request: ChatModelRequest) -> AsyncIterator[ChatStreamEvent]:
         payload = self._payload(request, stream=True)
@@ -293,14 +319,14 @@ class OpenAIResponsesChatModel(ChatModel):
         finish_reason = ChatFinishReason.STOP
         response_id: str | None = None
         try:
-            async for event_name, data_text in self.provider.stream_sse(
-                "responses", payload=payload, model=self.spec.model
-            ):
-                try:
-                    data = json.loads(data_text)
-                except ValueError:
+            stream = await self.provider.client.responses.create(
+                **split_sdk_kwargs(payload, _RESPONSES_KWARGS)
+            )
+            async for event in stream:
+                data = sdk_dump(event)
+                if not isinstance(data, Mapping):
                     continue
-                kind = data.get("type") or event_name
+                kind = data.get("type")
                 if kind in ("error", "response.failed"):
                     error = data.get("error") or data.get("response", {}).get("error") or {}
                     raise ProviderError(
@@ -369,6 +395,15 @@ class OpenAIResponsesChatModel(ChatModel):
         except ProviderError as exc:
             yield ChatStreamError(error=exc)
             return
+        except Exception as exc:
+            yield ChatStreamError(
+                error=sdk_error(
+                    exc,
+                    provider=self.provider.config.name,
+                    model=self.spec.model,
+                )
+            )
+            return
         yield ChatStreamEnd(
             finish_reason=finish_reason,
             usage=usage,
@@ -376,7 +411,7 @@ class OpenAIResponsesChatModel(ChatModel):
         )
 
 
-class OpenAIResponsesChatProvider(ChatProvider, HttpProviderMixin):
+class OpenAIResponsesChatProvider(ChatProvider):
     model_class = OpenAIResponsesChatModel
     default_capabilities = {
         "tool_calling": True,
@@ -388,15 +423,28 @@ class OpenAIResponsesChatProvider(ChatProvider, HttpProviderMixin):
 
     def __init__(self, config: ChatProviderConfig) -> None:
         super().__init__(config)
-        self._init_http()
+        self._client: openai.AsyncOpenAI | None = None
         self._handles: dict[str, ChatModel] = {}
 
+    @property
+    def client(self) -> openai.AsyncOpenAI:
+        if self._client is None:
+            raise ProviderError(
+                ProviderErrorCode.UNAVAILABLE,
+                "OpenAI SDK 客户端尚未初始化",
+                provider=self.config.name,
+            )
+        return self._client
+
     async def open(self) -> None:
+        client = build_openai_client(self.config)
         await super().open()
-        await self.open_http()
+        self._client = client
 
     async def close(self) -> None:
-        await self.close_http()
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> ChatModel:

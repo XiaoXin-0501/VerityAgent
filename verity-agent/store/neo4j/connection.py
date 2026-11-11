@@ -78,6 +78,7 @@ class Neo4jConnectionManager:
                 raise ConfigurationError(
                     "未安装 neo4j 驱动，请执行 uv sync 或 pip install neo4j"
                 ) from exc
+            driver = None
             try:
                 driver = AsyncGraphDatabase.driver(
                     self._config.uri,
@@ -92,9 +93,14 @@ class Neo4jConnectionManager:
                 )
                 await driver.verify_connectivity()
             except Exception as exc:
+                if driver is not None:
+                    try:
+                        await driver.close()
+                    except Exception:  # pragma: no cover - 关闭失败不掩盖原始异常
+                        logger.warning("关闭未就绪的 Neo4j 驱动失败", exc_info=True)
                 raise Neo4jConnectionError(
                     "无法连接 Neo4j",
-                    detail={"uri": self._config.uri, "cause": str(exc)},
+                    details={"uri": self._config.uri, "cause": str(exc)},
                 ) from exc
             self._driver = driver
 
@@ -160,12 +166,12 @@ class Neo4jConnectionManager:
         try:
             driver_error, unavailable, expired, transient = _driver_exceptions()
         except ConfigurationError:
-            return Neo4jQueryError("Neo4j 操作失败", detail={"cause": str(exc)})
+            return Neo4jQueryError("Neo4j 操作失败", details={"cause": str(exc)})
         if isinstance(exc, (unavailable, expired)):
-            return Neo4jConnectionError("Neo4j 连接失败", detail={"cause": str(exc)})
+            return Neo4jConnectionError("Neo4j 连接失败", details={"cause": str(exc)})
         if isinstance(exc, (transient, driver_error)):
-            return Neo4jQueryError("Neo4j 查询失败", detail={"cause": str(exc)})
-        return Neo4jQueryError("Neo4j 操作失败", detail={"cause": str(exc)})
+            return Neo4jQueryError("Neo4j 查询失败", details={"cause": str(exc)})
+        return Neo4jQueryError("Neo4j 操作失败", details={"cause": str(exc)})
 
 
 _default_neo4j: Neo4jConnectionManager | None = None

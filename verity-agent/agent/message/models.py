@@ -68,7 +68,7 @@ class BaseMessage(MessageModel):
 class SystemMessage(BaseMessage):
     """只承载配置型 system prompt；动态上下文由 ContextSection 组装。"""
 
-    role: Literal[MessageRole.SYSTEM] = MessageRole.SYSTEM
+    role: Literal[MessageRole.SYSTEM] = MessageRole.SYSTEM  # pyright: ignore[reportIncompatibleVariableOverride]
     name: str = "default"
     origin: SystemOrigin = SystemOrigin.BASE
 
@@ -96,7 +96,7 @@ class FileRef(MessageModel):
 
 
 class UserMessage(BaseMessage):
-    role: Literal[MessageRole.USER] = MessageRole.USER
+    role: Literal[MessageRole.USER] = MessageRole.USER  # pyright: ignore[reportIncompatibleVariableOverride]
     images: list[ImageRef] = Field(default_factory=list)
     files: list[FileRef] = Field(default_factory=list)
 
@@ -161,7 +161,7 @@ class Artifact(MessageModel):
 
 
 class AssistantMessage(BaseMessage):
-    role: Literal[MessageRole.ASSISTANT] = MessageRole.ASSISTANT
+    role: Literal[MessageRole.ASSISTANT] = MessageRole.ASSISTANT  # pyright: ignore[reportIncompatibleVariableOverride]
     thinking: list[Thinking] = Field(default_factory=list)
     tool_calls: list[ToolCall] = Field(default_factory=list)
     artifacts: list[Artifact] = Field(default_factory=list)
@@ -215,7 +215,7 @@ class ToolImage(MessageModel):
 
 
 class ToolMessage(BaseMessage):
-    role: Literal[MessageRole.TOOL] = MessageRole.TOOL
+    role: Literal[MessageRole.TOOL] = MessageRole.TOOL  # pyright: ignore[reportIncompatibleVariableOverride]
     tool_call_id: str
     name: str
     json_data: Any = Field(default=None, alias="json")

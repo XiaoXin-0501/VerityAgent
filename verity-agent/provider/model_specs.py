@@ -36,7 +36,7 @@ def _capabilities(model: ModelConfig, defaults: Mapping[str, Any] | None = None)
     caps = dict(defaults or {})
     caps.update(model.capabilities)
     if kind is ProviderModelKind.CHAT:
-        base = {
+        base: dict[str, Any] = {
             "streaming": True,
             "tool_calling": True,
             "parallel_tool_calls": True,
@@ -53,10 +53,10 @@ def _capabilities(model: ModelConfig, defaults: Mapping[str, Any] | None = None)
         base.update(caps)
         return ChatModelCapabilities(**base)
     if kind is ProviderModelKind.EMBEDDING:
-        base = {"dimensions": 1024, "max_batch_size": 64}
+        base: dict[str, Any] = {"dimensions": 1024, "max_batch_size": 64}
         base.update(caps)
         return EmbeddingModelCapabilities(**base)
-    base = {"max_documents": 100, "max_batch_size": 32}
+    base: dict[str, Any] = {"max_documents": 100, "max_batch_size": 32}
     base.update(caps)
     return RerankModelCapabilities(**base)
 

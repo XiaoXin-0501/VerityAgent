@@ -3,11 +3,15 @@ name = "verityagent"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.120,<1.0",
     "argon2-cffi>=23.1",
+    "cohere>=5.20,<6.0",
     "fastapi[standard]==0.141.1",
     "httpx>=0.27,<1.0",
+    "jsonschema>=4.0,<5.0",
     "minio>=7.2.0,<8.0.0",
     "neo4j>=5.0,<6.0",
+    "openai>=2.0,<3.0",
     "psycopg[binary,pool]>=3.2,<4.0",
     "pydantic>=2.14.2",
     "pydantic-settings>=2.0",
@@ -20,6 +24,22 @@ dependencies = [
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[project.optional-dependencies]
+# 按需安装：uv sync --extra parsers
+parsers = [
+    "pymupdf>=1.24",
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+]
+# 图片 OCR 额外依赖（体积较大）
+ocr = [
+    "paddleocr>=2.7",
+    "paddlepaddle>=2.6",
+    "pillow>=10",
+    "numpy>=1.26",
+]
 
 [dependency-groups]
 dev = [

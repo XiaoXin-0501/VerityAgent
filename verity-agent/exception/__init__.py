@@ -27,6 +27,13 @@ from .message import (
     UnknownMessageRoleError,
     UnsupportedMessageVersionError,
 )
+from .hooks import (
+    HookClosedError,
+    HookError,
+    HookExecutionError,
+    HookRegistrationError,
+    HookTimeoutError,
+)
 from .llm import LLMError, LLMErrorCode
 from .minio import (
     MinioConnectionError,
@@ -53,6 +60,27 @@ from .pg import (
     PGQueryError,
     PGSerializationError,
     PGUniqueViolationError,
+)
+from .rag import RagError, RagErrorCode
+from .tool import (
+    TOOL_ERROR_CATEGORIES,
+    TOOL_ERROR_RETRYABLE,
+    ToolArgumentValidationError,
+    ToolCancelledError,
+    ToolCircuitOpenError,
+    ToolConfirmationRequiredError,
+    ToolDisabledError,
+    ToolErrorCategory,
+    ToolErrorCode,
+    ToolException,
+    ToolExecutionError,
+    ToolIdempotencyConflictError,
+    ToolNotFoundError,
+    ToolPermissionDeniedError,
+    ToolRateLimitError,
+    ToolRegistrationError,
+    ToolResultTooLargeError,
+    ToolTimeoutError,
 )
 from .redis import (
     RedisCommandError,
@@ -90,6 +118,12 @@ __all__ = [
     "MessageDecodeError",
     "UnsupportedMessageVersionError",
     "UnknownMessageRoleError",
+    # hooks
+    "HookError",
+    "HookRegistrationError",
+    "HookTimeoutError",
+    "HookExecutionError",
+    "HookClosedError",
     # provider / llm
     "ProviderError",
     "ProviderErrorCode",
@@ -122,6 +156,28 @@ __all__ = [
     "PGSerializationError",
     "OptimisticLockError",
     "MemoryFactLimitExceeded",
+    # rag
+    "RagError",
+    "RagErrorCode",
+    # tool
+    "ToolErrorCode",
+    "ToolErrorCategory",
+    "TOOL_ERROR_CATEGORIES",
+    "TOOL_ERROR_RETRYABLE",
+    "ToolException",
+    "ToolRegistrationError",
+    "ToolNotFoundError",
+    "ToolPermissionDeniedError",
+    "ToolArgumentValidationError",
+    "ToolTimeoutError",
+    "ToolCircuitOpenError",
+    "ToolRateLimitError",
+    "ToolIdempotencyConflictError",
+    "ToolExecutionError",
+    "ToolResultTooLargeError",
+    "ToolCancelledError",
+    "ToolConfirmationRequiredError",
+    "ToolDisabledError",
     # redis
     "RedisError",
     "RedisConnectionError",

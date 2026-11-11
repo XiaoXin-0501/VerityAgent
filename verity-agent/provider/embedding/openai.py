@@ -4,13 +4,24 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+import openai
+
 from config.provider import EmbeddingProviderConfig
 from provider.embedding.base import EmbeddingModel, EmbeddingProvider
 from provider.embedding.types import EmbeddingRequest, EmbeddingResponse, EmbeddingUsage
 from exception.provider import ProviderError, ProviderErrorCode
-from api.network import HttpProviderMixin
+from provider.sdk import (
+    build_openai_client,
+    sdk_dump,
+    sdk_error,
+    split_sdk_kwargs,
+)
 
 __all__ = ["OpenAIEmbeddingModel", "OpenAIEmbeddingProvider", "BgeEmbeddingProvider"]
+
+_EMBEDDING_KWARGS = frozenset(
+    {"model", "input", "encoding_format", "dimensions", "user"}
+)
 
 
 class OpenAIEmbeddingModel(EmbeddingModel):
@@ -34,12 +45,18 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         return payload
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
-        data = await self.provider.request_json(
-            "POST",
-            "embeddings",
-            payload=self._payload(request),
-            model=self.spec.model,
-        )
+        payload = self._payload(request)
+        try:
+            response = await self.provider.client.embeddings.create(
+                **split_sdk_kwargs(payload, _EMBEDDING_KWARGS)
+            )
+        except Exception as exc:
+            raise sdk_error(
+                exc,
+                provider=self.provider.config.name,
+                model=self.spec.model,
+            ) from exc
+        data = sdk_dump(response)
         items = data.get("data")
         if not isinstance(items, list) or not items:
             raise ProviderError(
@@ -82,21 +99,34 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         )
 
 
-class OpenAIEmbeddingProvider(EmbeddingProvider, HttpProviderMixin):
+class OpenAIEmbeddingProvider(EmbeddingProvider):
     model_class = OpenAIEmbeddingModel
     default_capabilities: dict[str, Any] = {}
 
     def __init__(self, config: EmbeddingProviderConfig) -> None:
         super().__init__(config)
-        self._init_http()
+        self._client: openai.AsyncOpenAI | None = None
         self._handles: dict[str, EmbeddingModel] = {}
 
+    @property
+    def client(self) -> openai.AsyncOpenAI:
+        if self._client is None:
+            raise ProviderError(
+                ProviderErrorCode.UNAVAILABLE,
+                "OpenAI SDK 客户端尚未初始化",
+                provider=self.config.name,
+            )
+        return self._client
+
     async def open(self) -> None:
+        client = build_openai_client(self.config)
         await super().open()
-        await self.open_http()
+        self._client = client
 
     async def close(self) -> None:
-        await self.close_http()
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> EmbeddingModel:

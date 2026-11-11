@@ -11,17 +11,23 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
+import openai
+
 from config.provider import ChatProviderConfig
 from provider.enums import (
     ChatFinishReason,
     ModelRole,
-    ProviderErrorCode,
     ResponseFormatType,
     ToolChoiceMode,
 )
-from exception.provider import ProviderError
-from api.network import HttpProviderMixin
+from exception.provider import ProviderError, ProviderErrorCode
 from provider.llm.base import ChatModel, ChatProvider
+from provider.sdk import (
+    build_openai_client,
+    sdk_dump,
+    sdk_error,
+    split_sdk_kwargs,
+)
 from provider.llm.types import (
     ChatModelRequest,
     ChatModelResponse,
@@ -53,6 +59,27 @@ __all__ = [
     "VLLMChatModel",
     "VLLMChatProvider",
 ]
+
+_CHAT_KWARGS = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "tools",
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "max_completion_tokens",
+        "stop",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
+        "parallel_tool_calls",
+        "response_format",
+        "stream_options",
+    }
+)
 
 _FINISH_MAP = {
     "stop": ChatFinishReason.STOP,
@@ -112,8 +139,9 @@ def _image_url(part: ModelImagePart) -> str:
 
 def _content_parts(parts: list[ModelContentPart]) -> str | list[dict[str, Any]]:
     """纯文本压成 string，多模态才用 parts 数组。"""
-    if all(isinstance(part, ModelTextPart) for part in parts):
-        return "".join(part.text for part in parts)
+    texts = [part.text for part in parts if isinstance(part, ModelTextPart)]
+    if len(texts) == len(parts):
+        return "".join(texts)
 
     result: list[dict[str, Any]] = []
     for part in parts:
@@ -340,12 +368,17 @@ class OpenAIChatModel(ChatModel):
 
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
         payload = self._payload(request, stream=False)
-        data = await self.provider.request_json(
-            "POST",
-            "chat/completions",
-            payload=payload,
-            model=self.spec.model,
-        )
+        try:
+            completion = await self.provider.client.chat.completions.create(
+                **split_sdk_kwargs(payload, _CHAT_KWARGS)
+            )
+        except Exception as exc:
+            raise sdk_error(
+                exc,
+                provider=self.provider.config.name,
+                model=self.spec.model,
+            ) from exc
+        data = sdk_dump(completion)
         choices = data.get("choices") or []
         if not choices:
             raise ProviderError(
@@ -374,15 +407,11 @@ class OpenAIChatModel(ChatModel):
         response_id: str | None = None
 
         try:
-            async for _event, data_text in self.provider.stream_sse(
-                "chat/completions", payload=payload, model=self.spec.model
-            ):
-                if data_text.strip() == "[DONE]":
-                    break
-                try:
-                    data = json.loads(data_text)
-                except ValueError:
-                    continue
+            stream = await self.provider.client.chat.completions.create(
+                **split_sdk_kwargs(payload, _CHAT_KWARGS)
+            )
+            async for chunk in stream:
+                data = sdk_dump(chunk)
                 if not isinstance(data, Mapping):
                     continue
                 if data.get("error"):
@@ -438,6 +467,15 @@ class OpenAIChatModel(ChatModel):
         except ProviderError as exc:
             yield ChatStreamError(error=exc)
             return
+        except Exception as exc:
+            yield ChatStreamError(
+                error=sdk_error(
+                    exc,
+                    provider=self.provider.config.name,
+                    model=self.spec.model,
+                )
+            )
+            return
 
         for index, call in sorted(tool_calls.items()):
             arguments, _raw = _parse_arguments(call.raw_arguments)
@@ -454,23 +492,36 @@ class OpenAIChatModel(ChatModel):
         )
 
 
-class OpenAIChatProvider(ChatProvider, HttpProviderMixin):
-    """OpenAI Chat Completions 协议 provider。"""
+class OpenAIChatProvider(ChatProvider):
+    """OpenAI Chat Completions 协议 provider（官方 SDK）。"""
 
     model_class = OpenAIChatModel
     default_capabilities: dict[str, Any] = {}
 
     def __init__(self, config: ChatProviderConfig) -> None:
         super().__init__(config)
-        self._init_http()
+        self._client: openai.AsyncOpenAI | None = None
         self._handles: dict[str, ChatModel] = {}
 
+    @property
+    def client(self) -> openai.AsyncOpenAI:
+        if self._client is None:
+            raise ProviderError(
+                ProviderErrorCode.UNAVAILABLE,
+                "OpenAI SDK 客户端尚未初始化",
+                provider=self.config.name,
+            )
+        return self._client
+
     async def open(self) -> None:
+        client = build_openai_client(self.config)
         await super().open()
-        await self.open_http()
+        self._client = client
 
     async def close(self) -> None:
-        await self.close_http()
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> ChatModel:

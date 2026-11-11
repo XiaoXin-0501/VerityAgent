@@ -50,7 +50,7 @@ class SchemaCheckResult(BaseModel):
             return
         raise WeaviateSchemaError(
             "Weaviate schema 校验失败",
-            detail=self.model_dump(mode="json"),
+            details=self.model_dump(mode="json"),
         )
 
 
@@ -65,19 +65,19 @@ def load_schema_import(path: str | Path) -> dict[str, Any]:
     if not file_path.exists():
         raise ConfigurationError(
             "Weaviate schema import 文件不存在",
-            detail={"path": str(file_path)},
+            details={"path": str(file_path)},
         )
     try:
         data = json.loads(file_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigurationError(
             "Weaviate schema import 文件不合法",
-            detail={"path": str(file_path), "cause": str(exc)},
+            details={"path": str(file_path), "cause": str(exc)},
         ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("classes"), list):
         raise ConfigurationError(
             "Weaviate schema import 缺少 classes 数组",
-            detail={"path": str(file_path)},
+            details={"path": str(file_path)},
         )
     return data
 
@@ -113,7 +113,7 @@ class SchemaManager:
             existing = await asyncio.to_thread(client.collections.list_all, False)
         except Exception as exc:
             raise WeaviateOperationError(
-                "读取 Weaviate collection 配置失败", detail={"cause": str(exc)}
+                "读取 Weaviate collection 配置失败", details={"cause": str(exc)}
             ) from exc
         missing_collections: list[str] = []
         missing_properties: list[str] = []
@@ -211,7 +211,7 @@ class SchemaManager:
             existing = await asyncio.to_thread(client.collections.list_all, False)
         except Exception as exc:
             raise WeaviateOperationError(
-                "读取 Weaviate collection 配置失败", detail={"cause": str(exc)}
+                "读取 Weaviate collection 配置失败", details={"cause": str(exc)}
             ) from exc
 
         # 1) 创建缺失 collection
@@ -224,7 +224,7 @@ class SchemaManager:
                 except Exception as exc:
                     raise WeaviateSchemaError(
                         f"创建 Weaviate collection 失败: {name}",
-                        detail={"cause": str(exc)},
+                        details={"cause": str(exc)},
                     ) from exc
 
         # 2) 给已有 collection 补缺失 property（只加不删）
@@ -232,7 +232,7 @@ class SchemaManager:
             existing = await asyncio.to_thread(client.collections.list_all, False)
         except Exception as exc:
             raise WeaviateOperationError(
-                "读取 Weaviate collection 配置失败", detail={"cause": str(exc)}
+                "读取 Weaviate collection 配置失败", details={"cause": str(exc)}
             ) from exc
         for name, expected in self.expected_collections.items():
             actual = existing.get(name)
@@ -259,7 +259,7 @@ class SchemaManager:
                 except Exception as exc:
                     raise WeaviateSchemaError(
                         f"为 {name} 添加 property 失败: {prop.get('name')}",
-                        detail={"cause": str(exc)},
+                        details={"cause": str(exc)},
                     ) from exc
 
         result = await self.check(client)
