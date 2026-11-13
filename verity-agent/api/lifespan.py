@@ -82,7 +82,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await init_weaviate()
             if settings.weaviate.startup_schema_check:
                 manager = SchemaManager(settings.weaviate)
-                result = await manager.check_or_ensure(get_weaviate().client)
+                result = await manager.check_or_ensure(
+                    get_weaviate().client,
+                    expected_dimensions=settings.rag.indexer.embedding_dimensions,
+                )
                 app.state.weaviate_schema = result.model_dump(mode="json")
                 logger.info("Weaviate schema 校验通过: %s", result.model_dump(mode="json"))
 

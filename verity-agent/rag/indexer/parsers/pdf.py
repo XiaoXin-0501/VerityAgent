@@ -1,29 +1,159 @@
-"""PDF parser（PyMuPDF 主，pdfplumber fallback，v1 只抽文本）。
+"""PDF parser（PyMuPDF 主，pdfplumber fallback）。
 
-- 只读取文本层；PDF 内嵌图片不 OCR、不建 FigureBlock、不进入 chunk；
-- 每页一个文本块，保留页码；切片由后续 TextChunker 完成；
-- 文本覆盖率为“有文本页 / 总页数”，纯图片 PDF 会标记 `is_scanned=True`，
-  由质量闸门决定是否拒绝；
-- 未安装依赖时抛 `RagError(INVALID_CONFIG)`，不阻塞其他 parser 注册。
+v1 能力：
+- 读取文本层，按页面文本块（而不是整页一段）输出，保留页码和阅读顺序；
+- 依据字号/编号识别标题，写入 ``heading_level`` / ``heading_text``，
+  让后续 chunk 获得标题上下文；
+- 识别跨页重复的水印/页眉页脚短行并在解析阶段丢弃（每行都会记录告警）；
+- 只对有足够横竖线的页面做表格检测（PyMuPDF ``find_tables``），避免对纯
+  文本 PDF 做昂贵的表格推断；表格输出为 ``TableBlock``；
+- 图片不 OCR、不建 FigureBlock、不进入 chunk；只记录 ``has_images``。
+
+PDF 解析是同步阻塞操作，通过 ``asyncio.to_thread`` 隔离，避免卡住事件循环。
 """
 
 from __future__ import annotations
 
-import io
+import asyncio
+import math
+import re
+from collections import Counter
+from dataclasses import dataclass, field
 from uuid import UUID
 
+from config.rag import ImagePdfConfig, OcrConfig
 from exception import RagError, RagErrorCode
 from rag.shared.enums import BlockType, DocumentType
-from rag.shared.models import DocumentProfile, DocumentSource, ParsedDocument
+from rag.shared.models import (
+    ContentBlock,
+    DocumentProfile,
+    DocumentSource,
+    Page,
+    ParsedDocument,
+)
 
-from ._common import make_block, make_parsed_document
+from ._common import (
+    HeadingStack,
+    heading_level_from_text,
+    is_heading_text,
+    make_block,
+    make_page,
+    make_parsed_document,
+    make_table,
+)
+from .image_pdf.pipeline import ImagePdfPipeline
+from .ocr_provider import OcrProvider, create_ocr_provider
+from utils.text import join_wrapped_lines
 
 __all__ = ["PdfParser"]
 
+# 纯页码行：12 / 12/145 / - 12 - / 第 12 页。
+_PAGE_NUMBER = re.compile(
+    r"^\s*(?:[-—–]\s*)?(?:第\s*)?\d{1,4}\s*(?:/\s*\d{1,4})?\s*(?:页)?\s*(?:[-—–])?\s*$"
+)
+# 粗体 flag（PyMuPDF span.flags bit 4）。
+_BOLD_FLAG = 1 << 4
+
+
+@dataclass(slots=True)
+class _PdfLine:
+    """PDF 中一行文本及其排版信息。"""
+
+    text: str
+    bbox: tuple[float, float, float, float]
+    size: float
+    bold: bool
+    # OCR 生成的文本没有可靠字号/位置，避免被页眉页脚规则误删。
+    ocr: bool = False
+
+
+@dataclass(slots=True)
+class _PdfTextBlock:
+    """PDF 文本块（通常对应一个段落或列表项）。"""
+
+    bbox: tuple[float, float, float, float]
+    lines: list[_PdfLine] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _PdfTable:
+    """PDF 表格；rows 为含表头的二维文本。"""
+
+    bbox: tuple[float, float, float, float]
+    rows: list[list[str]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _PdfPage:
+    """一页 PDF 的解析中间结果。"""
+
+    page_no: int
+    width: float
+    height: float
+    rotation: int = 0
+    blocks: list[_PdfTextBlock] = field(default_factory=list)
+    tables: list[_PdfTable] = field(default_factory=list)
+    image_count: int = 0
+    size_chars: Counter = field(default_factory=Counter)
+    # 本页是否通过 OCR 获得文本，以及整体置信度。
+    ocr_used: bool = False
+    ocr_confidence: float | None = None
+
+
+def _bbox_tuple(value) -> tuple[float, float, float, float]:
+    """把 PyMuPDF 的 Rect/序列统一成四元组。"""
+    x0, y0, x1, y1 = value
+    return (float(x0), float(y0), float(x1), float(y1))
+
+
+def _overlap_ratio(
+    inner: tuple[float, float, float, float],
+    outer: tuple[float, float, float, float],
+) -> float:
+    """计算 ``inner`` 被 ``outer`` 覆盖的面积比例。"""
+    x0 = max(inner[0], outer[0])
+    y0 = max(inner[1], outer[1])
+    x1 = min(inner[2], outer[2])
+    y1 = min(inner[3], outer[3])
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    inner_area = max(0.0, (inner[2] - inner[0]) * (inner[3] - inner[1]))
+    if inner_area <= 0:
+        return 0.0
+    return ((x1 - x0) * (y1 - y0)) / inner_area
+
+
+def _normalize_line(text: str) -> str:
+    """用于重复行统计的归一化：去掉所有空白。"""
+    return re.sub(r"\s+", "", text)
+
 
 class PdfParser:
+    """v1 PDF 解析器。"""
+
     parser_id = "pdf_pymupdf"
-    parser_version = "1"
+    parser_version = "3"
+
+    def __init__(
+        self,
+        *,
+        ocr_config: OcrConfig | None = None,
+        ocr_provider: OcrProvider | None = None,
+        image_pdf_config: ImagePdfConfig | None = None,
+    ) -> None:
+        """保存 OCR/图片 PDF 配置；provider 未注入时按配置自动选择。"""
+        self._ocr_config = ocr_config or OcrConfig()
+        self._ocr_provider = (
+            ocr_provider
+            if ocr_provider is not None
+            else create_ocr_provider(self._ocr_config)
+        )
+        self._image_pdf_config = image_pdf_config or ImagePdfConfig()
+        self._image_pdf_pipeline = (
+            ImagePdfPipeline(self._image_pdf_config)
+            if self._image_pdf_config.enabled
+            else None
+        )
 
     async def parse(
         self,
@@ -34,6 +164,7 @@ class PdfParser:
         kb_id: UUID,
         data: bytes,
     ) -> ParsedDocument:
+        """解析 PDF 字节为 ``ParsedDocument``。"""
         try:
             import pymupdf as fitz  # type: ignore[import-not-found]
         except ImportError:
@@ -44,6 +175,29 @@ class PdfParser:
                     source, profile, doc_id=doc_id, kb_id=kb_id, data=data
                 )
 
+        # PyMuPDF 是同步 CPU 操作：放到线程池，避免阻塞 API 事件循环。
+        return await asyncio.to_thread(
+            self._parse_pymupdf,
+            fitz,
+            source,
+            profile,
+            doc_id,
+            kb_id,
+            data,
+        )
+
+    # ——————————————————— PyMuPDF 主路径 ———————————————————
+
+    def _parse_pymupdf(
+        self,
+        fitz,
+        source: DocumentSource,
+        profile: DocumentProfile,
+        doc_id: UUID,
+        kb_id: UUID,
+        data: bytes,
+    ) -> ParsedDocument:
+        """同步执行 PyMuPDF 解析（在线程池中调用）。"""
         try:
             document = fitz.open(stream=data, filetype="pdf")
         except Exception as exc:
@@ -53,27 +207,24 @@ class PdfParser:
                 details={"filename": source.filename, "cause": str(exc)},
             ) from exc
 
-        blocks = []
-        page_count = 0
-        pages_with_text = 0
+        ocr_pages = 0
+        ocr_limited = False
         try:
-            page_count = document.page_count
-            for page_index in range(page_count):
-                page = document.load_page(page_index)
-                text = str(page.get_text("text") or "").strip()
-                if not text:
-                    continue
-                pages_with_text += 1
-                blocks.append(
-                    make_block(
-                        doc_id=doc_id,
-                        page_no=page_index + 1,
-                        order=len(blocks),
-                        block_type=BlockType.PARAGRAPH,
-                        text=text,
-                        parser_id=self.parser_id,
-                    )
-                )
+            payloads: list[_PdfPage] = []
+            for page_no, page in enumerate(document, start=1):
+                payload = self._extract_page(page, page_no)
+                if self._should_ocr(payload):
+                    if (
+                        self._ocr_provider is not None
+                        and ocr_pages < self._ocr_config.max_pages
+                    ):
+                        self._apply_ocr(page, payload)
+                        ocr_pages += 1
+                    elif ocr_pages >= self._ocr_config.max_pages:
+                        ocr_limited = True
+                payloads.append(payload)
+        except RagError:
+            raise
         except Exception as exc:
             raise RagError(
                 RagErrorCode.INVALID_REQUEST,
@@ -83,8 +234,119 @@ class PdfParser:
         finally:
             document.close()
 
+        # 整篇都是图片/扫描页时，交给版式解析流水线（MinerU/RapidOCR）。
+        image_page_numbers = [
+            payload.page_no
+            for payload in payloads
+            if self._is_image_like_page(payload)
+        ]
+        image_pipeline_warnings: list[str] = []
+        if (
+            image_page_numbers
+            and len(image_page_numbers) == len(payloads)
+            and self._image_pdf_pipeline is not None
+        ):
+            try:
+                return self._image_pdf_pipeline.parse(
+                    data,
+                    page_numbers=image_page_numbers,
+                    total_pages=len(payloads),
+                    source=source,
+                    doc_id=doc_id,
+                    kb_id=kb_id,
+                    profile=profile,
+                )
+            except RagError as exc:
+                if self._ocr_provider is None:
+                    raise
+                image_pipeline_warnings.append(
+                    f"图片 PDF 版式解析失败，回退简单 OCR: {exc.message}"
+                )
+
+        body_size = self._body_font_size(payloads)
+        boilerplate = self._detect_boilerplate(payloads)
+
+        blocks: list[ContentBlock] = []
+        pages: list[Page] = []
+        dropped_lines = 0
+        has_tables = False
+        has_images = any(item.image_count > 0 for item in payloads)
+        # 标题栈跨页延续：下一页首段仍能拿到完整的标题路径。
+        headings = HeadingStack()
+
+        for payload in payloads:
+            page_blocks, page_tables, page_dropped = self._build_page_blocks(
+                payload,
+                body_size=body_size,
+                boilerplate=boilerplate,
+                doc_id=doc_id,
+                start_order=len(blocks),
+                headings=headings,
+            )
+            blocks.extend(page_blocks)
+            dropped_lines += page_dropped
+            has_tables = has_tables or page_tables
+            page_warnings = []
+            if payload.ocr_used:
+                page_warnings.append("本页文本来自 OCR")
+            elif not page_blocks and payload.image_count > 0:
+                page_warnings.append("页面仅含图片，OCR 未启用或不可用")
+            pages.append(
+                make_page(
+                    page_no=payload.page_no,
+                    blocks=page_blocks,
+                    width=payload.width,
+                    height=payload.height,
+                    rotation=payload.rotation,
+                    warnings=page_warnings,
+                )
+            )
+
+        page_count = len(payloads)
+        native_text_pages = sum(
+            1
+            for item in payloads
+            if (item.blocks or item.tables) and not item.ocr_used
+        )
+        ocr_page_count = sum(1 for item in payloads if item.ocr_used)
+        pages_with_text = native_text_pages + ocr_page_count
         coverage = pages_with_text / page_count if page_count else 0.0
-        has_text = pages_with_text > 0
+        ocr_ratio = ocr_page_count / page_count if page_count else 0.0
+
+        warnings: list[str] = list(image_pipeline_warnings)
+        if dropped_lines:
+            warnings.append(f"已过滤跨页重复的水印/页眉页脚 {dropped_lines} 行")
+        if ocr_page_count:
+            warnings.append(f"已对 {ocr_page_count} 页扫描页执行 OCR")
+        if ocr_limited:
+            warnings.append(
+                f"OCR 页数达到上限 {self._ocr_config.max_pages}，其余页面未识别"
+            )
+        low_confidence_pages = [
+            item.page_no
+            for item in payloads
+            if item.ocr_used
+            and item.ocr_confidence is not None
+            and item.ocr_confidence < self._ocr_config.min_confidence
+        ]
+        if low_confidence_pages:
+            warnings.append(
+                "部分 OCR 页面置信度较低: "
+                + ", ".join(str(item) for item in low_confidence_pages[:10])
+            )
+        if not pages_with_text:
+            if has_images and self._ocr_config.enabled and self._ocr_provider is None:
+                raise RagError(
+                    RagErrorCode.INVALID_CONFIG,
+                    "扫描版 PDF 需要 OCR，但未检测到可用的 OCR 提供方"
+                    "（PaddleOCR 或 Tesseract）",
+                    details={
+                        "filename": source.filename,
+                        "provider": self._ocr_config.provider,
+                    },
+                )
+            warnings.append("PDF 未检测到文本层，图片/扫描件暂不处理")
+
         return make_parsed_document(
             source=source,
             doc_id=doc_id,
@@ -95,15 +357,422 @@ class PdfParser:
                 update={
                     "doc_type": DocumentType.PDF,
                     "page_count": page_count,
-                    "has_text_layer": has_text,
-                    "has_images": False,
-                    "is_scanned": not has_text,
+                    "has_text_layer": native_text_pages > 0,
+                    "has_images": has_images,
+                    "has_tables": has_tables,
+                    "is_scanned": native_text_pages == 0 and ocr_page_count > 0,
                     "text_coverage": coverage,
+                    "ocr_ratio": ocr_ratio,
+                    "quality_score": coverage,
                 }
             ),
             blocks=blocks,
-            warnings=[] if has_text else ["PDF 未检测到文本层，图片/扫描件暂不处理"],
+            pages=pages,
+            warnings=warnings,
         )
+
+    def _extract_page(self, page, page_no: int) -> _PdfPage:
+        """抽取一页的文本块、表格和基础版面信息。"""
+        payload = _PdfPage(
+            page_no=page_no,
+            width=float(page.rect.width),
+            height=float(page.rect.height),
+            rotation=int(getattr(page, "rotation", 0) or 0),
+        )
+        try:
+            payload.image_count = len(page.get_images(full=False))
+        except Exception:
+            payload.image_count = 0
+
+        text_dict = page.get_text("dict")
+        for raw_block in text_dict.get("blocks", []):
+            if raw_block.get("type") != 0:
+                # type=1 是图片块；v1 不 OCR。
+                continue
+            block = _PdfTextBlock(bbox=_bbox_tuple(raw_block.get("bbox", (0, 0, 0, 0))))
+            for raw_line in raw_block.get("lines", []):
+                spans = raw_line.get("spans", [])
+                text = "".join(span.get("text", "") for span in spans)
+                if not text.strip():
+                    continue
+                size = max((float(span.get("size", 0.0)) for span in spans), default=0.0)
+                bold = bool(spans) and all(
+                    int(span.get("flags", 0)) & _BOLD_FLAG for span in spans
+                )
+                line = _PdfLine(
+                    text=text,
+                    bbox=_bbox_tuple(raw_line.get("bbox", (0, 0, 0, 0))),
+                    size=size,
+                    bold=bold,
+                )
+                block.lines.append(line)
+                # 用字符数加权统计字号，后续据此判断文档正文字号。
+                for span in spans:
+                    payload.size_chars[round(size, 1)] += len(span.get("text", ""))
+            if block.lines:
+                payload.blocks.append(block)
+
+        payload.tables = self._extract_tables(page)
+        return payload
+
+    @staticmethod
+    def _native_text_chars(payload: _PdfPage) -> int:
+        """页面原生文本层的字符数（不含表格）。"""
+        return sum(
+            len(line.text)
+            for block in payload.blocks
+            for line in block.lines
+            if not line.ocr
+        )
+
+    @classmethod
+    def _is_image_like_page(cls, payload: _PdfPage) -> bool:
+        """含图片且原生文本极少时视为图片/扫描页。"""
+        return payload.image_count > 0 and cls._native_text_chars(payload) < 30
+
+    @classmethod
+    def _should_ocr(cls, payload: _PdfPage) -> bool:
+        """只有“几乎无文本层且含图片”的页面才需要 OCR。"""
+        return cls._is_image_like_page(payload)
+
+    def _apply_ocr(self, page, payload: _PdfPage) -> None:
+        """对扫描页执行 OCR，并把结果转成内部文本块。"""
+        if self._ocr_provider is None:
+            return
+        result = self._ocr_provider.recognize(
+            page,
+            page_no=payload.page_no,
+            dpi=self._ocr_config.dpi,
+        )
+        if not result.text:
+            return
+        lines: list[_PdfLine] = []
+        for index, line in enumerate(result.lines):
+            text = (line.text or "").strip()
+            if not text:
+                continue
+            bbox = line.bbox or (
+                0.0,
+                float(index * 12),
+                payload.width,
+                float(index * 12 + 12),
+            )
+            lines.append(
+                _PdfLine(
+                    text=text,
+                    bbox=_bbox_tuple(bbox),
+                    size=10.0,
+                    bold=False,
+                    ocr=True,
+                )
+            )
+        if not lines:
+            return
+        payload.blocks = [
+            _PdfTextBlock(
+                bbox=(0.0, 0.0, payload.width, payload.height),
+                lines=lines,
+            )
+        ]
+        payload.ocr_used = True
+        payload.ocr_confidence = result.confidence
+        # OCR 文本按正文处理；不参与字号统计，避免影响标题比例。
+        for line in lines:
+            payload.size_chars[10.0] += len(line.text)
+
+    def _extract_tables(self, page) -> list[_PdfTable]:
+        """仅在页面具备表格线结构时调用 ``find_tables``，避免昂贵误判。"""
+        if not self._has_table_structure(page):
+            return []
+        try:
+            finder = page.find_tables()
+        except Exception:
+            return []
+
+        tables: list[_PdfTable] = []
+        for raw_table in getattr(finder, "tables", []):
+            try:
+                raw_rows = raw_table.extract()
+            except Exception:
+                continue
+            rows = [
+                ["" if cell is None else str(cell).strip() for cell in row]
+                for row in raw_rows
+                if row
+            ]
+            rows = [row for row in rows if any(cell for cell in row)]
+            # 单行/单列的“表格”多为文本框或分隔线，不作为表格处理。
+            if len(rows) < 2 or max((len(row) for row in rows), default=0) < 2:
+                continue
+            tables.append(
+                _PdfTable(
+                    bbox=_bbox_tuple(raw_table.bbox),
+                    rows=rows,
+                )
+            )
+        return tables
+
+    @staticmethod
+    def _has_table_structure(page) -> bool:
+        """判断页面是否真的存在表格网格，避免把代码框/引用框当表格。
+
+        表格至少要满足：
+        - 3 条以上水平线（上边框、行分隔、下边框）；
+        - 某条水平线被 3 条以上竖线穿过（说明有列分隔线）。
+
+        单个矩形框只有 2 横 2 竖；多个独立矩形框的每条横线也只被 2 条竖线
+        穿过，因此都不会触发昂贵的 ``find_tables``。
+        """
+        horizontals: list[tuple[float, float, float]] = []
+        verticals: list[tuple[float, float, float]] = []
+        try:
+            drawings = page.get_drawings()
+        except Exception:
+            return False
+
+        for drawing in drawings:
+            for item in drawing.get("items", []):
+                if not item:
+                    continue
+                if item[0] == "l":
+                    p1, p2 = item[1], item[2]
+                    if abs(p1.y - p2.y) <= 1.0 and abs(p1.x - p2.x) >= 40:
+                        horizontals.append(
+                            (min(p1.x, p2.x), max(p1.x, p2.x), (p1.y + p2.y) / 2)
+                        )
+                    elif abs(p1.x - p2.x) <= 1.0 and abs(p1.y - p2.y) >= 20:
+                        verticals.append(
+                            (p1.x, min(p1.y, p2.y), max(p1.y, p2.y))
+                        )
+                elif item[0] == "re":
+                    rect = item[1]
+                    if rect.height <= 2 and rect.width >= 40:
+                        horizontals.append((rect.x0, rect.x1, rect.y0))
+                    elif rect.width <= 2 and rect.height >= 20:
+                        verticals.append((rect.x0, rect.y0, rect.y1))
+
+        if len(horizontals) < 3 or len(verticals) < 3:
+            return False
+        for x0, x1, y in horizontals:
+            crossings = sum(
+                1
+                for x, y0, y1 in verticals
+                if x0 - 1 <= x <= x1 + 1 and y0 - 1 <= y <= y1 + 1
+            )
+            if crossings >= 3:
+                return True
+        return False
+
+    @staticmethod
+    def _body_font_size(payloads: list[_PdfPage]) -> float:
+        """按字符数加权选择文档正文字号。"""
+        counter: Counter = Counter()
+        for payload in payloads:
+            counter.update(payload.size_chars)
+        if not counter:
+            return 10.0
+        return float(counter.most_common(1)[0][0])
+
+    @staticmethod
+    def _detect_boilerplate(payloads: list[_PdfPage]) -> set[str]:
+        """识别跨页重复且位置稳定的短行（水印/页眉页脚）。
+
+        只有同时满足以下条件才丢弃：
+        - 归一化后长度 <= 60；
+        - 出现在至少 30% 的页面（且不少于 3 页）；
+        - 各页的纵坐标差异 <= 12pt。
+        """
+        if not payloads:
+            return set()
+        min_pages = max(3, math.ceil(len(payloads) * 0.3))
+        occurrences: dict[str, list[tuple[int, float]]] = {}
+        for payload in payloads:
+            if payload.ocr_used:
+                # OCR 行没有可靠位置，参与跨页重复统计容易误删正文。
+                continue
+            for block in payload.blocks:
+                for line in block.lines:
+                    normalized = _normalize_line(line.text)
+                    if not normalized or len(normalized) > 60:
+                        continue
+                    occurrences.setdefault(normalized, []).append(
+                        (payload.page_no, line.bbox[1])
+                    )
+
+        result: set[str] = set()
+        for text, items in occurrences.items():
+            pages = {page_no for page_no, _ in items}
+            if len(pages) < min_pages:
+                continue
+            ys = [y for _, y in items]
+            if max(ys) - min(ys) <= 12:
+                result.add(text)
+        return result
+
+    def _build_page_blocks(
+        self,
+        payload: _PdfPage,
+        *,
+        body_size: float,
+        boilerplate: set[str],
+        doc_id: UUID,
+        start_order: int,
+        headings: HeadingStack,
+    ) -> tuple[list[ContentBlock], bool, int]:
+        """把一页的文本块/表格按阅读顺序转成 ``ContentBlock``。
+
+        ``headings`` 是跨页共享的标题栈；本页标题会更新栈，后续页继续沿用。
+        返回本页块、是否含表格、过滤行数。
+        """
+        entries: list[tuple[float, float, str, object]] = []
+        for block in payload.blocks:
+            # 与表格区域重叠的文本块会由表格结构表达，跳过以避免重复。
+            if any(
+                _overlap_ratio(block.bbox, table.bbox) >= 0.5
+                for table in payload.tables
+            ):
+                continue
+            entries.append((block.bbox[1], block.bbox[0], "text", block))
+        for table in payload.tables:
+            entries.append((table.bbox[1], table.bbox[0], "table", table))
+        entries.sort(key=lambda item: (round(item[0], 1), round(item[1], 1)))
+
+        blocks: list[ContentBlock] = []
+        order = start_order
+        dropped = 0
+        has_table = False
+
+        for _y, _x, kind, item in entries:
+            if kind == "table":
+                table = item  # type: ignore[assignment]
+                structured = make_table(table.rows[0], table.rows[1:])
+                current_heading, current_path = headings.current()
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.TABLE,
+                        text=structured.markdown or "",
+                        parser_id=self.parser_id,
+                        table=structured,
+                        heading_text=current_heading,
+                        heading_path=current_path,
+                    )
+                )
+                has_table = True
+                order += 1
+                continue
+
+            block = item  # type: ignore[assignment]
+            kept_lines = []
+            for line in block.lines:
+                normalized = _normalize_line(line.text)
+                if normalized and normalized in boilerplate:
+                    dropped += 1
+                    continue
+                if line.ocr:
+                    # OCR 行的坐标是合成的，不做页边页码判断。
+                    kept_lines.append(line)
+                    continue
+                if self._is_margin_page_number(line, payload.height):
+                    dropped += 1
+                    continue
+                kept_lines.append(line)
+            if not kept_lines:
+                continue
+
+            text = join_wrapped_lines([line.text for line in kept_lines])
+            if not text:
+                continue
+            level = self._heading_level(
+                text,
+                max_size=max(line.size for line in kept_lines),
+                body_size=body_size,
+                all_bold=all(line.bold for line in kept_lines),
+            )
+            is_ocr = any(line.ocr for line in kept_lines)
+            if level is not None:
+                path_text, path = headings.apply(level, text)
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.HEADING,
+                        text=text,
+                        parser_id=self.parser_id,
+                        heading_level=level,
+                        heading_text=path_text,
+                        heading_path=path,
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata={"ocr": True} if is_ocr else {},
+                    )
+                )
+            else:
+                current_heading, current_path = headings.current()
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.PARAGRAPH,
+                        text=text,
+                        parser_id=self.parser_id,
+                        heading_text=current_heading,
+                        heading_path=current_path,
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata={"ocr": True} if is_ocr else {},
+                    )
+                )
+            order += 1
+
+        return blocks, has_table, dropped
+
+    @staticmethod
+    def _heading_level(
+        text: str,
+        *,
+        max_size: float,
+        body_size: float,
+        all_bold: bool,
+    ) -> int | None:
+        """综合字号比例、编号习惯和粗体判断标题级别。
+
+        编号级别与字号级别同时存在时取较粗的级别（数值更小），避免同一
+        文档里标题层级跳变；只有编号、没有字号差异时仍按编号识别标题。
+        """
+        if len(text) > 160:
+            return None
+        ratio = max_size / body_size if body_size > 0 else 1.0
+        font_level: int | None = None
+        if ratio >= 2.2:
+            font_level = 1
+        elif ratio >= 1.6:
+            font_level = 2
+        elif ratio >= 1.35:
+            font_level = 3
+        elif ratio >= 1.15:
+            font_level = 4
+
+        inferred = heading_level_from_text(text)
+        if inferred is not None and font_level is not None:
+            return min(inferred, font_level)
+        if inferred is not None:
+            return inferred
+        if font_level is not None:
+            return font_level
+        if all_bold and ratio >= 1.05 and len(text) <= 80:
+            return 5
+        return None
+
+    @staticmethod
+    def _is_margin_page_number(line: _PdfLine, page_height: float) -> bool:
+        """只把页边区域内形如页码的短行当页码，避免误删正文数字。"""
+        in_margin = line.bbox[1] < page_height * 0.08 or line.bbox[3] > page_height * 0.92
+        return in_margin and bool(_PAGE_NUMBER.match(line.text))
+
+    # ——————————————————— pdfplumber fallback ———————————————————
 
     async def _parse_pdfplumber(
         self,
@@ -114,6 +783,7 @@ class PdfParser:
         kb_id: UUID,
         data: bytes,
     ) -> ParsedDocument:
+        """PyMuPDF 不可用时的退路：pdfplumber 抽文本和带线表格。"""
         try:
             import pdfplumber  # type: ignore[import-not-found]
         except ImportError as exc:
@@ -123,25 +793,95 @@ class PdfParser:
                 details={"parser_id": self.parser_id},
             ) from exc
 
-        blocks = []
+        blocks: list[ContentBlock] = []
+        pages: list[Page] = []
         page_count = 0
         pages_with_text = 0
+        has_tables = False
+        headings = HeadingStack()
         try:
-            with pdfplumber.open(io.BytesIO(data)) as document:
+            with pdfplumber.open(__import__("io").BytesIO(data)) as document:
                 page_count = len(document.pages)
-                for page_index, page in enumerate(document.pages):
+                for page_index, page in enumerate(document.pages, start=1):
+                    page_blocks: list[ContentBlock] = []
                     text = (page.extract_text() or "").strip()
-                    if not text:
-                        continue
-                    pages_with_text += 1
-                    blocks.append(
-                        make_block(
-                            doc_id=doc_id,
-                            page_no=page_index + 1,
-                            order=len(blocks),
-                            block_type=BlockType.PARAGRAPH,
-                            text=text,
-                            parser_id=self.parser_id,
+                    heading_text, heading_path = headings.current()
+                    if text:
+                        paragraphs = [
+                            item.strip()
+                            for item in re.split(r"\n\s*\n", text)
+                            if item.strip()
+                        ] or [text]
+                        for paragraph in paragraphs:
+                            level = (
+                                heading_level_from_text(paragraph)
+                                if is_heading_text(paragraph)
+                                else None
+                            )
+                            if level is not None:
+                                path_text, path = headings.apply(level, paragraph)
+                                heading_text, heading_path = path_text, path
+                            else:
+                                heading_text, heading_path = headings.current()
+                            page_blocks.append(
+                                make_block(
+                                    doc_id=doc_id,
+                                    page_no=page_index,
+                                    order=len(blocks) + len(page_blocks),
+                                    block_type=(
+                                        BlockType.HEADING
+                                        if level is not None
+                                        else BlockType.PARAGRAPH
+                                    ),
+                                    text=paragraph,
+                                    parser_id=self.parser_id,
+                                    heading_level=level,
+                                    heading_text=heading_text,
+                                    heading_path=heading_path,
+                                )
+                            )
+                    # pdfplumber 的表格检测只在页面上有线条时执行。
+                    if getattr(page, "lines", None) or getattr(page, "rects", None):
+                        try:
+                            raw_tables = page.extract_tables() or []
+                        except Exception:
+                            raw_tables = []
+                        for raw_rows in raw_tables:
+                            rows = [
+                                [
+                                    "" if cell is None else str(cell).strip()
+                                    for cell in row
+                                ]
+                                for row in raw_rows
+                                if row
+                            ]
+                            rows = [row for row in rows if any(cell for cell in row)]
+                            if len(rows) < 2:
+                                continue
+                            structured = make_table(rows[0], rows[1:])
+                            page_blocks.append(
+                                make_block(
+                                    doc_id=doc_id,
+                                    page_no=page_index,
+                                    order=len(blocks) + len(page_blocks),
+                                    block_type=BlockType.TABLE,
+                                    text=structured.markdown or "",
+                                    parser_id=self.parser_id,
+                                    table=structured,
+                                    heading_text=heading_text,
+                                    heading_path=heading_path,
+                                )
+                            )
+                            has_tables = True
+                    if page_blocks:
+                        pages_with_text += 1
+                    blocks.extend(page_blocks)
+                    pages.append(
+                        make_page(
+                            page_no=page_index,
+                            blocks=page_blocks,
+                            width=float(getattr(page, "width", 0) or 0) or None,
+                            height=float(getattr(page, "height", 0) or 0) or None,
                         )
                     )
         except Exception as exc:
@@ -152,7 +892,6 @@ class PdfParser:
             ) from exc
 
         coverage = pages_with_text / page_count if page_count else 0.0
-        has_text = pages_with_text > 0
         return make_parsed_document(
             source=source,
             doc_id=doc_id,
@@ -163,12 +902,14 @@ class PdfParser:
                 update={
                     "doc_type": DocumentType.PDF,
                     "page_count": page_count,
-                    "has_text_layer": has_text,
+                    "has_text_layer": pages_with_text > 0,
                     "has_images": False,
-                    "is_scanned": not has_text,
+                    "has_tables": has_tables,
+                    "is_scanned": pages_with_text == 0,
                     "text_coverage": coverage,
                 }
             ),
             blocks=blocks,
-            warnings=[] if has_text else ["PDF 未检测到文本层，图片/扫描件暂不处理"],
+            pages=pages,
+            warnings=[] if pages_with_text else ["PDF 未检测到文本层，图片/扫描件暂不处理"],
         )

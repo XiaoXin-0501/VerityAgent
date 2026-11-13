@@ -14,28 +14,39 @@ __all__ = ["QualityGate", "deduplicate_chunks"]
 
 
 class QualityGate:
-    def __init__(self, policy: QualityPolicyConfig) -> None:
+    """切片后的质量闸门：短/超长/低质量标记，按策略决定是否丢弃。"""
+
+    def __init__(
+        self,
+        policy: QualityPolicyConfig,
+        *,
+        max_chunk_tokens: int,
+    ) -> None:
+        """``max_chunk_tokens`` 来自 ``IndexerConfig``，是唯一硬上限来源。"""
         self.policy = policy
+        self.max_chunk_tokens = max_chunk_tokens
 
     def filter_chunks(
         self,
         chunks: list[ChunkDraft],
     ) -> tuple[list[ChunkDraft], NoiseReport]:
+        """过滤 chunk；默认保留并标记短块/低质量块，可配置为丢弃。"""
         kept: list[ChunkDraft] = []
         report = NoiseReport()
         for chunk in chunks:
-            dropped = False
             if chunk.token_count < self.policy.min_chunk_tokens:
-                report.dropped_chunks += 1
+                # 短问答、列表项在合并后仍可能偏短，默认保留并标记，避免丢内容。
+                report.low_quality_chunks += 1
                 report.warnings.append(IndexingWarningCode.CHUNK_TOO_SHORT)
-                dropped = True
-            elif chunk.token_count > self.policy.max_chunk_tokens:
+                if self.policy.drop_low_quality_chunks:
+                    report.dropped_chunks += 1
+                    continue
+            elif chunk.token_count > self.max_chunk_tokens:
+                # 切片器已经按 max_tokens 切分；命中这里说明单行/单表格超长。
                 report.warnings.append(IndexingWarningCode.CHUNK_TRUNCATED)
                 if self.policy.drop_low_quality_chunks:
                     report.dropped_chunks += 1
-                    dropped = True
-            if dropped:
-                continue
+                    continue
             if chunk.quality_flags and self.policy.drop_low_quality_chunks:
                 report.low_quality_chunks += 1
                 report.dropped_chunks += 1
@@ -48,6 +59,7 @@ def deduplicate_chunks(
     chunks: list[ChunkDraft],
     policy: DedupPolicyConfig,
 ) -> tuple[list[ChunkDraft], NoiseReport]:
+    """按正文 SHA256 做 chunk 级精确去重；保留首次出现的 chunk。"""
     if not policy.chunk_hash:
         return chunks, NoiseReport()
     seen: set[str] = set()

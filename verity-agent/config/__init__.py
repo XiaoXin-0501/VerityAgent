@@ -55,7 +55,9 @@ from .provider import (
 )
 from .rag import (
     DedupPolicyConfig,
+    ImagePdfConfig,
     IndexerConfig,
+    OcrConfig,
     QualityPolicyConfig,
     RagConfig,
     RetrieverConfig,
@@ -95,6 +97,8 @@ __all__ = [
     "AgentStreamConfig",
     # rag
     "RagConfig",
+    "OcrConfig",
+    "ImagePdfConfig",
     "IndexerConfig",
     "RetrieverConfig",
     "QualityPolicyConfig",

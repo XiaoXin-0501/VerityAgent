@@ -214,6 +214,8 @@ class ContentBlock(_Model):
     caption: str | None = None
     heading_level: int | None = None
     heading_text: str | None = None
+    # 从一级标题到当前块所在标题的完整路径；``heading_text`` 是其拼接展示形式。
+    heading_path: list[str] = Field(default_factory=list)
     bbox: list[float] | None = None
     confidence: float | None = None
     language: str | None = None
@@ -231,6 +233,18 @@ class Page(_Model):
     warnings: list[str] = Field(default_factory=list)
 
 
+class DocumentDescriptionCandidate(_Model):
+    """文档描述候选：解析/规则/LLM 产出的文档级描述。"""
+
+    doc_id: UUID
+    description: str | None = None
+    source: str = "auto"
+    confidence: float = 0.0
+    # 未直接采用的候选文本（供 LLM/人工复核）。
+    candidate: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ParsedDocument(_Model):
     doc_id: UUID
     kb_id: UUID
@@ -240,6 +254,8 @@ class ParsedDocument(_Model):
     pages: list[Page] = Field(default_factory=list)
     blocks: list[ContentBlock] = Field(default_factory=list)
     artifacts: list[ArtifactRef] = Field(default_factory=list)
+    # 文档级描述；由 description 模块在解析后填充，供入库/PG documents.description 使用。
+    description: DocumentDescriptionCandidate | None = None
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -303,6 +319,7 @@ class ChunkDraft(_Model):
     token_count: int = 0
     page_no: int | None = None
     heading: str | None = None
+    heading_path: list[str] = Field(default_factory=list)
     language: str | None = None
     quality_flags: set[QualityFlag] = Field(default_factory=set)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -319,9 +336,14 @@ class Chunk(_Model):
     content: str
     token_count: int = 0
     heading: str | None = None
+    heading_path: list[str] = Field(default_factory=list)
     language: str | None = None
     quality_score: float = Field(default=1.0, ge=0.0, le=1.0)
     chunk_hash: str
+    # 落 Weaviate DocChunk 的元数据
+    doc_type: str | None = None
+    parser_id: str | None = None
+    chunking_version: str | None = None
     index_version: int | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -341,14 +363,6 @@ class NoiseReport(_Model):
     boilerplate_blocks: int = 0
     warnings: list[IndexingWarningCode] = Field(default_factory=list)
     details: dict[str, Any] = Field(default_factory=dict)
-
-
-class DocumentDescriptionCandidate(_Model):
-    doc_id: UUID
-    description: str | None = None
-    source: str = "auto"
-    confidence: float = 0.0
-    warnings: list[str] = Field(default_factory=list)
 
 
 class ChunkEnrichment(_Model):
@@ -554,6 +568,7 @@ class RetrievedChunk(_Model):
     vector_score: float | None = None
     rerank_score: float | None = None
     heading: str | None = None
+    heading_path: list[str] = Field(default_factory=list)
     language: str | None = None
     quality_score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -681,11 +681,15 @@ class DocumentRepository(BaseRepository):
         stage: IndexingStage,
         progress: float,
         worker_id: str | None = None,
+        include_deleted: bool = False,
         conn: AsyncConnection[Row] | None = None,
     ) -> Document:
+        """更新入库阶段/进度；删除流程用 ``include_deleted=True``。"""
         if not 0.0 <= progress <= 1.0:
             raise ValidationError("index_progress 必须在 0~1 之间")
-        conditions = ["id = %s", "deleted_at IS NULL"]
+        conditions = ["id = %s"]
+        if not include_deleted:
+            conditions.append("deleted_at IS NULL")
         params: list[Any] = [_param(stage), progress, as_uuid(doc_id)]
         if worker_id is not None:
             conditions.append("index_locked_by = %s")

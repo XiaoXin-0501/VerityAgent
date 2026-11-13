@@ -12,21 +12,20 @@ from uuid import UUID
 
 from config.rag import IndexerConfig
 from exception import RagError, RagErrorCode
-from rag.shared.enums import (
-    SUPPORTED_DOC_TYPES,
-    BlockType,
-    DocumentType,
-)
+from rag.shared.enums import SUPPORTED_DOC_TYPES, DocumentType
 from rag.shared.registry import ChunkerRegistry, ParserRegistry
 from rag.shared.models import (
     ChunkDraft,
     DocumentSource,
     NoiseReport,
     ParsedDocument,
-    ProcessedBlock,
 )
 
-from .chunkers import build_chunker_registry
+from .chunkers import (
+    SectionAwareChunker,
+    build_chunker_registry,
+)
+from .description import DescriptionRefiner, DocumentDescriptionExtractor
 from .parsers import build_parser_registry, detect_profile
 from .parsers.base import DocumentParser
 from .quality import QualityGate, deduplicate_chunks
@@ -53,10 +52,16 @@ class TextIngestionPipeline:
         *,
         parser_registry: ParserRegistry | None = None,
         chunker_registry: ChunkerRegistry | None = None,
+        description_refiner: DescriptionRefiner | None = None,
     ) -> None:
         self.config = config or IndexerConfig()
-        self.parsers = parser_registry or build_parser_registry()
+        self.parsers = parser_registry or build_parser_registry(self.config)
         self.chunkers = chunker_registry or build_chunker_registry(self.config)
+        self.section_chunker = SectionAwareChunker(self.config, self.chunkers)
+        self.descriptions = DocumentDescriptionExtractor(
+            self.config,
+            description_refiner,
+        )
 
     async def process(
         self,
@@ -67,6 +72,7 @@ class TextIngestionPipeline:
         kb_id: UUID,
         parser_hint: str | None = None,
     ) -> TextIngestionResult:
+        """解析文档字节、切片、降噪并返回纯文本结果。"""
         profile = detect_profile(source)
         self._check_supported(source, profile.doc_type)
 
@@ -76,13 +82,27 @@ class TextIngestionPipeline:
             profile,
             parser_hint=parser_hint,
         )
-        parsed = await parser.parse(
-            source,
-            profile,
-            doc_id=doc_id,
-            kb_id=kb_id,
-            data=data,
-        )
+        try:
+            parsed = await parser.parse(
+                source,
+                profile,
+                doc_id=doc_id,
+                kb_id=kb_id,
+                data=data,
+            )
+        except RagError:
+            raise
+        except Exception as exc:
+            # 解析器的第三方库异常统一收敛到 RAG 异常模块，避免泄漏原始栈。
+            raise RagError(
+                RagErrorCode.INTERNAL,
+                "文档解析失败",
+                details={
+                    "filename": source.filename,
+                    "parser_id": _spec.parser_id,
+                    "cause": str(exc),
+                },
+            ) from exc
         if not parsed.blocks:
             raise RagError(
                 RagErrorCode.INVALID_REQUEST,
@@ -100,34 +120,27 @@ class TextIngestionPipeline:
                 },
             )
 
-        chunks: list[ChunkDraft] = []
-        for block in parsed.blocks:
-            # v1 不处理图片/图注；parser 不应产出这些块，这里再做一层保护。
-            if block.block_type in (BlockType.FIGURE, BlockType.CAPTION):
-                continue
-            resolved = self.chunkers.resolve(
-                parsed.profile.doc_type,
-                block.block_type,
+        # 文档描述：规则优先；非可靠候选交给可选 LLM refiner。
+        description = await self.descriptions.extract(parsed, source)
+        if description.text or description.candidate:
+            parsed = parsed.model_copy(
+                update={"description": description.to_candidate(doc_id)}
             )
-            if resolved is None:
-                # 标题等块只作为上下文，不单独成 chunk。
-                continue
-            _chunking_spec, chunker = resolved
-            processed = ProcessedBlock(block=block, text=block.text)
-            chunks.extend(
-                await chunker.chunk(
-                    block,
-                    processed,
-                    kb_id=kb_id,
-                    doc_type=parsed.profile.doc_type,
-                    chunking_version=self.config.chunking_version,
-                    start_index=len(chunks),
-                )
-            )
+
+        # 按标题层级由粗到细切片：能放进一级/二级标题的内容不提前下钻。
+        chunks = await self.section_chunker.chunk(
+            parsed.blocks,
+            kb_id=kb_id,
+            doc_type=parsed.profile.doc_type,
+            document_description=description.text,
+        )
 
         noise = NoiseReport()
         if self.config.quality_gate_enabled:
-            chunks, quality_noise = QualityGate(self.config.quality).filter_chunks(
+            chunks, quality_noise = QualityGate(
+                self.config.quality,
+                max_chunk_tokens=self.config.max_chunk_tokens,
+            ).filter_chunks(
                 chunks
             )
             noise = _merge_noise(noise, quality_noise)
@@ -137,6 +150,7 @@ class TextIngestionPipeline:
             noise = _merge_noise(noise, dedup_noise)
 
         warnings = list(parsed.warnings)
+        warnings.extend(description.warnings)
         warnings.extend(item.value for item in noise.warnings)
         return TextIngestionResult(
             parsed=parsed,
@@ -146,6 +160,7 @@ class TextIngestionPipeline:
         )
 
     def _check_supported(self, source: DocumentSource, doc_type: DocumentType) -> None:
+        """校验文档类型是否在 v1 支持列表和配置开关内。"""
         if doc_type not in SUPPORTED_DOC_TYPES:
             raise RagError(
                 RagErrorCode.INVALID_REQUEST,
@@ -169,6 +184,7 @@ class TextIngestionPipeline:
 
 
 def _merge_noise(left: NoiseReport, right: NoiseReport) -> NoiseReport:
+    """合并两个 ``NoiseReport`` 的计数与告警，告警去重。"""
     warnings = list(dict.fromkeys([*left.warnings, *right.warnings]))
     return NoiseReport(
         dropped_blocks=left.dropped_blocks + right.dropped_blocks,

@@ -58,6 +58,8 @@ class ModelPurpose(StrEnum):
     COMPRESSION = "compression"
     MEMORY_EXTRACTION = "memory_extraction"
     TITLE = "title"
+    # 文档级描述提取/精炼（RAG Indexer 使用）
+    DOCUMENT_DESCRIPTION = "document_description"
 
 
 class LLMRole(StrEnum):

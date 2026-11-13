@@ -15,7 +15,75 @@ __all__ = [
     "RetrieverConfig",
     "QualityPolicyConfig",
     "DedupPolicyConfig",
+    "OcrConfig",
+    "ImagePdfConfig",
 ]
+
+
+class ImagePdfConfig(ConfigModel):
+    """纯图片/扫描 PDF 的版式解析配置。
+
+    默认使用 MinerU pipeline（非 LLM）；不可用时降级到 RapidOCR。
+    LLM 相关开关默认关闭，为后续后处理预留。
+    """
+
+    # 是否启用图片 PDF 版式解析
+    enabled: bool = True
+    # auto / mineru / rapid / simple / none
+    engine: str = "auto"
+    # 页面渲染 DPI
+    dpi: int = Field(default=300, ge=120, le=600)
+    # 超长页判定：页面高宽比超过该值则切 tile
+    long_page_ratio: float = Field(default=8.0, ge=2.0)
+    # tile 高度/重叠（像素，渲染后）
+    tile_height: int = Field(default=1400, ge=400)
+    tile_overlap: int = Field(default=140, ge=0)
+    # 单文档最多处理页数；超出部分记 warning
+    max_pages: int = Field(default=100, ge=1)
+    # 单页最多 tile 数，防止极端长图
+    max_tiles_per_page: int = Field(default=24, ge=1)
+    # OCR 置信度阈值；低于仍保留，但标记 low_confidence
+    min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # MinerU CLI 命令与后端
+    mineru_command: str = "mineru"
+    # 可选：连接独立的 MinerU API 服务，避免主进程加载重型依赖
+    mineru_api_url: str | None = None
+    mineru_backend: str = "pipeline"
+    mineru_method: str = "ocr"
+    mineru_language: str = "ch"
+    # 是否启用表格/公式识别
+    mineru_table_enabled: bool = True
+    mineru_formula_enabled: bool = False
+    mineru_timeout_s: int = Field(default=900, ge=30)
+    # 模型源：modelscope / huggingface / auto
+    mineru_model_source: str = "modelscope"
+    # 预留 LLM 后处理；默认关闭
+    llm_enhance_enabled: bool = False
+    llm_model_id: str | None = None
+    llm_processors: list[str] = Field(default_factory=list)
+
+
+class OcrConfig(ConfigModel):
+    """扫描件/图片 PDF 的 OCR 配置。
+
+    默认 ``auto``：优先 PaddleOCR，其次 Tesseract；两者都不可用时，
+    文本层 PDF 仍可正常解析，只有真正需要 OCR 的页面才会报错。
+    """
+
+    # 是否允许对无文本层页面执行 OCR
+    enabled: bool = True
+    # auto / paddle / tesseract / none
+    provider: str = "auto"
+    # Tesseract 语言包；需要安装 chi_sim + eng
+    language: str = "chi_sim+eng"
+    # PaddleOCR 语言：ch / en / ...
+    paddle_lang: str = "ch"
+    # 页面渲染 DPI；越高越慢
+    dpi: int = Field(default=200, ge=72, le=600)
+    # 低于该置信度的 OCR 文本仍保留，但标记 LOW_OCR
+    min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # 单文档最多 OCR 页数，防止超大扫描件无限耗时
+    max_pages: int = Field(default=100, ge=1)
 
 
 class QualityPolicyConfig(ConfigModel):
@@ -32,9 +100,7 @@ class QualityPolicyConfig(ConfigModel):
     # 块最小 token
     min_block_tokens: int = Field(default=10, ge=0)
     # chunk 最小 token
-    min_chunk_tokens: int = Field(default=40, ge=0)
-    # chunk 最大 token
-    max_chunk_tokens: int = Field(default=1200, ge=1)
+    min_chunk_tokens: int = Field(default=50, ge=0)
     # 页眉页脚/导航占比上限
     max_boilerplate_ratio: float = Field(default=0.3, ge=0.0, le=1.0)
     # 近重复阈值
@@ -93,6 +159,21 @@ class IndexerConfig(ConfigModel):
 
     # 文档描述生成模型 id
     description_model_id: str | None = None
+    # 是否启用文档描述提取
+    description_enabled: bool = True
+    # 非可靠“内容提取”候选是否交给 LLM；文件名/强规则/空提取不调用
+    description_llm_enabled: bool = False
+    # 描述最小/最大字符数；可靠规则命中必须落在此范围
+    description_min_chars: int = Field(default=40, ge=0)
+    description_max_chars: int = Field(default=500, ge=1)
+    # 无可信描述时是否允许使用可读文件名作为描述
+    description_use_filename: bool = True
+    # 扫描描述规则时只看前 N 个内容块
+    description_max_early_blocks: int = Field(default=20, ge=1)
+    # 扫描件/图片 PDF 的 OCR 配置
+    ocr: OcrConfig = Field(default_factory=OcrConfig)
+    # 纯图片/扫描 PDF 的版式解析（MinerU/RapidOCR）
+    image_pdf: ImagePdfConfig = Field(default_factory=ImagePdfConfig)
     # 表格 LLM 摘要模型 id
     table_summary_model_id: str | None = None
     # 代码 LLM 摘要模型 id
@@ -103,19 +184,47 @@ class IndexerConfig(ConfigModel):
     table_summary_llm_enabled: bool = False
     # 是否启用代码 LLM 摘要；默认只用签名/docstring
     code_summary_enabled: bool = False
-    # 是否生成文档描述
-    description_enabled: bool = True
     # 入库是否建图；v1 默认 true（D-56）
     graph_build_enabled: bool = True
+    # 图关键词抽取模式：rule / off（llm 预留）
+    graph_extraction_mode: str = "rule"
+    # 每个 chunk 最多写入多少关键词
+    graph_max_keywords_per_chunk: int = Field(default=10, ge=1)
+    # 关系抽取最低置信度；规则抽取暂不使用
+    graph_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    # 每个 chunk 最多写入多少关系
+    graph_max_relations_per_chunk: int = Field(default=20, ge=1)
+    # 关系白名单；非白名单关系不写入图
+    graph_relation_whitelist: list[str] = Field(
+        default_factory=lambda: [
+            "is_a",
+            "part_of",
+            "depends_on",
+            "implements",
+            "supports",
+            "requires",
+            "causes",
+            "contrasts",
+        ]
+    )
+
+    # 相邻的代码/表格描述最大 token 数；超过则视为独立正文
+    special_context_max_tokens: int = Field(default=80, ge=0)
+    # 没有明确提示词（如“如下/上述”）时，仍可吸附的短文本上限
+    special_context_short_tokens: int = Field(default=40, ge=0)
+    # 是否把紧贴代码/表格的短文本并入特殊块
+    special_context_enabled: bool = True
 
     # 目标 chunk token 大小
-    chunk_size_tokens: int = Field(default=512, ge=64)
+    chunk_size_tokens: int = Field(default=300, ge=64)
     # chunk 硬上限 token
-    max_chunk_tokens: int = Field(default=800, ge=64)
+    max_chunk_tokens: int = Field(default=600, ge=64)
     # chunk 最小 token；低于合并/丢弃
     min_chunk_tokens: int = Field(default=40, ge=0)
     # 相邻文本 chunk 重叠 token
     chunk_overlap_tokens: int = Field(default=80, ge=0)
+    # 大表按行组切分时每组的数据行数（不含重复表头）
+    table_row_group_size: int = Field(default=20, ge=1)
     # 切片策略版本；影响确定性 chunk_id
     chunking_version: str = "v1"
     # 确定性 chunk_id 的命名空间前缀

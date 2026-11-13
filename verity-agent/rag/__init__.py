@@ -1,6 +1,11 @@
 """RAG 模块：Indexer 构建索引，Retriever 召回片段。"""
 
-from .bootstrap import build_dependencies
+from .bootstrap import (
+    build_default_indexer,
+    build_default_indexing_pipeline,
+    build_dependencies,
+    ensure_default_vector_schema,
+)
 from .facade import (
     Indexer,
     RagDependencies,
@@ -42,6 +47,9 @@ __all__ = [
     "create_indexer",
     "create_retriever",
     "build_dependencies",
+    "build_default_indexing_pipeline",
+    "build_default_indexer",
+    "ensure_default_vector_schema",
     "Indexer",
     "Retriever",
     "RagDependencies",

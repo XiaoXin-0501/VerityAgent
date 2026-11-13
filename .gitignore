@@ -20,3 +20,5 @@ web-ui/.eslintcache
 doc/
 # ===== 测试 =====
 .pytest_cache/
+# 测试产物（解析/切片结果），测试脚本本身不忽略
+tests

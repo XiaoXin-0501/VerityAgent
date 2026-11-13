@@ -14,6 +14,11 @@ class IndexingPipeline(Protocol):
     """Indexer 门面背后的异步入库流水线。"""
 
     async def submit(self, request: IndexDocumentRequest) -> IndexingJobView:
+        """提交入库任务；实现可选择后台执行。"""
+        ...
+
+    async def execute(self, request: IndexDocumentRequest) -> IndexingJobView:
+        """同步执行入库；供 PG worker 复用同一编排。"""
         ...
 
     async def get_job(self, job_id: str) -> IndexingJobView | None:

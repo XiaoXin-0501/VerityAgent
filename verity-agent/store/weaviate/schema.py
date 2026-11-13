@@ -202,7 +202,12 @@ class SchemaManager:
             warnings=warnings,
         )
 
-    async def ensure(self, client) -> SchemaCheckResult:
+    async def ensure(
+        self,
+        client,
+        *,
+        expected_dimensions: int | None = None,
+    ) -> SchemaCheckResult:
         """创建缺失 collection、补齐缺失 property，然后重新校验。
 
         只应在 dev/test 调用；prod 的 property 变更走独立迁移流程。
@@ -262,7 +267,10 @@ class SchemaManager:
                         details={"cause": str(exc)},
                     ) from exc
 
-        result = await self.check(client)
+        result = await self.check(
+            client,
+            expected_dimensions=expected_dimensions,
+        )
         if not result.ok:
             result.raise_if_bad()
         return result
@@ -283,10 +291,21 @@ class SchemaManager:
             **kwargs,
         )
 
-    async def check_or_ensure(self, client) -> SchemaCheckResult:
+    async def check_or_ensure(
+        self,
+        client,
+        *,
+        expected_dimensions: int | None = None,
+    ) -> SchemaCheckResult:
         if self.config.auto_create_collections:
-            return await self.ensure(client)
-        result = await self.check(client)
+            return await self.ensure(
+                client,
+                expected_dimensions=expected_dimensions,
+            )
+        result = await self.check(
+            client,
+            expected_dimensions=expected_dimensions,
+        )
         if self.config.startup_schema_check:
             result.raise_if_bad()
         return result

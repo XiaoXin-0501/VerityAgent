@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from config.rag import IndexerConfig
 from rag.shared.enums import DocumentType
 from rag.shared.models import ParserSpec
 from rag.shared.registry import ParserRegistry
@@ -15,6 +16,7 @@ from rag.shared.registry import ParserRegistry
 from .base import DocumentParser, detect_profile
 from .docx import DocxParser
 from .markdown import MarkdownParser
+from .ocr_provider import OcrProvider
 from .pdf import PdfParser
 from .spreadsheet import SpreadsheetParser
 from .text import TextParser
@@ -31,12 +33,22 @@ __all__ = [
 ]
 
 
-def build_parser_registry() -> ParserRegistry:
+def build_parser_registry(
+    config: IndexerConfig | None = None,
+    *,
+    pdf_ocr_provider: OcrProvider | None = None,
+) -> ParserRegistry:
+    """注册 v1 支持的五个 parser；其他格式不注册。
+
+    ``pdf_ocr_provider`` 用于测试或自定义 OCR 引擎注入；不传时按
+    ``IndexerConfig.ocr`` 自动选择。
+    """
     registry = ParserRegistry()
     entries = [
         (
             ParserSpec(
                 parser_id="text",
+                version=TextParser.parser_version,
                 doc_types={DocumentType.TEXT},
                 extensions={".txt"},
                 mime_types={"text/plain"},
@@ -47,9 +59,12 @@ def build_parser_registry() -> ParserRegistry:
         (
             ParserSpec(
                 parser_id="markdown",
+                version=MarkdownParser.parser_version,
                 doc_types={DocumentType.MARKDOWN},
                 extensions={".md", ".markdown"},
                 mime_types={"text/markdown", "text/x-markdown"},
+                supports_code=True,
+                supports_tables=True,
                 priority=20,
             ),
             MarkdownParser(),
@@ -57,19 +72,25 @@ def build_parser_registry() -> ParserRegistry:
         (
             ParserSpec(
                 parser_id="pdf_pymupdf",
+                version=PdfParser.parser_version,
                 doc_types={DocumentType.PDF},
                 extensions={".pdf"},
                 mime_types={"application/pdf"},
-                # v1 只取文本层，不做 OCR/表格结构
+                # v1 只取文本层 + 带线表格，不做 OCR
                 supports_scanned=False,
-                supports_tables=False,
+                supports_tables=True,
                 priority=50,
             ),
-            PdfParser(),
+            PdfParser(
+                ocr_config=config.ocr if config else None,
+                ocr_provider=pdf_ocr_provider,
+                image_pdf_config=config.image_pdf if config else None,
+            ),
         ),
         (
             ParserSpec(
                 parser_id="docx_python_docx",
+                version=DocxParser.parser_version,
                 doc_types={DocumentType.DOCX},
                 extensions={".docx"},
                 mime_types={
@@ -83,6 +104,7 @@ def build_parser_registry() -> ParserRegistry:
         (
             ParserSpec(
                 parser_id="xlsx_openpyxl",
+                version=SpreadsheetParser.parser_version,
                 doc_types={DocumentType.SPREADSHEET},
                 extensions={".xlsx", ".xlsm"},
                 mime_types={

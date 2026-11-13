@@ -1,0 +1,826 @@
+"""默认入库流水线：解析 → 切片 → 向量化 → Weaviate → Neo4j → PG 提交。
+
+职责边界：
+
+- 复用 ``TextIngestionPipeline`` 做解析/切片/描述提取，不重复实现 parser；
+- 通过 ``VectorChunkStore / GraphIndexStore / ManifestStore / SourceStore``
+  访问外部存储，只依赖协议；
+- 通过 ``IndexingRepository`` 写 PG 状态，不直接拼 SQL；
+- 任务状态机与阶段见《RAG 模块数据结构设计》§8.7。
+
+v1 的“进程内后台任务”只是默认接线：生产可以关闭 ``run_in_background``，
+由 PG ``claim_index_jobs`` 的 worker 调用 ``submit``/``execute``。所有写入
+使用确定性 chunk_id，重试幂等。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from uuid import UUID, uuid4
+
+from config.rag import IndexerConfig
+from exception import (
+    MinioObjectNotFoundError,
+    RagError,
+    RagErrorCode,
+)
+from rag.shared.enums import (
+    IndexingErrorCode,
+    IndexingStage,
+    IndexingStatus,
+    IndexingWarningCode,
+    IndexMode,
+)
+from rag.shared.models import (
+    Chunk,
+    DocumentSource,
+    IndexingError,
+    IndexingJob,
+    IndexingJobView,
+    IndexingWarning,
+)
+from utils.hashing import sha256_bytes
+from utils.time import utcnow
+
+from .conversion import build_parse_manifest, drafts_to_chunks
+from .embedding import EmbeddingResult, EmbeddingService
+from .enrichment import GraphExtractor, RuleGraphExtractor
+from .job import InMemoryJobStore, JobStore, TERMINAL_STATUSES, to_job_view
+from .repository import IndexingRepository
+from .stores import (
+    GraphIndexStore,
+    ManifestStore,
+    SourceStore,
+    VectorChunkStore,
+)
+from .text_pipeline import TextIngestionPipeline
+
+__all__ = ["DefaultIndexingPipeline"]
+
+logger = logging.getLogger(__name__)
+
+# 阶段 → 进度；只用于 job view 与 PG index_progress，不参与业务判断。
+_STAGE_PROGRESS: dict[IndexingStage, float] = {
+    IndexingStage.FETCHING: 0.05,
+    IndexingStage.PARSING: 0.15,
+    IndexingStage.CHUNKING: 0.3,
+    IndexingStage.DEDUPING: 0.35,
+    IndexingStage.DESCRIBING: 0.4,
+    IndexingStage.ENRICHING: 0.45,
+    IndexingStage.EMBEDDING: 0.55,
+    IndexingStage.VECTOR_UPSERT: 0.7,
+    IndexingStage.GRAPH_UPSERT: 0.82,
+    IndexingStage.COMMITTING: 0.92,
+    IndexingStage.DONE: 1.0,
+    IndexingStage.DELETING_PG: 0.1,
+    IndexingStage.DELETING_VECTOR: 0.35,
+    IndexingStage.DELETING_GRAPH: 0.55,
+    IndexingStage.DELETING_OBJECT: 0.75,
+}
+
+
+class _Cancelled(Exception):
+    """内部取消信号；不暴露给调用方。"""
+
+
+class DefaultIndexingPipeline:
+    """v1 默认入库流水线。"""
+
+    def __init__(
+        self,
+        config: IndexerConfig | None = None,
+        *,
+        ingestion: TextIngestionPipeline,
+        embedding: EmbeddingService,
+        vector_store: VectorChunkStore,
+        graph_store: GraphIndexStore,
+        manifest_store: ManifestStore,
+        source_store: SourceStore,
+        repository: IndexingRepository | None = None,
+        job_store: JobStore | None = None,
+        graph_extractor: GraphExtractor | None = None,
+        worker_id: str = "rag-indexer",
+        run_in_background: bool = True,
+    ) -> None:
+        """注入所有外部依赖；流水线本身不创建连接。"""
+        self.config = config or IndexerConfig()
+        self.ingestion = ingestion
+        self.embedding = embedding
+        self.vector_store = vector_store
+        self.graph_store = graph_store
+        self.manifest_store = manifest_store
+        self.source_store = source_store
+        self.repository = repository
+        self.job_store = job_store or InMemoryJobStore()
+        self.graph_extractor = graph_extractor or RuleGraphExtractor(self.config)
+        self.worker_id = worker_id
+        self.run_in_background = run_in_background
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._cancelled: set[str] = set()
+
+    # ——————————————————— 公共接口 ———————————————————
+
+    async def submit(self, request) -> IndexingJobView:
+        """创建入库 job；后台模式下立即返回 QUEUED/RUNNING 视图。"""
+        return await self._create_and_run(
+            request,
+            background=self.run_in_background,
+        )
+
+    async def execute(self, request) -> IndexingJobView:
+        """同步执行入库，供 PG worker 使用；不创建进程内后台任务。"""
+        return await self._create_and_run(request, background=False)
+
+    async def _create_and_run(
+        self,
+        request,
+        *,
+        background: bool,
+    ) -> IndexingJobView:
+        """校验请求、创建 job，并按 ``background`` 决定执行方式。"""
+        if request.mode is IndexMode.DELETE:
+            raise RagError(
+                RagErrorCode.INVALID_REQUEST,
+                "删除请使用 Indexer.delete(doc_id)",
+            )
+        document = await self._get_document(request.doc_id)
+        if document is not None and document.kb_id != request.kb_id:
+            raise RagError(
+                RagErrorCode.INVALID_REQUEST,
+                "doc_id 与 kb_id 不匹配",
+                details={
+                    "doc_id": str(request.doc_id),
+                    "kb_id": str(request.kb_id),
+                    "doc_kb_id": str(document.kb_id),
+                },
+            )
+        await self._ensure_mode_allowed(document, request.mode)
+        # REINDEX 先 bump KB 版本，让重切片期间的旧检索缓存立即失效（D-78）。
+        if request.mode is IndexMode.REINDEX and self.repository is not None:
+            await self.repository.bump_index_version(request.kb_id)
+        await self._ensure_processing(document)
+        index_version_before = int(
+            getattr(document, "index_version", 0) or 0
+        )
+        job = IndexingJob(
+            job_id=str(uuid4()),
+            kb_id=request.kb_id,
+            doc_id=request.doc_id,
+            mode=request.mode,
+            status=IndexingStatus.QUEUED,
+            stage=IndexingStage.ACCEPTED,
+            max_attempts=self.config.index_max_attempts,
+            index_version_before=index_version_before,
+        )
+        await self.job_store.put(job)
+        source = self._with_description_override(request.source, request)
+        await self._launch(
+            job,
+            self._run_index(job, request, source),
+            background=background,
+        )
+        current = await self.job_store.get(job.job_id)
+        return to_job_view(current or job)
+
+    async def get_job(self, job_id: str) -> IndexingJobView | None:
+        """读取 job；内存 JobStore 或持久化投影由注入实现决定。"""
+        job = await self.job_store.get(job_id)
+        return to_job_view(job) if job is not None else None
+
+    async def cancel(self, job_id: str) -> None:
+        """取消排队/运行中的 job；终态 job 无副作用。"""
+        job = await self.job_store.get(job_id)
+        if job is None:
+            raise RagError(
+                RagErrorCode.NOT_FOUND,
+                "入库任务不存在",
+                details={"job_id": job_id},
+            )
+        if job.status in TERMINAL_STATUSES:
+            return
+        self._cancelled.add(job_id)
+        if job.status is IndexingStatus.QUEUED:
+            await self._finish_cancelled(job)
+
+    async def delete(self, doc_id: UUID) -> IndexingJobView:
+        """删除文档：PG 软删 → Weaviate → Neo4j → MinIO → PG 完成。"""
+        document = await self._get_document(doc_id)
+        if document is None:
+            raise RagError(
+                RagErrorCode.NOT_FOUND,
+                "文档不存在",
+                details={"doc_id": str(doc_id)},
+            )
+        job = IndexingJob(
+            job_id=str(uuid4()),
+            kb_id=document.kb_id,
+            doc_id=doc_id,
+            mode=IndexMode.DELETE,
+            status=IndexingStatus.QUEUED,
+            stage=IndexingStage.ACCEPTED,
+            max_attempts=self.config.index_max_attempts,
+        )
+        await self.job_store.put(job)
+        await self._launch(
+            job,
+            self._run_delete(job),
+            background=self.run_in_background,
+        )
+        current = await self.job_store.get(job.job_id)
+        return to_job_view(current or job)
+
+    async def close(self) -> None:
+        """取消进程内后台任务；已持久化的任务由 worker 租约超时回收。"""
+        tasks = list(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
+    # ——————————————————— 任务调度 ———————————————————
+
+    async def _launch(
+        self,
+        job: IndexingJob,
+        coro,
+        *,
+        background: bool,
+    ) -> None:
+        """按调用方要求决定同步执行还是创建后台任务。"""
+        if background:
+            task = asyncio.create_task(coro)
+            self._tasks[job.job_id] = task
+            task.add_done_callback(
+                lambda _: self._tasks.pop(job.job_id, None)
+            )
+            return
+        await coro
+
+    async def _run_index(
+        self,
+        job: IndexingJob,
+        request,
+        source: DocumentSource,
+    ) -> None:
+        """入库任务主流程；所有异常收敛为 FAILED/DEAD。"""
+        job = await self._begin(job)
+        try:
+            job = await self._index(job, request, source)
+        except _Cancelled:
+            await self._finish_cancelled(job)
+        except asyncio.CancelledError:
+            await self._finish_cancelled(job)
+            raise
+        except Exception as exc:  # noqa: BLE001 - 任务边界统一收敛
+            await self._finish_failed(job, exc)
+        finally:
+            self._tasks.pop(job.job_id, None)
+
+    async def _run_delete(self, job: IndexingJob) -> None:
+        """删除任务主流程；失败时保留 deleting 状态供补偿重试。"""
+        job = await self._begin(job)
+        try:
+            job = await self._delete(job)
+        except asyncio.CancelledError:
+            await self._finish_cancelled(job)
+            raise
+        except Exception as exc:  # noqa: BLE001 - 任务边界统一收敛
+            job = await self._latest(job)
+            error = _build_error(exc, job.stage)
+            logger.exception("RAG 删除任务失败: %s", job.job_id)
+            await self._update(
+                job,
+                status=IndexingStatus.FAILED,
+                error=error,
+                ended_at=utcnow(),
+            )
+        finally:
+            self._tasks.pop(job.job_id, None)
+
+    async def _begin(self, job: IndexingJob) -> IndexingJob:
+        """置 RUNNING 并累计尝试次数。"""
+        return await self._update(
+            job,
+            status=IndexingStatus.RUNNING,
+            attempts=job.attempts + 1,
+            started_at=job.started_at or utcnow(),
+        )
+
+    # ——————————————————— 入库 ———————————————————
+
+    async def _index(
+        self,
+        job: IndexingJob,
+        request,
+        source: DocumentSource,
+    ) -> IndexingJob:
+        """执行入库的所有阶段。"""
+        # 1) FETCHING：读取原件并校验内容哈希。
+        job = await self._set_stage(job, IndexingStage.FETCHING)
+        data = await self.source_store.read_bytes(source)
+        if not data:
+            raise RagError(
+                RagErrorCode.INVALID_REQUEST,
+                "源文件为空",
+                details={"doc_id": str(request.doc_id)},
+            )
+        source_sha256 = sha256_bytes(data)
+        if source.sha256 and source.sha256.lower() != source_sha256:
+            job = await self._warn(
+                job,
+                IndexingWarningCode.PARSE_FALLBACK,
+                "源文件 sha256 与声明不一致，以实际内容为准",
+            )
+
+        # 2) PARSING：解析 + 切片 + 描述提取由 TextIngestionPipeline 完成。
+        job = await self._set_stage(job, IndexingStage.PARSING)
+        result = await self.ingestion.process(
+            source,
+            data,
+            doc_id=request.doc_id,
+            kb_id=request.kb_id,
+            parser_hint=request.parser_hint,
+        )
+        if not result.chunks:
+            raise RagError(
+                RagErrorCode.INVALID_REQUEST,
+                "所有 chunk 被质量闸门过滤",
+                details={"doc_id": str(request.doc_id)},
+            )
+        counts = job.counts.model_copy(
+            update={
+                "pages": len(result.parsed.pages)
+                or (result.parsed.profile.page_count or 0),
+                "blocks": len(result.parsed.blocks),
+                "chunks": len(result.chunks),
+                "dropped_blocks": result.noise.dropped_blocks,
+                "dropped_chunks": result.noise.dropped_chunks,
+                "low_quality_blocks": result.noise.low_quality_chunks,
+                "tokens": sum(item.token_count for item in result.chunks),
+            }
+        )
+        job = await self._update(job, counts=counts)
+        # v1 的 parse/chunk/dedup/description 在一个调用内完成；这里补记阶段
+        # 便于 job view 与 PG index_stage 反映真实边界。
+        job = await self._set_stage(job, IndexingStage.CHUNKING)
+        job = await self._set_stage(job, IndexingStage.DEDUPING)
+        job = await self._set_stage(job, IndexingStage.DESCRIBING)
+        job = await self._warn_many(job, result.warnings, IndexingStage.PARSING)
+
+        # 3) 写解析产物 manifest + blocks。
+        manifest = build_parse_manifest(
+            result.parsed,
+            source_sha256=source_sha256,
+            token_count=counts.tokens,
+        )
+        manifest_path = await self.manifest_store.write(
+            manifest,
+            result.parsed.blocks,
+        )
+
+        # 本次写入的版本号与落库模型；后续图/向量阶段复用同一份 Chunk。
+        index_version = job.index_version_before + 1
+        chunks = drafts_to_chunks(
+            result.chunks,
+            parsed=result.parsed,
+            index_version=index_version,
+            chunking_version=self.config.chunking_version,
+        )
+
+        # 4) ENRICHING：图关键词/关系抽取（默认规则）。
+        build_graph = (
+            self.config.graph_build_enabled
+            if request.graph_build_enabled is None
+            else request.graph_build_enabled
+        )
+        job = await self._set_stage(job, IndexingStage.ENRICHING)
+        extractions = {}
+        if build_graph and self.config.graph_extraction_mode != "off":
+            for chunk in chunks:
+                extractions[chunk.chunk_id] = await self.graph_extractor.extract(
+                    chunk
+                )
+        elif build_graph:
+            job = await self._warn(
+                job,
+                IndexingWarningCode.GRAPH_SKIPPED,
+                "graph_extraction_mode=off，跳过图抽取",
+            )
+        else:
+            job = await self._warn(
+                job,
+                IndexingWarningCode.GRAPH_SKIPPED,
+                "建图开关关闭，跳过 Neo4j 写入（仅测试/开发使用）",
+            )
+
+        # 5) EMBEDDING：使用 embedding_text，不落库正文。
+        job = await self._set_stage(job, IndexingStage.EMBEDDING)
+        vectors = await self.embedding.embed_chunks(result.chunks)
+        self._check_dimensions(vectors)
+
+        # 6) VECTOR_UPSERT：
+        # Weaviate 批量 insert 对已存在 uuid 会报错，因此先删除“同 id 的旧版本”，
+        # 再写新 chunk；文档此时是 processing，读路径已过滤，短暂空窗安全。
+        job = await self._set_stage(job, IndexingStage.VECTOR_UPSERT)
+        new_ids = {chunk.chunk_id for chunk in chunks}
+        existing_ids = set(await self.vector_store.list_chunk_ids(request.doc_id))
+        replaced_ids = sorted(existing_ids & new_ids)
+        if replaced_ids:
+            await self.vector_store.delete_chunks(replaced_ids)
+        await self.vector_store.upsert_chunks(chunks, vectors.vectors)
+        stale_ids = sorted(existing_ids - new_ids)
+        if stale_ids:
+            await self.vector_store.delete_chunks(stale_ids)
+
+        # 7) GRAPH_UPSERT：图写入失败不回滚 Weaviate（D-56/§8.4）。
+        job = await self._set_stage(job, IndexingStage.GRAPH_UPSERT)
+        if build_graph and self.config.graph_extraction_mode != "off":
+            for chunk in chunks:
+                extraction = extractions.get(chunk.chunk_id)
+                if extraction is None:
+                    continue
+                await self.graph_store.upsert_chunk(
+                    chunk.chunk_id,
+                    str(chunk.doc_id),
+                    str(chunk.kb_id),
+                    extraction.keywords,
+                )
+                await self.graph_store.upsert_relations(
+                    chunk.chunk_id,
+                    str(chunk.doc_id),
+                    str(chunk.kb_id),
+                    extraction.relations,
+                )
+
+        # 8) COMMITTING：描述 + PG 状态 + 版本。
+        job = await self._set_stage(job, IndexingStage.COMMITTING)
+        description = (
+            result.parsed.description.description
+            if result.parsed.description is not None
+            else None
+        )
+        if self.repository is not None:
+            if description:
+                await self.repository.set_description(request.doc_id, description)
+            await self.repository.mark_completed(
+                request.doc_id,
+                token_count=counts.tokens,
+                chunk_count=len(chunks),
+                parse_manifest_key=manifest_path,
+                index_version=index_version,
+                worker_id=self.worker_id,
+            )
+            await self.repository.bump_index_version(request.kb_id)
+
+        job = await self._update(
+            job,
+            stage=IndexingStage.DONE,
+            progress=1.0,
+            status=IndexingStatus.SUCCEEDED,
+            index_version_after=index_version,
+            ended_at=utcnow(),
+        )
+        return job
+
+    # ——————————————————— 删除 ———————————————————
+
+    async def _delete(self, job: IndexingJob) -> IndexingJob:
+        """执行跨存储删除；每步幂等，失败保留 deleting 供补偿。"""
+        job = await self._set_stage(job, IndexingStage.DELETING_PG)
+        if self.repository is not None:
+            await self.repository.mark_deleting(job.doc_id)
+
+        job = await self._set_stage(job, IndexingStage.DELETING_VECTOR)
+        await self.vector_store.delete_document(job.doc_id)
+
+        job = await self._set_stage(job, IndexingStage.DELETING_GRAPH)
+        await self.graph_store.delete_document(str(job.doc_id))
+
+        job = await self._set_stage(job, IndexingStage.DELETING_OBJECT)
+        await self.manifest_store.delete(job.kb_id, job.doc_id)
+        await self.source_store.delete_document(
+            job.kb_id,
+            job.doc_id,
+        )
+
+        if self.repository is not None:
+            await self.repository.bump_index_version(job.kb_id)
+            await self.repository.mark_deleted(job.doc_id)
+
+        return await self._update(
+            job,
+            stage=IndexingStage.DONE,
+            progress=1.0,
+            status=IndexingStatus.SUCCEEDED,
+            ended_at=utcnow(),
+        )
+
+    # ——————————————————— 状态/错误 ———————————————————
+
+    async def _set_stage(
+        self,
+        job: IndexingJob,
+        stage: IndexingStage,
+    ) -> IndexingJob:
+        """切换阶段并写 PG index_progress；同时检查取消信号。"""
+        job = await self._update(
+            job,
+            stage=stage,
+            progress=_STAGE_PROGRESS.get(stage, job.progress),
+        )
+        if self.repository is not None:
+            await self.repository.update_progress(
+                job.doc_id,
+                stage=stage,
+                progress=job.progress,
+                worker_id=self.worker_id,
+                # 删除流程 mark_deleting 已写 deleted_at，仍需记录后续阶段。
+                include_deleted=job.mode is IndexMode.DELETE,
+            )
+        self._check_cancelled(job.job_id)
+        return job
+
+    async def _update(self, job: IndexingJob, **updates) -> IndexingJob:
+        """不可变 job 的统一替换 + 持久化。"""
+        updated = job.model_copy(update=updates)
+        await self.job_store.put(updated)
+        return updated
+
+    async def _warn(
+        self,
+        job: IndexingJob,
+        code: IndexingWarningCode,
+        message: str,
+        stage: IndexingStage | None = None,
+    ) -> IndexingJob:
+        """追加一条去重告警。"""
+        wave = IndexingWarning(
+            code=code,
+            stage=stage or job.stage,
+            message=message,
+        )
+        if any(
+            item.code == code and item.message == message
+            for item in job.warnings
+        ):
+            return job
+        return await self._update(
+            job,
+            warnings=[*job.warnings, wave],
+        )
+
+    async def _warn_many(
+        self,
+        job: IndexingJob,
+        messages: list[str],
+        stage: IndexingStage,
+    ) -> IndexingJob:
+        """把解析器/切片的字符串告警映射成结构化告警。"""
+        for message in messages:
+            job = await self._warn(
+                job,
+                _warning_code(message),
+                message,
+                stage=stage,
+            )
+        return job
+
+    async def _finish_cancelled(self, job: IndexingJob) -> None:
+        """统一取消收尾：终态 CANCELLED + PG failed/CANCELLED 投影。"""
+        job = await self._latest(job)
+        self._cancelled.discard(job.job_id)
+        error = IndexingError(
+            code=IndexingErrorCode.CANCELLED,
+            stage=job.stage,
+            message="入库任务已取消",
+        )
+        await self._update(
+            job,
+            status=IndexingStatus.CANCELLED,
+            error=error,
+            ended_at=utcnow(),
+        )
+        await self._record_failure(job, error)
+
+    async def _finish_failed(self, job: IndexingJob, exc: Exception) -> None:
+        """统一失败收尾：错误映射、DEAD 判定、PG 退避。"""
+        # _set_stage 可能已把新阶段写进 JobStore，失败收尾必须读最新状态。
+        job = await self._latest(job)
+        error = _build_error(exc, job.stage)
+        status = (
+            IndexingStatus.DEAD
+            if job.attempts >= job.max_attempts
+            else IndexingStatus.FAILED
+        )
+        if status is IndexingStatus.DEAD:
+            error = error.model_copy(update={"code": IndexingErrorCode.DEAD})
+        logger.exception(
+            "RAG 入库任务失败: job=%s stage=%s code=%s",
+            job.job_id,
+            job.stage,
+            error.code,
+        )
+        await self._update(
+            job,
+            status=status,
+            error=error,
+            ended_at=utcnow(),
+        )
+        await self._record_failure(job, error)
+
+    async def _latest(self, job: IndexingJob) -> IndexingJob:
+        """读取 JobStore 中的最新 job；不存在时回退到入参。"""
+        return await self.job_store.get(job.job_id) or job
+
+    async def _record_failure(
+        self,
+        job: IndexingJob,
+        error: IndexingError,
+    ) -> None:
+        """写 PG 失败/取消状态；PG 写失败只记录日志，不覆盖任务结果。"""
+        if self.repository is None:
+            return
+        try:
+            await self.repository.mark_failed(
+                job.doc_id,
+                error=json.dumps(
+                    error.model_dump(mode="json"),
+                    ensure_ascii=False,
+                ),
+                worker_id=self.worker_id,
+                retry_backoff_s=self.config.index_retry_backoff_s,
+                max_attempts=self.config.index_max_attempts,
+            )
+        except Exception:  # noqa: BLE001 - 失败收尾不能再次抛出
+            logger.exception("写 PG 入库失败状态失败: %s", job.doc_id)
+
+    def _check_cancelled(self, job_id: str) -> None:
+        """阶段边界检查取消信号。"""
+        if job_id in self._cancelled:
+            raise _Cancelled()
+
+    def _check_dimensions(self, result: EmbeddingResult) -> None:
+        """校验 embedding 维度与配置一致，避免写坏 collection。"""
+        expected = int(self.config.embedding_dimensions)
+        if result.dimensions and result.dimensions != expected:
+            raise RagError(
+                RagErrorCode.INVALID_CONFIG,
+                "embedding 维度与 IndexerConfig.embedding_dimensions 不一致",
+                details={
+                    "expected": expected,
+                    "actual": result.dimensions,
+                    "model_id": self.embedding.model_id,
+                },
+            )
+        declared = self.embedding.dimensions
+        if declared is not None and declared != expected:
+            raise RagError(
+                RagErrorCode.INVALID_CONFIG,
+                "embedding 模型声明维度与配置不一致",
+                details={"expected": expected, "declared": declared},
+            )
+
+    async def _get_document(self, doc_id: UUID):
+        """读取 PG 文档；未注入 repository 时返回 None（测试场景）。"""
+        if self.repository is None:
+            return None
+        document = await self.repository.get_document(doc_id)
+        if document is None:
+            raise RagError(
+                RagErrorCode.NOT_FOUND,
+                "文档不存在",
+                details={"doc_id": str(doc_id)},
+            )
+        return document
+
+    @staticmethod
+    def _document_status(document) -> str | None:
+        """取文档状态的字符串值；测试投影可能没有 status。"""
+        if document is None:
+            return None
+        status = getattr(document, "status", None)
+        return getattr(status, "value", status)
+
+    async def _ensure_mode_allowed(self, document, mode: IndexMode) -> None:
+        """CREATE 不允许覆盖已有索引；UPDATE/REINDEX 可以。"""
+        if document is None or mode is not IndexMode.CREATE:
+            return
+        if self._document_status(document) == "completed":
+            raise RagError(
+                RagErrorCode.CONFLICT,
+                "文档已有索引；请使用 UPDATE 或 REINDEX",
+                details={"doc_id": str(document.id)},
+            )
+
+    async def _ensure_processing(self, document) -> None:
+        """入库前把文档置 processing，确保读路径立即过滤旧索引。
+
+        worker 通过 ``claim_index_jobs`` 领取时状态已经是 processing；
+        pending/failed/completed（重切片）才需要显式迁移。
+        """
+        if self.repository is None or document is None:
+            return
+        value = self._document_status(document)
+        if value in {"deleting", "deleted"}:
+            raise RagError(
+                RagErrorCode.CONFLICT,
+                "文档正在删除或已删除，不能入库",
+                details={"doc_id": str(document.id), "status": str(value)},
+            )
+        if value != "processing":
+            await self.repository.mark_processing(document.id)
+
+    @staticmethod
+    def _with_description_override(
+        source: DocumentSource,
+        request,
+    ) -> DocumentSource:
+        """把人工描述合并进 source.metadata，复用描述提取优先级。"""
+        override = (request.description_override or "").strip()
+        if not override:
+            return source
+        metadata = dict(source.metadata)
+        metadata["description"] = override
+        return source.model_copy(update={"metadata": metadata})
+
+
+def _warning_code(message: str) -> IndexingWarningCode:
+    """把自由文本告警映射到枚举；未知告警按 PARSE_FALLBACK 记录。"""
+    text = message or ""
+    if "描述" in text:
+        return IndexingWarningCode.DESCRIPTION_FALLBACK
+    if "OCR" in text or "覆盖率" in text:
+        return IndexingWarningCode.LOW_TEXT_COVERAGE
+    if "表格" in text:
+        return IndexingWarningCode.LOW_TABLE
+    if "重复" in text:
+        return IndexingWarningCode.DUPLICATE_DROPPED
+    if "截断" in text:
+        return IndexingWarningCode.CHUNK_TRUNCATED
+    if "过短" in text:
+        return IndexingWarningCode.CHUNK_TOO_SHORT
+    return IndexingWarningCode.PARSE_FALLBACK
+
+
+def _build_error(exc: Exception, stage: IndexingStage) -> IndexingError:
+    """把阶段内异常转换成 ``IndexingError``。"""
+    code = _error_code(exc, stage)
+    details = {"cause": str(exc)}
+    raw_details = getattr(exc, "details", None)
+    if isinstance(raw_details, dict):
+        details.update(
+            {
+                str(key): value
+                for key, value in raw_details.items()
+                if isinstance(value, (str, int, float, bool)) or value is None
+            }
+        )
+    return IndexingError(
+        code=code,
+        stage=stage,
+        message=str(exc) or code.value,
+        retryable=bool(getattr(exc, "retryable_value", False))
+        or stage
+        in {
+            IndexingStage.FETCHING,
+            IndexingStage.EMBEDDING,
+            IndexingStage.VECTOR_UPSERT,
+            IndexingStage.GRAPH_UPSERT,
+            IndexingStage.COMMITTING,
+        },
+        details=details,
+    )
+
+
+def _error_code(exc: Exception, stage: IndexingStage) -> IndexingErrorCode:
+    """阶段 + 异常类型 → 稳定错误码。"""
+    if stage is IndexingStage.EMBEDDING:
+        return IndexingErrorCode.EMBEDDING_FAILED
+    if stage is IndexingStage.VECTOR_UPSERT:
+        return IndexingErrorCode.VECTOR_WRITE_FAILED
+    if stage is IndexingStage.GRAPH_UPSERT:
+        return IndexingErrorCode.GRAPH_WRITE_FAILED
+    if stage is IndexingStage.COMMITTING:
+        return IndexingErrorCode.COMMIT_FAILED
+    if stage is IndexingStage.FETCHING:
+        if isinstance(exc, MinioObjectNotFoundError):
+            return IndexingErrorCode.CORRUPT_FILE
+        return IndexingErrorCode.PARSE_FAILED
+    if isinstance(exc, RagError):
+        message = exc.message
+        if "不支持" in message or "未启用" in message:
+            return IndexingErrorCode.UNSUPPORTED_TYPE
+        if (
+            "没有可索引文本" in message
+            or "覆盖率过低" in message
+            or "源文件为空" in message
+        ):
+            return IndexingErrorCode.EMPTY_CONTENT
+        if "chunk" in message or "切片" in message:
+            return IndexingErrorCode.LOW_QUALITY
+        if "解析" in message:
+            return IndexingErrorCode.PARSE_FAILED
+    return IndexingErrorCode.INTERNAL

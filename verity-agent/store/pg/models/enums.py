@@ -162,7 +162,10 @@ DOCUMENT_TRANSITIONS: dict[DocumentStatus, frozenset[DocumentStatus]] = {
     DocumentStatus.FAILED: frozenset(
         {DocumentStatus.PROCESSING, DocumentStatus.DELETING}
     ),
-    DocumentStatus.COMPLETED: frozenset({DocumentStatus.DELETING}),
+    DocumentStatus.COMPLETED: frozenset(
+        # completed → processing：重切片（REINDEX）先让文档退出检索
+        {DocumentStatus.PROCESSING, DocumentStatus.DELETING}
+    ),
     DocumentStatus.DELETING: frozenset({DocumentStatus.DELETED}),
     DocumentStatus.DELETED: frozenset(),
 }

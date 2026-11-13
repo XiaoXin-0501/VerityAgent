@@ -41,10 +41,19 @@ from .serialization import (
     without_none,
 )
 from .text import (
+    decode_text,
+    detect_language,
     ensure_prefix,
+    filename_to_title,
+    is_meaningful_filename,
+    join_wrapped_lines,
     mask_secret,
     normalize_whitespace,
+    smart_join,
+    split_sentences,
     strip_control_chars,
+    strip_markdown_inline,
+    table_to_markdown,
     truncate,
 )
 from .time import (
@@ -106,6 +115,15 @@ __all__ = [
     "ensure_prefix",
     "stable_sample",
     "mask_secret",
+    "decode_text",
+    "detect_language",
+    "smart_join",
+    "split_sentences",
+    "strip_markdown_inline",
+    "table_to_markdown",
+    "join_wrapped_lines",
+    "filename_to_title",
+    "is_meaningful_filename",
     # pagination
     "Page",
     "PageRequest",
