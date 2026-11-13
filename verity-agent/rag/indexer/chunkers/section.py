@@ -35,6 +35,7 @@ from utils.tokens import estimate_tokens
 from .association import SpecialContext, associate_special_contexts
 from .base import BaseChunker, coalesce_text_chunks, section_type_for
 from .packing import Unit, build_group_chunk, pack_units
+from ..policy import IndexerPolicy, get_indexer_policy
 
 __all__ = ["SectionNode", "SectionAwareChunker", "build_section_tree"]
 
@@ -141,10 +142,13 @@ class SectionAwareChunker:
         self,
         config: IndexerConfig,
         chunkers: ChunkerRegistry,
+        *,
+        policy: IndexerPolicy | None = None,
     ) -> None:
-        """保存配置与特殊块（表格/代码）切片器注册表。"""
+        """保存配置、特殊块切片器注册表与索引策略。"""
         self.config = config
         self.chunkers = chunkers
+        self.policy = policy or get_indexer_policy()
         # 唯一硬上限来源：IndexerConfig.max_chunk_tokens。
         self.max_tokens = config.max_chunk_tokens
         self.target_tokens = min(config.chunk_size_tokens, self.max_tokens)
@@ -181,6 +185,7 @@ class SectionAwareChunker:
                 blocks,
                 max_tokens=context_max,
                 short_tokens=context_short,
+                policy=self.policy,
             )
         root = build_section_tree(blocks)
         _compute_totals(root, contexts)

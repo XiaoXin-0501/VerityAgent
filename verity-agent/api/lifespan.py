@@ -17,6 +17,7 @@ from exception import RedisError
 from agent.hooks.builtin.factory import build_dispatcher
 from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 from provider.factory import build_registry
+from prompt import build_prompt_registry
 from store.minio import close_minio, init_minio
 from store.neo4j import (
     check_schema as check_graph_schema,
@@ -110,6 +111,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     registry = build_registry(settings.models)
+    # Prompt 模板是启动期资产：目录/manifest/变量不一致直接 fail-fast，
+    # 不允许带病启动；运行期注册表只读。
+    app.state.prompt_registry = build_prompt_registry(settings.prompts)
     await registry.init_all()
     app.state.provider_registry = registry
     hook_dispatcher = build_dispatcher(

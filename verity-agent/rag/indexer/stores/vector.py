@@ -12,11 +12,27 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
+from rag.shared.enums import BlockType
 from rag.shared.models import Chunk
 from store.weaviate import SchemaCheckResult, SchemaManager, WeaviateStore
 from exception import WeaviateOperationError
+from utils.text import detect_language
 
-__all__ = ["VectorChunkStore", "WeaviateChunkStore", "chunk_properties"]
+__all__ = [
+    "VectorChunkStore",
+    "WeaviateChunkStore",
+    "chunk_content_language",
+    "chunk_properties",
+]
+
+# 内容语言无法判断时的落库字段；中文项目默认走 zh，避免中文 chunk 落入
+# 英文分词器导致 BM25 几乎不可用。
+_DEFAULT_CONTENT_LANGUAGE = "zh"
+
+# chunk.language 可能是代码语言（python/tsx…）而不是自然语言；
+# 只有明确的自然语言标签才直接采信。
+_ZH_LANGUAGE_PREFIXES = ("zh", "cn", "chinese")
+_EN_LANGUAGE_PREFIXES = ("en", "english")
 
 
 class VectorChunkStore(Protocol):
@@ -43,21 +59,60 @@ class VectorChunkStore(Protocol):
         ...
 
 
+def chunk_content_language(chunk: Chunk) -> str:
+    """判断 chunk 正文应落 ``content_zh`` 还是 ``content_en``。
+
+    顺序：
+    1. ``chunk.language`` 是明确的自然语言标签（zh/en/chinese…）→ 直接采信；
+    2. 否则对正文做轻量字符占比检测（``utils.text.detect_language``）；
+    3. 代码块无法判断时默认 `en`（符号/数字为主），其他默认 `zh`。
+
+    注意：``chunk.language`` 对代码块可能是 ``python/tsx`` 等代码语言，
+    不能当作自然语言；此时会走正文检测（代码通常归入 en）。
+    """
+    declared = (chunk.language or "").strip().lower()
+    if declared.startswith(_ZH_LANGUAGE_PREFIXES):
+        return "zh"
+    if declared.startswith(_EN_LANGUAGE_PREFIXES):
+        return "en"
+    detected = detect_language(chunk.content or "")
+    if detected:
+        return detected
+    # 符号/数字为主的代码块无法从字符占比判断；默认走英文分词器。
+    if chunk.block_type is BlockType.CODE:
+        return "en"
+    return _DEFAULT_CONTENT_LANGUAGE
+
+
 def chunk_properties(chunk: Chunk) -> dict:
     """把 Chunk 映射为 DocChunk schema 的 properties。
 
-    按 D-76：``heading`` 字段保留但不写入（v1 存 NULL），完整章节路径只
-    进入 embedding_text，不落库；需要展示标题时由检索侧回查解析产物。
-    空值不写入，避免 Weaviate 可选字段类型报错。
+    正文按语言写入二选一字段：
+    - ``content_zh``：中文正文，配 gse_ch 分词器；
+    - ``content_en``：英文/代码正文，配 word 分词器；
+    - 另一个字段写空字符串（字段始终存在，BM25 查询可按 query 语言选字段）。
+
+    ``heading`` 写最近一级标题，``heading_path`` 写从一级标题到当前的完整
+    路径（``text[]``）；``semantic_description`` 写表格/代码的描述（纯文本
+    chunk 为空串），便于管理和观察向量化依据；embedding_text 仍由 chunker
+    单独生成，不落库。空值不写入，避免可选字段报错。
     """
+    heading_path = [item for item in chunk.heading_path if item]
+    # Chunk.heading 可能是 chunker 拼好的完整路径字符串；Weaviate 的
+    # heading 字段按检索契约存“最近一级”，完整路径由 heading_path 数组承载。
+    heading = heading_path[-1] if heading_path else chunk.heading
+    language = chunk_content_language(chunk)
     properties = {
         "kb_id": str(chunk.kb_id),
         "doc_id": str(chunk.doc_id),
         "doc_type": chunk.doc_type or "",
         "section_type": chunk.section_type.value,
         "block_type": chunk.block_type.value,
-        "heading": None,
-        "language": chunk.language,
+        "heading": heading,
+        "heading_path": heading_path or None,
+        # 特殊块语义描述；纯文本 chunk 写空串，保证字段始终可观察/可查询。
+        "semantic_description": chunk.semantic_description or "",
+        "language": language,
         "quality_score": float(chunk.quality_score),
         "chunk_hash": chunk.chunk_hash,
         "index_version": int(chunk.index_version or 0),
@@ -65,7 +120,9 @@ def chunk_properties(chunk: Chunk) -> dict:
         "parser_id": chunk.parser_id or "",
         "chunk_index": int(chunk.chunk_index),
         "page_no": chunk.page_no,
-        "content": chunk.content,
+        # 单集合双字段：只有一个字段有正文，另一个为空字符串。
+        "content_zh": chunk.content if language == "zh" else "",
+        "content_en": chunk.content if language == "en" else "",
         "token_count": int(chunk.token_count),
         "created_at": chunk.created_at,
     }

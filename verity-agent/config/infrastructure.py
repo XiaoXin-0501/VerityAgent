@@ -183,7 +183,7 @@ class WeaviateConfig(ConfigModel):
     # dev/test 是否自动创建缺失 collection；prod 必须 False
     auto_create_collections: bool = False
     # 期望 schema 版本；与 manifest/schema_import.json 对齐
-    expected_schema_version: str = "2026-11-09"
+    expected_schema_version: str = "2026-11-13"
     # 手写 schema 文件路径；为空时使用仓库 doc/weaviate_schema_import.json
     schema_import_path: str = str(PROJECT_ROOT / "doc" / "weaviate_schema_import.json")
     # 启动时是否执行 schema 校验（D-97）

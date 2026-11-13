@@ -178,23 +178,52 @@ class IndexerConfig(ConfigModel):
     table_summary_model_id: str | None = None
     # 代码 LLM 摘要模型 id
     code_summary_model_id: str | None = None
-    # 图抽取 LLM 模型 id
+    # 图抽取 LLM 模型 id（mode=llm/hybrid 时使用）
     graph_model_id: str | None = None
+    # 索引策略文件（质量扣分/描述标题/关联提示词/通用停用词/阶段进度）；
+    # 为空使用内置 config/rag_policy.json；相对路径按 verity-agent 解析
+    indexer_policy_path: str | None = None
     # 是否启用大表/歧义表的 LLM 摘要
     table_summary_llm_enabled: bool = False
     # 是否启用代码 LLM 摘要；默认只用签名/docstring
     code_summary_enabled: bool = False
+    # 特殊块（表格/代码）向量化策略：只向量化 heading + 描述，避免低语义正文
+    semantic_embedding_enabled: bool = True
+    # heading 少于该 token 数视为“太少”，无描述时才触发 LLM 兜底
+    semantic_heading_min_tokens: int = Field(default=4, ge=0)
+    # 表格/Excel 送入 LLM 的预览行数
+    semantic_preview_rows: int = Field(default=3, ge=1)
+    # 生成的描述最大字符数
+    semantic_description_max_chars: int = Field(default=200, ge=20)
+    # 代码送入 LLM 的最大字符数
+    semantic_code_max_input_chars: int = Field(default=2000, ge=100)
+    # 描述生成最大输出 token
+    semantic_description_max_output_tokens: int = Field(default=160, ge=32)
+    # 描述生成温度
+    semantic_description_temperature: float = Field(
+        default=0.0, ge=0.0, le=2.0
+    )
     # 入库是否建图；v1 默认 true（D-56）
     graph_build_enabled: bool = True
-    # 图关键词抽取模式：rule / off（llm 预留）
-    graph_extraction_mode: str = "rule"
+    # 垂直领域画像名；一个部署只接入一个领域（默认医疗参考画像）
+    domain_profile: str = "medical"
+    # 自定义领域画像目录；为空时使用内置 domains/ 目录
+    domain_profile_dir: str | None = None
+    # 自定义领域画像文件；设置后优先于 domain_profile/domain_profile_dir
+    domain_profile_path: str | None = None
+    # 图抽取模式：
+    # rule=纯通用规则；lexicon=领域词典 + 通用词；llm=LLM（失败降级词典）；
+    # hybrid=LLM + 词典合并；off=关闭
+    graph_extraction_mode: str = "lexicon"
+    # 领域词之外是否补充通用名词关键词
+    graph_include_generic_terms: bool = True
     # 每个 chunk 最多写入多少关键词
     graph_max_keywords_per_chunk: int = Field(default=10, ge=1)
-    # 关系抽取最低置信度；规则抽取暂不使用
+    # 关系抽取最低置信度
     graph_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     # 每个 chunk 最多写入多少关系
     graph_max_relations_per_chunk: int = Field(default=20, ge=1)
-    # 关系白名单；非白名单关系不写入图
+    # 关系白名单；与领域画像声明的关系取并集
     graph_relation_whitelist: list[str] = Field(
         default_factory=lambda: [
             "is_a",
@@ -207,6 +236,16 @@ class IndexerConfig(ConfigModel):
             "contrasts",
         ]
     )
+    # LLM 图抽取：过短 chunk 不调用模型
+    graph_llm_min_chunk_chars: int = Field(default=40, ge=0)
+    # LLM 图抽取：单 chunk 最多送入模型的字符数
+    graph_llm_max_input_chars: int = Field(default=4000, ge=200)
+    # LLM 图抽取温度；抽取任务建议低温
+    graph_llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    # LLM 图抽取最大输出 token
+    graph_llm_max_output_tokens: int = Field(default=800, ge=64)
+    # LLM 未返回 confidence 时的兜底置信度
+    graph_llm_default_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
     # 相邻的代码/表格描述最大 token 数；超过则视为独立正文
     special_context_max_tokens: int = Field(default=80, ge=0)

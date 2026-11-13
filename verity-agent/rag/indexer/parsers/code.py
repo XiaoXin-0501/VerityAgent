@@ -5,7 +5,13 @@ from __future__ import annotations
 import re
 from uuid import UUID
 
-from rag.shared.enums import BlockType, CodeParseStatus, DocumentType, SymbolType
+from rag.shared.enums import (
+    BlockType,
+    CodeLanguage,
+    CodeParseStatus,
+    DocumentType,
+    SymbolType,
+)
 from rag.shared.models import (
     CodeBlock,
     DocumentProfile,
@@ -26,21 +32,6 @@ _JAVA_SYMBOL = re.compile(
 )
 _GO_SYMBOL = re.compile(r"^(?P<indent>\s*)func\s+(?:\([^)]*\)\s*)?(?P<name>\w+)")
 
-_LANGUAGE_BY_EXT = {
-    ".py": "python",
-    ".java": "java",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".js": "javascript",
-    ".jsx": "jsx",
-    ".go": "go",
-    ".rs": "rust",
-    ".c": "c",
-    ".cpp": "cpp",
-    ".h": "c",
-    ".hpp": "cpp",
-}
-
 
 class CodeParser:
     parser_id = "code_regex"
@@ -59,7 +50,8 @@ class CodeParser:
         extension = source.extension.lower()
         if not extension.startswith("."):
             extension = f".{extension}"
-        language = _LANGUAGE_BY_EXT.get(extension)
+        language = CodeLanguage.from_extension(extension)
+        language_value = language.value if language else None
         symbols = self._symbols(text, language)
         blocks = []
         if symbols:
@@ -73,7 +65,7 @@ class CodeParser:
                         text=symbol["body"],
                         parser_id=self.parser_id,
                         code=CodeBlock(
-                            language=language,
+                            language=language_value,
                             file_path=source.filename,
                             symbol_path=symbol["name"],
                             symbol_type=symbol["type"],
@@ -95,7 +87,7 @@ class CodeParser:
                     text=text,
                     parser_id=self.parser_id,
                     code=CodeBlock(
-                        language=language,
+                        language=language_value,
                         file_path=source.filename,
                         symbol_type=SymbolType.FILE,
                         body=text,
@@ -123,9 +115,19 @@ class CodeParser:
             blocks=blocks,
         )
 
-    def _symbols(self, text: str, language: str | None) -> list[dict]:
+    def _symbols(
+        self,
+        text: str,
+        language: CodeLanguage | None,
+    ) -> list[dict]:
         lines = text.splitlines()
-        pattern = _PYTHON_SYMBOL if language == "python" else _GO_SYMBOL if language == "go" else _JS_SYMBOL
+        pattern = (
+            _PYTHON_SYMBOL
+            if language is CodeLanguage.PYTHON
+            else _GO_SYMBOL
+            if language is CodeLanguage.GO
+            else _JS_SYMBOL
+        )
         starts: list[tuple[int, re.Match]] = []
         for index, line in enumerate(lines):
             match = pattern.match(line)

@@ -1,10 +1,13 @@
 """图富化：从 chunk 抽取关键词/关系。
 
-v1 使用规则抽取（jieba 分词 + 词性/长度/停用词过滤），不调用 LLM：
+v1 提供三类实现：
 
-- 只写“可检索的名词性概念”，不写 mentions/related_to 这类弱关系；
-- 关系抽取默认留空，通过 ``relation_extractor`` 预留 LLM/领域规则接入；
-- 所有关系统一经过白名单、数量上限和去重，再交给 ``GraphIndexStore``。
+- ``RuleGraphExtractor``：通用 jieba 规则，不认识任何领域知识；
+- ``DomainGraphExtractor``（``domain/extractor.py``）：领域词典 + jieba 补充；
+- ``LLMGraphExtractor``（``llm_graph.py``）：领域提示词驱动，可选降级到词典。
+
+本模块只保留与领域无关的公共能力：通用分词、关系过滤、白名单合并。
+领域画像与具体抽取器见 ``enrichment/domain``。
 
 设计对应《RAG 模块数据结构设计》§7.3。
 """
@@ -19,82 +22,22 @@ from typing import Protocol
 from config.rag import IndexerConfig
 from rag.shared.models import Chunk, GraphRelation, ChunkGraphExtraction
 
+from ..policy import IndexerPolicy, get_indexer_policy
+
 __all__ = [
     "GraphExtractor",
     "RelationExtractor",
     "RuleGraphExtractor",
     "extract_keywords",
     "filter_relations",
+    "merge_relation_whitelist",
 ]
 
 # 只保留名词性词性：普通名词/专名/动名词/动名词短语/形容词性名词/英文
 _KEYWORD_POS = frozenset({"n", "nr", "ns", "nt", "nz", "vn", "an", "eng"})
 
-# 中文/英文停用词；只放高频且无检索价值的词，避免维护大词表。
-_STOPWORDS = frozenset(
-    {
-        "这个",
-        "那个",
-        "这些",
-        "那些",
-        "可以",
-        "需要",
-        "使用",
-        "通过",
-        "进行",
-        "以及",
-        "或者",
-        "但是",
-        "因为",
-        "所以",
-        "如果",
-        "然后",
-        "我们",
-        "你们",
-        "他们",
-        "自己",
-        "一个",
-        "一些",
-        "什么",
-        "怎么",
-        "如何",
-        "其中",
-        "对于",
-        "关于",
-        "the",
-        "and",
-        "for",
-        "with",
-        "this",
-        "that",
-        "from",
-        "into",
-        "are",
-        "was",
-        "were",
-        "will",
-        "can",
-        "not",
-        "you",
-        "your",
-        "our",
-        "its",
-        "has",
-        "have",
-        "had",
-        "but",
-        "or",
-        "of",
-        "to",
-        "in",
-        "on",
-        "is",
-        "as",
-        "by",
-        "be",
-        "it",
-    }
-)
+# 通用停用词由 IndexerPolicy.graph.generic_stopwords 管理
+# （config/rag_policy.json），领域停用词在 DomainProfile.stopwords。
 
 # 英文技术词（API、RAG、BGE-M3、C++ 等）；jieba 不一定能完整切出。
 _ASCII_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+#.\-]{1,31}")
@@ -128,9 +71,12 @@ def _normalize_keyword(value: str) -> str:
     return text
 
 
-def _is_valid_keyword(value: str) -> bool:
-    """过滤空值、纯数字/符号、单字、停用词和明显噪音。"""
-    if not value or value in _STOPWORDS:
+def _is_valid_keyword(value: str, *, stopwords: Iterable[str] = ()) -> bool:
+    """过滤空值、纯数字/符号、单字、停用词和明显噪音。
+
+    ``stopwords`` 传入已归一化的停用词（通用词 + 领域词），由调用方提供。
+    """
+    if not value or value.lower() in stopwords:
         return False
     if _NUMERIC_RE.match(value):
         return False
@@ -143,7 +89,13 @@ def _is_valid_keyword(value: str) -> bool:
     return True
 
 
-def extract_keywords(text: str, *, top_k: int = 10) -> list[str]:
+def extract_keywords(
+    text: str,
+    *,
+    top_k: int = 10,
+    stopwords: Iterable[str] | None = None,
+    postokenizer=None,
+) -> list[str]:
     """从文本抽取关键词，按词频、长度和首次出现顺序稳定排序。
 
     策略：
@@ -151,12 +103,22 @@ def extract_keywords(text: str, *, top_k: int = 10) -> list[str]:
     2. 额外用正则捞英文/技术术语，避免分词器把 ``BGE-M3`` 切碎；
     3. 去重（大小写不敏感）后按词频降序，频次相同按长度降序、首次出现升序，
        保证同一输入每次结果一致。
+
+    ``stopwords`` 为空时使用 ``IndexerPolicy.graph.generic_stopwords``；
+    传入集合时以传入值为准（领域实现会合并通用词与领域词）。
+    ``postokenizer`` 供领域实现传入带用户词典的私有分词器。
     """
     if not text or top_k <= 0:
         return []
 
-    import jieba.posseg as pseg
+    if postokenizer is None:
+        import jieba.posseg as pseg
 
+        postokenizer = pseg
+
+    if stopwords is None:
+        stopwords = get_indexer_policy().graph.generic_stopwords
+    extra_stopwords = frozenset(stopwords)
     counts: Counter[str] = Counter()
     first_seen: dict[str, int] = {}
     display: dict[str, str] = {}
@@ -169,7 +131,7 @@ def extract_keywords(text: str, *, top_k: int = 10) -> list[str]:
 
     def add(raw: str, *, from_ascii: bool = False) -> None:
         value = _normalize_keyword(raw)
-        if not _is_valid_keyword(value):
+        if not _is_valid_keyword(value, stopwords=extra_stopwords):
             return
         key = value.lower()
         # jieba 可能把 "BGE-M3" 拆成 bge/m3；已有完整术语时丢掉子串。
@@ -186,7 +148,7 @@ def extract_keywords(text: str, *, top_k: int = 10) -> list[str]:
 
     for term in ascii_terms:
         add(term, from_ascii=True)
-    for token in pseg.cut(text):
+    for token in postokenizer.cut(text):
         if token.flag in _KEYWORD_POS:
             add(token.word)
 
@@ -201,12 +163,35 @@ def extract_keywords(text: str, *, top_k: int = 10) -> list[str]:
     return [display[key] for key in ordered[:top_k]]
 
 
+def merge_relation_whitelist(
+    config: IndexerConfig,
+    domain_relations: Iterable[str] = (),
+) -> set[str]:
+    """合并配置白名单与领域画像白名单（统一小写）。
+
+    配置负责运维侧追加，领域画像负责声明“这个领域有哪些强关系”；
+    两者取并集，避免切换领域后配置未同步导致关系全部被过滤。
+    """
+    allowed = {item.lower() for item in config.graph_relation_whitelist}
+    allowed.update(item.lower() for item in domain_relations if item)
+    return allowed
+
+
 def filter_relations(
     relations: Iterable[GraphRelation],
     config: IndexerConfig,
+    *,
+    allowed_relations: Iterable[str] | None = None,
 ) -> list[GraphRelation]:
-    """按白名单、置信度、数量上限过滤关系；保持首次出现顺序。"""
-    whitelist = {item.lower() for item in config.graph_relation_whitelist}
+    """按白名单、置信度、数量上限过滤关系；保持首次出现顺序。
+
+    ``allowed_relations`` 为空时使用 ``config.graph_relation_whitelist``；
+    领域抽取器会传入“配置 ∪ 领域画像”的合并白名单。
+    """
+    if allowed_relations is None:
+        whitelist = {item.lower() for item in config.graph_relation_whitelist}
+    else:
+        whitelist = {item.lower() for item in allowed_relations}
     seen: set[tuple[str, str, str]] = set()
     result: list[GraphRelation] = []
     for relation in relations:
@@ -249,10 +234,12 @@ class RuleGraphExtractor:
         config: IndexerConfig,
         *,
         relation_extractor: RelationExtractor | None = None,
+        policy: IndexerPolicy | None = None,
     ) -> None:
-        """保存配置与可选关系抽取器。"""
+        """保存配置、可选关系抽取器与索引策略。"""
         self.config = config
         self.relation_extractor = relation_extractor
+        self.policy = policy or get_indexer_policy()
 
     async def extract(self, chunk: Chunk) -> ChunkGraphExtraction:
         """抽取关键词；关系为空或由注入的抽取器提供。"""
@@ -267,6 +254,7 @@ class RuleGraphExtractor:
         keywords = extract_keywords(
             text,
             top_k=self.config.graph_max_keywords_per_chunk,
+            stopwords=self.policy.graph.generic_stopwords,
         )
         relations: list[GraphRelation] = []
         if self.relation_extractor is not None:

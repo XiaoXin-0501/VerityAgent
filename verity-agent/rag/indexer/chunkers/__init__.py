@@ -24,6 +24,12 @@ from .base import (
     section_type_for,
 )
 from .code import CodeChunker
+from .describer import (
+    ChatCodeDescriber,
+    ChatTableDescriber,
+    CodeDescriber,
+    TableDescriber,
+)
 from .list import ListChunker
 from .section import SectionAwareChunker, SectionNode, build_section_tree
 from .table import TableChunker
@@ -40,13 +46,22 @@ __all__ = [
     "SectionNode",
     "build_section_tree",
     "TextChunker",
+    "ChatTableDescriber",
+    "ChatCodeDescriber",
+    "TableDescriber",
+    "CodeDescriber",
     "ListChunker",
     "TableChunker",
     "CodeChunker",
 ]
 
 
-def build_chunker_registry(config: IndexerConfig | None = None) -> ChunkerRegistry:
+def build_chunker_registry(
+    config: IndexerConfig | None = None,
+    *,
+    table_describer: TableDescriber | None = None,
+    code_describer: CodeDescriber | None = None,
+) -> ChunkerRegistry:
     """按配置注册 v1 的文本/列表/表格/代码切片策略。"""
     config = config or IndexerConfig()
     # 唯一硬上限来源：IndexerConfig.max_chunk_tokens。
@@ -90,7 +105,25 @@ def build_chunker_registry(config: IndexerConfig | None = None) -> ChunkerRegist
                 overlap_tokens=0,
                 priority=100,
             ),
-            CodeChunker(**{**common, "overlap_tokens": 0}),
+            CodeChunker(
+                **{
+                    **common,
+                    "overlap_tokens": 0,
+                    "code_describer": code_describer,
+                    "semantic_embedding_enabled": (
+                        config.semantic_embedding_enabled
+                    ),
+                    "semantic_heading_min_tokens": (
+                        config.semantic_heading_min_tokens
+                    ),
+                    "semantic_description_max_chars": (
+                        config.semantic_description_max_chars
+                    ),
+                    "semantic_code_max_input_chars": (
+                        config.semantic_code_max_input_chars
+                    ),
+                }
+            ),
         ),
         (
             ChunkingSpec(
@@ -121,6 +154,20 @@ def build_chunker_registry(config: IndexerConfig | None = None) -> ChunkerRegist
                     **common,
                     "overlap_tokens": 0,
                     "row_group_size": config.table_row_group_size,
+                    "min_table_confidence": (
+                        config.quality.min_table_confidence
+                    ),
+                    "table_describer": table_describer,
+                    "semantic_embedding_enabled": (
+                        config.semantic_embedding_enabled
+                    ),
+                    "semantic_heading_min_tokens": (
+                        config.semantic_heading_min_tokens
+                    ),
+                    "semantic_preview_rows": config.semantic_preview_rows,
+                    "semantic_description_max_chars": (
+                        config.semantic_description_max_chars
+                    ),
                 }
             ),
         ),

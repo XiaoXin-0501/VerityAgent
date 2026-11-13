@@ -21,6 +21,7 @@ __all__ = [
     "section_type_for",
     "merge_adjacent_chunks",
     "coalesce_text_chunks",
+    "semantic_embedding_text",
 ]
 
 _SECTION_TYPES = {
@@ -39,6 +40,19 @@ _MERGEABLE_SECTION_TYPES = {SectionType.PARAGRAPH, SectionType.LIST}
 def section_type_for(block_type: BlockType) -> SectionType:
     """把精细 ``BlockType`` 映射为落库用 ``SectionType``。"""
     return _SECTION_TYPES.get(block_type, SectionType.PARAGRAPH)
+
+
+def semantic_embedding_text(
+    heading: str | None,
+    description: str | None,
+) -> str:
+    """特殊块（表格/代码）的向量文本：只拼 heading + 描述。
+
+    表格/代码正文语义密度低，整段向量化会稀释检索信号；正文仍落 Weaviate
+    供 BM25/引用使用。没有 heading/描述时返回空串，由调用方回退旧策略。
+    """
+    parts = [item.strip() for item in (heading, description) if item and item.strip()]
+    return "\n".join(dict.fromkeys(parts))
 
 
 class BaseChunker:
@@ -76,10 +90,12 @@ class BaseChunker:
         quality_flags: set[QualityFlag] | None = None,
         metadata: dict | None = None,
         extra_block_ids: list[UUID] | None = None,
+        semantic_description: str | None = None,
     ) -> ChunkDraft:
         """构造一个 ``ChunkDraft``；正文与 embedding 文本分别保存。
 
-        ``extra_block_ids`` 用于把吸附到特殊块的描述块一并记入来源。
+        ``extra_block_ids`` 用于把吸附到特殊块的描述块一并记入来源；
+        ``semantic_description`` 只由表格/代码切片器传入，用于落库观察。
         """
         body = text.strip()
         return self.build_chunk_from_text(
@@ -101,6 +117,7 @@ class BaseChunker:
                 else quality_flags
             ),
             metadata=metadata or {},
+            semantic_description=semantic_description,
         )
 
     def build_chunk_from_text(
@@ -120,6 +137,7 @@ class BaseChunker:
         language: str | None,
         quality_flags: set[QualityFlag],
         metadata: dict,
+        semantic_description: str | None = None,
     ) -> ChunkDraft:
         """从任意文本片段构造 chunk，供跨块合并/按章节打包使用。"""
         body = text.strip()
@@ -145,6 +163,7 @@ class BaseChunker:
             page_no=page_no,
             heading=heading,
             heading_path=list(heading_path),
+            semantic_description=semantic_description,
             language=language,
             quality_flags=set(quality_flags),
             metadata=metadata,

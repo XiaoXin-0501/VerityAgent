@@ -40,6 +40,39 @@ class ParserRegistry:
             specs = [spec for spec in specs if doc_type in spec.doc_types]
         return specs
 
+    def detect_doc_type(
+        self,
+        extension: str,
+        mime_type: str = "",
+    ) -> DocumentType:
+        """按已注册 parser 的 extensions/mime_types 推断文档类型。
+
+        扩展名和 MIME 只在注册表里维护一份，避免 ``parsers/base.py`` 再维护
+        一套手工映射导致两边漂移。扩展名命中优先于 MIME；同分取高优先级。
+        """
+        ext = (extension or "").lower().strip()
+        if ext and not ext.startswith("."):
+            ext = f".{ext}"
+        mime = (mime_type or "").lower().strip()
+        best: tuple[int, int, str, DocumentType] | None = None
+        for spec, _impl in self._items.values():
+            if not spec.enabled:
+                continue
+            score = 0
+            if ext and ext in {item.lower() for item in spec.extensions}:
+                score += 2
+            if mime and mime in {item.lower() for item in spec.mime_types}:
+                score += 1
+            if score == 0:
+                continue
+            # 一个 parser 可能声明多个 doc_type；按稳定顺序取第一个，
+            # 避免集合迭代顺序影响结果。
+            for doc_type in sorted(spec.doc_types, key=lambda item: item.value):
+                candidate = (score, spec.priority, doc_type.value, doc_type)
+                if best is None or candidate[:3] > best[:3]:
+                    best = candidate
+        return best[3] if best is not None else DocumentType.UNKNOWN
+
     def resolve(
         self,
         source: DocumentSource,

@@ -8,6 +8,7 @@
 - ``config.provider``：Provider 连接配置与 ProviderKind / ChatApiStyle
 - ``config.model``：独立模型清单 ModelConfig（id/provider/model/kind/能力/价格/defaults）
 - ``config.llm``：LLM 应用层配置（model_ids/default_model_id/fallback）
+- ``config.prompt``：Prompt 模板加载/覆盖/渲染策略
 - ``config.message``：消息限制
 - ``config.agent``：Agent 运行限制与流式
 - ``config.rag``：Indexer / Retriever
@@ -45,6 +46,7 @@ from .infrastructure import (
 from .llm import LLMConfig, StructuredOutputConfig
 from .message import MessageConfig
 from .model import ModelConfig
+from .prompt import PromptConfig
 from .provider import (
     ChatApiStyle,
     ChatProviderConfig,
@@ -88,6 +90,8 @@ __all__ = [
     # llm
     "LLMConfig",
     "StructuredOutputConfig",
+    # prompt
+    "PromptConfig",
     # message
     "MessageConfig",
     "ModelConfig",
@@ -141,6 +145,9 @@ class Settings(EnvSettings):
 
     # LLM 应用层默认策略
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    # Prompt 模板目录/覆盖/严格渲染
+    # 字段名用 prompts，避免与 shell 常见的 PROMPT 环境变量冲突
+    prompts: PromptConfig = Field(default_factory=PromptConfig)
     # 模型目录文件；为空时使用下方 MODELS（JSON 数组）
     models_file: str = ""
     # 模型清单：provider + model + capabilities/pricing/defaults；

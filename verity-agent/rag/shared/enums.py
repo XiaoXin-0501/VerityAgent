@@ -15,6 +15,7 @@ __all__ = [
     "QualityFlag",
     "SymbolType",
     "CodeParseStatus",
+    "CodeLanguage",
     "SourceType",
     "IndexMode",
     "IndexingStatus",
@@ -84,13 +85,28 @@ class SectionType(StrEnum):
 
 
 class QualityFlag(StrEnum):
+    """内容质量缺陷标记。
+
+    标记只描述“哪里可能不可靠”，不决定是否丢弃；丢弃/合并由 QualityGate/
+    DedupPolicy 决定，保留下来时由 `IndexerPolicy.quality.penalties` 折算成
+    chunk.quality_score 供检索降权。
+    """
+
+    # OCR 置信度低于 quality.min_ocr_confidence：文字可能有错字/漏字
     LOW_OCR = "LOW_OCR"
+    # 表格识别置信度低于 quality.min_table_confidence：单元格/行列可能错位
     LOW_TABLE = "LOW_TABLE"
+    # 文档/页面文本层覆盖率低：扫描件、图片为主，chunk 可能只是原文一部分
     LOW_TEXT_COVERAGE = "LOW_TEXT_COVERAGE"
+    # 与其它 chunk 重复/近重复：默认丢弃，保留时表示几乎没有新增信息
     DUPLICATE = "DUPLICATE"
+    # 内容被真正截断（不是正常切片）：尾部可能缺失
     TRUNCATED = "TRUNCATED"
+    # 页眉/页脚/导航/广告等模板化文本：默认丢弃
     BOILERPLATE = "BOILERPLATE"
+    # 代码 AST 解析失败，退化为纯文本切分：正文完整但缺结构元数据
     CODE_PARSE_FALLBACK = "CODE_PARSE_FALLBACK"
+    # embedding 输入超过模型上限被截断：只影响向量，正文仍完整
     EMBEDDING_TRUNCATED = "EMBEDDING_TRUNCATED"
 
 
@@ -107,6 +123,46 @@ class CodeParseStatus(StrEnum):
     OK = "ok"
     PARTIAL = "partial"
     FALLBACK = "fallback"
+
+
+class CodeLanguage(StrEnum):
+    """代码语言；扩展名 → 语言的映射集中在枚举旁边，不在 parser 内散落。"""
+
+    PYTHON = "python"
+    JAVA = "java"
+    TYPESCRIPT = "typescript"
+    TSX = "tsx"
+    JAVASCRIPT = "javascript"
+    JSX = "jsx"
+    GO = "go"
+    RUST = "rust"
+    C = "c"
+    CPP = "cpp"
+
+    @classmethod
+    def from_extension(cls, extension: str) -> "CodeLanguage | None":
+        """按扩展名识别语言；未知返回 None（由调用方回退文本处理）。"""
+        value = (extension or "").lower().strip()
+        if value and not value.startswith("."):
+            value = f".{value}"
+        return _CODE_LANGUAGE_BY_EXT.get(value)
+
+
+# 扩展名别名（.h 归 C、.hpp 归 C++、.tsx/.jsx 保留独立语言标记）。
+_CODE_LANGUAGE_BY_EXT: dict[str, CodeLanguage] = {
+    ".py": CodeLanguage.PYTHON,
+    ".java": CodeLanguage.JAVA,
+    ".ts": CodeLanguage.TYPESCRIPT,
+    ".tsx": CodeLanguage.TSX,
+    ".js": CodeLanguage.JAVASCRIPT,
+    ".jsx": CodeLanguage.JSX,
+    ".go": CodeLanguage.GO,
+    ".rs": CodeLanguage.RUST,
+    ".c": CodeLanguage.C,
+    ".cpp": CodeLanguage.CPP,
+    ".h": CodeLanguage.C,
+    ".hpp": CodeLanguage.CPP,
+}
 
 
 class SourceType(StrEnum):

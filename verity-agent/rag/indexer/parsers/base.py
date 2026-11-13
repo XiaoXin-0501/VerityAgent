@@ -5,42 +5,25 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from rag.shared.enums import DocumentType
 from rag.shared.models import DocumentProfile, DocumentSource, ParsedDocument
+from rag.shared.registry import ParserRegistry
 
 __all__ = ["DocumentParser", "detect_profile"]
 
-_EXTENSION_MAP: dict[str, DocumentType] = {
-    # v1 只启用这五种格式；其他格式走 UNKNOWN，由 pipeline 拒绝。
-    ".pdf": DocumentType.PDF,
-    ".docx": DocumentType.DOCX,
-    ".md": DocumentType.MARKDOWN,
-    ".markdown": DocumentType.MARKDOWN,
-    ".txt": DocumentType.TEXT,
-    ".xlsx": DocumentType.SPREADSHEET,
-    ".xlsm": DocumentType.SPREADSHEET,
-}
 
-# 扩展名缺失/错误时，用 MIME 兜底；仍只覆盖 v1 支持的格式。
-_MIME_MAP: dict[str, DocumentType] = {
-    "application/pdf": DocumentType.PDF,
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": DocumentType.DOCX,
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": DocumentType.SPREADSHEET,
-    "text/markdown": DocumentType.MARKDOWN,
-    "text/x-markdown": DocumentType.MARKDOWN,
-    "text/plain": DocumentType.TEXT,
-}
+def detect_profile(
+    source: DocumentSource,
+    registry: ParserRegistry,
+) -> DocumentProfile:
+    """按扩展名/MIME 做轻量画像。
 
-
-
-def detect_profile(source: DocumentSource) -> DocumentProfile:
-    """按扩展名/MIME 做轻量画像；真正能力探活由 parser 更新。"""
+    文档类型从 **parser 注册表** 推断，避免在解析器之外再维护一套
+    `_EXTENSION_MAP / _MIME_MAP`；真正能力探活仍由 parser 更新。
+    """
     extension = source.extension.lower()
-    if not extension.startswith("."):
+    if extension and not extension.startswith("."):
         extension = f".{extension}"
-    doc_type = _EXTENSION_MAP.get(extension)
-    if doc_type is None:
-        doc_type = _MIME_MAP.get(source.mime_type.lower(), DocumentType.UNKNOWN)
+    doc_type = registry.detect_doc_type(extension, source.mime_type)
     return DocumentProfile(
         doc_type=doc_type,
         mime_type=source.mime_type,

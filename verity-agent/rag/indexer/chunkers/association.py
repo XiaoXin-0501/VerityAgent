@@ -22,6 +22,8 @@ from rag.shared.enums import BlockType
 from rag.shared.models import ContentBlock
 from utils.tokens import estimate_tokens
 
+from ..policy import IndexerPolicy, get_indexer_policy
+
 __all__ = ["SpecialContext", "associate_special_contexts"]
 
 # 可作为描述/说明的正文块类型。
@@ -31,48 +33,8 @@ _PROSE_TYPES = frozenset(
 # 需要吸附描述的特殊块类型。
 _SPECIAL_TYPES = frozenset({BlockType.TABLE, BlockType.CODE})
 
-# 前导描述提示词：通常以冒号或这些词结尾。
-_LEAD_IN_HINTS = (
-    "如下",
-    "以下",
-    "例如",
-    "比如",
-    "示例",
-    "代码",
-    "表格",
-    "下表",
-    "上图",
-    "下图",
-    "调用",
-    "传入",
-    "写法",
-    "实现",
-    "输出",
-)
-
-# 后续描述提示词：通常以这些词开头。
-_FOLLOW_UP_HINTS = (
-    "上述",
-    "这段",
-    "该",
-    "其中",
-    "这里",
-    "注意",
-    "另外",
-    "后续",
-    "例如",
-    "比如",
-    "如图",
-    "如表",
-    "上表",
-    "下表",
-    "代码",
-    "示例",
-    "输出",
-    "返回",
-    "结果",
-    "说明",
-)
+# 前导/后续描述提示词由资源和 IndexerPolicy.association 管理
+# （config/rag_policy.json），不在代码里维护语言词表。
 
 
 @dataclass(slots=True)
@@ -108,21 +70,23 @@ def _same_heading(left: ContentBlock, right: ContentBlock) -> bool:
     return left.heading_path == right.heading_path
 
 
-def _lead_in_hint(text: str) -> bool:
+def _lead_in_hint(text: str, policy: IndexerPolicy) -> bool:
     """判断文本是否像特殊块的前导说明。"""
     value = text.strip()
     if not value:
         return False
     if value.endswith(("：", ":")):
         return True
-    tail = value[-20:]
-    return any(hint in tail for hint in _LEAD_IN_HINTS)
+    tail = value[-20:].lower()
+    return any(hint in tail for hint in policy.association.lead_in_hints)
 
 
-def _follow_up_hint(text: str) -> bool:
+def _follow_up_hint(text: str, policy: IndexerPolicy) -> bool:
     """判断文本是否像特殊块的后续说明。"""
-    value = text.lstrip()
-    return any(value.startswith(hint) for hint in _FOLLOW_UP_HINTS)
+    value = text.lstrip().lower()
+    return any(
+        value.startswith(hint) for hint in policy.association.follow_up_hints
+    )
 
 
 def associate_special_contexts(
@@ -130,15 +94,19 @@ def associate_special_contexts(
     *,
     max_tokens: int = 80,
     short_tokens: int = 40,
+    policy: IndexerPolicy | None = None,
 ) -> tuple[list[ContentBlock], dict[UUID, SpecialContext]]:
     """把紧贴代码/表格的短文本吸附到特殊块，并返回过滤后的块列表。
 
     返回值：
     - ``filtered_blocks``：移除了已吸附描述块的块列表（标题/特殊块保留）；
     - ``contexts``：特殊块 id → ``SpecialContext``。
+
+    ``policy`` 提供前导/后续提示词；为空时使用内置策略。
     """
     if not blocks or max_tokens <= 0:
         return blocks, {}
+    effective = policy or get_indexer_policy()
 
     consumed: set[UUID] = set()
     attachments: dict[UUID, list[tuple[int, str, UUID, bool]]] = {}
@@ -184,7 +152,7 @@ def associate_special_contexts(
         if prose_index < 0:
             continue
         prose = blocks[prose_index]
-        if _is_prose(prose) and _lead_in_hint(prose.text):
+        if _is_prose(prose) and _lead_in_hint(prose.text, effective):
             attach(index, prose_index)
 
     # 2) 再吸附“后续说明”。
@@ -193,7 +161,7 @@ def associate_special_contexts(
         if prose_index >= len(blocks):
             continue
         prose = blocks[prose_index]
-        if _is_prose(prose) and _follow_up_hint(prose.text):
+        if _is_prose(prose) and _follow_up_hint(prose.text, effective):
             attach(index, prose_index)
 
     # 3) 没有明确提示词时，紧邻的短文本仍优先跟随特殊块。

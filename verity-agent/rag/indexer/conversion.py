@@ -17,27 +17,22 @@ from rag.shared.models import (
 )
 from utils.time import utcnow
 
+from .policy import IndexerPolicy, get_indexer_policy
+
 __all__ = ["drafts_to_chunks", "build_parse_manifest", "quality_score"]
 
-# 质量标记对最终 quality_score 的扣分；低 OCR/低表格用于检索降权。
-_QUALITY_PENALTIES = {
-    QualityFlag.LOW_OCR: 0.25,
-    QualityFlag.LOW_TABLE: 0.2,
-    QualityFlag.LOW_TEXT_COVERAGE: 0.3,
-    QualityFlag.DUPLICATE: 0.5,
-    QualityFlag.TRUNCATED: 0.1,
-    QualityFlag.BOILERPLATE: 0.5,
-    QualityFlag.CODE_PARSE_FALLBACK: 0.1,
-    QualityFlag.EMBEDDING_TRUNCATED: 0.05,
-}
 
+def quality_score(
+    flags: set[QualityFlag],
+    *,
+    policy: IndexerPolicy | None = None,
+) -> float:
+    """把质量标记折算成 0~1 分（1.0 最可信）。
 
-def quality_score(flags: set[QualityFlag]) -> float:
-    """把质量标记折算成 0~1 分；默认 1.0。"""
-    score = 1.0
-    for flag in flags:
-        score -= _QUALITY_PENALTIES.get(flag, 0.0)
-    return round(max(0.0, min(1.0, score)), 4)
+    公式和扣分表由 :class:`IndexerPolicy` 管理；这里保留函数入口，
+    兼容旧调用方与测试。策略文件见 ``config/rag_policy.json``。
+    """
+    return (policy or get_indexer_policy()).quality.score(flags)
 
 
 def drafts_to_chunks(
@@ -46,13 +41,18 @@ def drafts_to_chunks(
     parsed: ParsedDocument,
     index_version: int,
     chunking_version: str,
+    policy: IndexerPolicy | None = None,
 ) -> list[Chunk]:
     """把切片草稿转成可写 Weaviate 的 ``Chunk``。
 
     - ``chunk_hash`` 基于正文而不是 embedding_text，保证同内容可复现；
+    - ``quality_score`` 由 ``draft.quality_flags`` 与索引策略叠加扣分得到，
+      只做检索降权，不在这里丢弃内容；
+    - ``semantic_description`` 只由表格/代码切片器写入，纯文本 chunk 为空；
     - ``doc_type/parser_id/chunking_version/index_version`` 来自本次入库；
     - 标题路径只保留在模型里（Weaviate v1 不写 heading，见 D-76）。
     """
+    effective = policy or get_indexer_policy()
     created_at = utcnow()
     return [
         Chunk(
@@ -67,8 +67,9 @@ def drafts_to_chunks(
             token_count=draft.token_count,
             heading=draft.heading,
             heading_path=list(draft.heading_path),
+            semantic_description=draft.semantic_description,
             language=draft.language,
-            quality_score=quality_score(draft.quality_flags),
+            quality_score=effective.quality.score(draft.quality_flags),
             chunk_hash=chunk_hash(draft.text),
             doc_type=parsed.profile.doc_type.value,
             parser_id=parsed.parser_id,

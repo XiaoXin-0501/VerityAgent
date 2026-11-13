@@ -46,8 +46,9 @@ from utils.time import utcnow
 
 from .conversion import build_parse_manifest, drafts_to_chunks
 from .embedding import EmbeddingResult, EmbeddingService
-from .enrichment import GraphExtractor, RuleGraphExtractor
+from .enrichment import GraphExtractor, build_graph_extractor
 from .job import InMemoryJobStore, JobStore, TERMINAL_STATUSES, to_job_view
+from .policy import IndexerPolicy, get_indexer_policy
 from .repository import IndexingRepository
 from .stores import (
     GraphIndexStore,
@@ -60,25 +61,6 @@ from .text_pipeline import TextIngestionPipeline
 __all__ = ["DefaultIndexingPipeline"]
 
 logger = logging.getLogger(__name__)
-
-# 阶段 → 进度；只用于 job view 与 PG index_progress，不参与业务判断。
-_STAGE_PROGRESS: dict[IndexingStage, float] = {
-    IndexingStage.FETCHING: 0.05,
-    IndexingStage.PARSING: 0.15,
-    IndexingStage.CHUNKING: 0.3,
-    IndexingStage.DEDUPING: 0.35,
-    IndexingStage.DESCRIBING: 0.4,
-    IndexingStage.ENRICHING: 0.45,
-    IndexingStage.EMBEDDING: 0.55,
-    IndexingStage.VECTOR_UPSERT: 0.7,
-    IndexingStage.GRAPH_UPSERT: 0.82,
-    IndexingStage.COMMITTING: 0.92,
-    IndexingStage.DONE: 1.0,
-    IndexingStage.DELETING_PG: 0.1,
-    IndexingStage.DELETING_VECTOR: 0.35,
-    IndexingStage.DELETING_GRAPH: 0.55,
-    IndexingStage.DELETING_OBJECT: 0.75,
-}
 
 
 class _Cancelled(Exception):
@@ -101,6 +83,7 @@ class DefaultIndexingPipeline:
         repository: IndexingRepository | None = None,
         job_store: JobStore | None = None,
         graph_extractor: GraphExtractor | None = None,
+        policy: IndexerPolicy | None = None,
         worker_id: str = "rag-indexer",
         run_in_background: bool = True,
     ) -> None:
@@ -114,7 +97,13 @@ class DefaultIndexingPipeline:
         self.source_store = source_store
         self.repository = repository
         self.job_store = job_store or InMemoryJobStore()
-        self.graph_extractor = graph_extractor or RuleGraphExtractor(self.config)
+        self.policy = policy or get_indexer_policy(
+            self.config.indexer_policy_path
+        )
+        self.graph_extractor = graph_extractor or build_graph_extractor(
+            self.config,
+            indexer_policy=self.policy,
+        )
         self.worker_id = worker_id
         self.run_in_background = run_in_background
         self._tasks: dict[str, asyncio.Task] = {}
@@ -388,6 +377,7 @@ class DefaultIndexingPipeline:
             parsed=result.parsed,
             index_version=index_version,
             chunking_version=self.config.chunking_version,
+            policy=self.policy,
         )
 
         # 4) ENRICHING：图关键词/关系抽取（默认规则）。
@@ -529,7 +519,9 @@ class DefaultIndexingPipeline:
         job = await self._update(
             job,
             stage=stage,
-            progress=_STAGE_PROGRESS.get(stage, job.progress),
+            progress=self.policy.staging.stage_progress.get(
+                stage, job.progress
+            ),
         )
         if self.repository is not None:
             await self.repository.update_progress(

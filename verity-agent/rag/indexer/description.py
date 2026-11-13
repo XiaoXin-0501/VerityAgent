@@ -22,6 +22,7 @@ from typing import Protocol
 from uuid import UUID
 
 from config.rag import IndexerConfig
+from prompt import PromptId, PromptRegistry, get_default_prompt_registry
 from rag.shared.enums import BlockType, DocumentType
 from rag.shared.models import (
     ContentBlock,
@@ -36,6 +37,12 @@ from utils.text import (
     truncate,
 )
 
+from .policy import (
+    IndexerPolicy,
+    get_indexer_policy,
+    normalize_heading_key,
+)
+
 __all__ = [
     "DescriptionExtraction",
     "DescriptionRefiner",
@@ -44,25 +51,8 @@ __all__ = [
     "DocumentDescriptionExtractor",
 ]
 
-# 可靠文档描述标题：只有这些“文档级”标题才允许直接取正文作为描述。
-_RELIABLE_HEADINGS = frozenset(
-    {
-        "文档简介",
-        "文档说明",
-        "文档描述",
-        "内容简介",
-        "内容说明",
-        "内容概述",
-        "简介",
-        "概述",
-        "摘要",
-        "introduction",
-        "overview",
-        "summary",
-        "abstract",
-        "description",
-    }
-)
+# 可靠描述标题词表由索引策略管理（config/rag_policy.json），
+# 这里只保留“像描述但不够可靠”的标题正则。
 
 # 可能的描述标题（如“企业简介”“课程简介”）：只作为 LLM 候选，不直接采信。
 _CANDIDATE_HEADING_RE = re.compile(
@@ -74,7 +64,6 @@ _DIRECT_DESCRIPTION_RE = re.compile(
     r"\s*[：:]\s*(.+)$",
     re.IGNORECASE | re.DOTALL,
 )
-_PUNCTUATION = re.compile(r"[\s:：\-—_.]+")
 
 
 @dataclass(slots=True)
@@ -144,20 +133,12 @@ class CallableDescriptionRefiner:
         )
 
 
-_DESCRIPTION_SYSTEM_PROMPT = (
-    "你是知识库入库流程中的文档描述提取器。"
-    "只根据用户提供的候选描述和文档开头内容，判断候选是否可用，"
-    "并生成 1~2 句、面向检索的文档描述。"
-    "不得编造文档中不存在的信息；无法判断时返回空字符串。"
-    "输出使用文档主要语言，不要输出解释、标题或 Markdown。"
-)
-
-
 class ChatDescriptionRefiner:
     """用现有 ChatModel 句柄实现 DescriptionRefiner。
 
     建议使用小型/中等规模的 chat 模型，purpose 设为
     ``ModelPurpose.DOCUMENT_DESCRIPTION``；默认参数温度低、输出短。
+    System/User Prompt 统一由 :class:`PromptRegistry` 管理，不在本类写死。
     """
 
     def __init__(
@@ -167,12 +148,14 @@ class ChatDescriptionRefiner:
         model_id: str,
         temperature: float = 0.1,
         max_output_tokens: int = 256,
+        prompts: PromptRegistry | None = None,
     ) -> None:
-        """保存 ChatModel 句柄与生成参数。"""
+        """保存 ChatModel 句柄、生成参数与可选的 Prompt 注册表。"""
         self.chat_model = chat_model
         self.model_id = model_id
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
+        self.prompts = prompts or get_default_prompt_registry()
 
     async def refine(
         self,
@@ -200,8 +183,10 @@ class ChatDescriptionRefiner:
                     role=ModelRole.SYSTEM,
                     content=[
                         ModelTextPart(
-                            text=f"{_DESCRIPTION_SYSTEM_PROMPT}"
-                            f" 描述不得超过 {max_chars} 个字符。"
+                            text=self.prompts.render_text(
+                                PromptId.RAG_DESCRIPTION_SYSTEM,
+                                max_chars=max_chars,
+                            )
                         )
                     ],
                 ),
@@ -209,10 +194,11 @@ class ChatDescriptionRefiner:
                     role=ModelRole.USER,
                     content=[
                         ModelTextPart(
-                            text=(
-                                f"候选来源: {source}\n"
-                                f"候选描述:\n{candidate}\n\n"
-                                f"文档开头内容:\n{context}"
+                            text=self.prompts.render_text(
+                                PromptId.RAG_DESCRIPTION_USER,
+                                source=source,
+                                candidate=candidate,
+                                context=context,
                             )
                         )
                     ],
@@ -237,23 +223,18 @@ class ChatDescriptionRefiner:
         return truncate(text, max_chars) if text else None
 
 
-def _heading_key(text: str) -> str:
-    """标题归一化：去空格/标点，英文小写。"""
-    return _PUNCTUATION.sub("", text or "").lower()
+def _is_reliable_heading(text: str, policy: IndexerPolicy) -> bool:
+    """是否是可作为文档描述的可靠标题（词表来自索引策略）。"""
+    key = normalize_heading_key(text)
+    return key in policy.description.reliable_headings
 
 
-def _is_reliable_heading(text: str) -> bool:
-    """是否是可作为文档描述的可靠标题。"""
-    key = _heading_key(text)
-    return key in _RELIABLE_HEADINGS
-
-
-def _is_candidate_heading(text: str) -> bool:
+def _is_candidate_heading(text: str, policy: IndexerPolicy) -> bool:
     """是否是“像描述但不够可靠”的标题，例如企业简介/课程简介。"""
     value = (text or "").strip()
     if not value or len(value) > 24:
         return False
-    if _is_reliable_heading(value):
+    if _is_reliable_heading(value, policy):
         return True
     return bool(_CANDIDATE_HEADING_RE.match(value))
 
@@ -312,6 +293,7 @@ def _collect_section_body(
 def _extract_from_blocks(
     blocks: list[ContentBlock],
     config: IndexerConfig,
+    policy: IndexerPolicy,
 ) -> tuple[str | None, bool, str | None]:
     """从开头附近的标题/段落中提取描述。
 
@@ -351,12 +333,12 @@ def _extract_from_blocks(
         # 2) 标题 + 后续正文
         if block.block_type is not BlockType.HEADING:
             continue
-        if not _is_candidate_heading(text):
+        if not _is_candidate_heading(text, policy):
             continue
         body = _collect_section_body(early, index + 1, config.description_max_chars)
         if not body:
             continue
-        if _is_reliable_heading(text) and _is_length_ok(body, config):
+        if _is_reliable_heading(text, policy) and _is_length_ok(body, config):
             return body, True, "heading_rule"
         return (
             truncate(body, config.description_max_chars),
@@ -385,10 +367,13 @@ class DocumentDescriptionExtractor:
         self,
         config: IndexerConfig,
         refiner: DescriptionRefiner | None = None,
+        *,
+        policy: IndexerPolicy | None = None,
     ) -> None:
-        """保存配置与可选的 LLM refiner。"""
+        """保存配置、可选的 LLM refiner 与索引策略。"""
         self.config = config
         self.refiner = refiner
+        self.policy = policy or get_indexer_policy()
 
     async def extract(
         self,
@@ -428,6 +413,7 @@ class DocumentDescriptionExtractor:
         text, reliable, rule_source = _extract_from_blocks(
             parsed.blocks,
             self.config,
+            self.policy,
         )
         if text and reliable:
             return DescriptionExtraction(

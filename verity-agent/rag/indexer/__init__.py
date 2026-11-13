@@ -1,10 +1,31 @@
 """RAG 入库内部实现。"""
 
+from .chunkers import ChatCodeDescriber, ChatTableDescriber
 from .embedding import EmbeddingResult, EmbeddingService
-from .enrichment import GraphExtractor, RuleGraphExtractor
+from .enrichment import (
+    DomainGraphExtractor,
+    DomainProfile,
+    GraphExtractor,
+    HybridGraphExtractor,
+    LLMGraphExtractor,
+    RuleGraphExtractor,
+    build_graph_extractor,
+    load_domain_profile,
+)
 from .indexing_pipeline import DefaultIndexingPipeline
 from .job import InMemoryJobStore, JobStore, to_job_view
 from .pipeline import IndexingPipeline
+from .policy import (
+    AssociationPolicy,
+    DescriptionPolicy,
+    GraphPolicy,
+    IndexerPolicy,
+    QualityPenaltyPolicy,
+    StageProgressPolicy,
+    get_indexer_policy,
+    load_indexer_policy,
+    normalize_heading_key,
+)
 from .repository import IndexingRepository, PgIndexingRepository
 from .stores import (
     GraphIndexStore,
@@ -30,8 +51,25 @@ __all__ = [
     "to_job_view",
     "EmbeddingService",
     "EmbeddingResult",
+    "ChatTableDescriber",
+    "ChatCodeDescriber",
+    "IndexerPolicy",
+    "QualityPenaltyPolicy",
+    "DescriptionPolicy",
+    "AssociationPolicy",
+    "GraphPolicy",
+    "StageProgressPolicy",
+    "get_indexer_policy",
+    "load_indexer_policy",
+    "normalize_heading_key",
     "GraphExtractor",
     "RuleGraphExtractor",
+    "DomainGraphExtractor",
+    "HybridGraphExtractor",
+    "LLMGraphExtractor",
+    "DomainProfile",
+    "build_graph_extractor",
+    "load_domain_profile",
     "TextIngestionPipeline",
     "TextIngestionResult",
     # stores

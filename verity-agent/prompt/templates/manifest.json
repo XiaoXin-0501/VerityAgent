@@ -1,0 +1,191 @@
+{
+  "version": 1,
+  "prompts": {
+    "rag.description.system": {
+      "file": "rag/description.system.md",
+      "version": 1,
+      "description": "文档描述精炼的 system prompt",
+      "purpose": "rag.document_description",
+      "static": false,
+      "cacheable": true,
+      "variables": [
+        {
+          "name": "max_chars",
+          "description": "生成的文档描述最大字符数",
+          "required": true
+        }
+      ]
+    },
+    "rag.description.user": {
+      "file": "rag/description.user.md",
+      "version": 1,
+      "description": "文档描述精炼的 user prompt",
+      "purpose": "rag.document_description",
+      "static": false,
+      "cacheable": false,
+      "variables": [
+        {
+          "name": "source",
+          "description": "候选描述来源（heading_candidate/filename/...）",
+          "required": true
+        },
+        {
+          "name": "candidate",
+          "description": "待判断的候选描述",
+          "required": true
+        },
+        {
+          "name": "context",
+          "description": "文档开头内容",
+          "required": true
+        }
+      ]
+    },
+    "rag.graph.system": {
+      "file": "rag/graph.system.md",
+      "version": 1,
+      "description": "垂直领域图抽取的 system prompt（领域内容通过变量注入）",
+      "purpose": "rag.graph_extraction",
+      "static": false,
+      "cacheable": true,
+      "variables": [
+        {
+          "name": "role",
+          "description": "领域角色；由 DomainProfile.prompt.role 注入",
+          "required": false,
+          "default": "你是垂直领域的知识图谱实体与关系抽取器。"
+        },
+        {
+          "name": "entity_types",
+          "description": "领域实体类型清单（每行一个）",
+          "required": true
+        },
+        {
+          "name": "relation_types",
+          "description": "领域关系类型清单（每行一个）",
+          "required": false,
+          "default": "（无）"
+        },
+        {
+          "name": "entity_guidance",
+          "description": "实体抽取规则；由 DomainProfile.prompt.entity_guidance 注入",
+          "required": false,
+          "default": "只抽取文本中明确出现的领域概念；使用文本中最完整的标准名称；不要把通用词当作实体。"
+        },
+        {
+          "name": "relation_guidance",
+          "description": "关系抽取规则；由 DomainProfile.prompt.relation_guidance 注入",
+          "required": false,
+          "default": "只抽取文本明确表达的关系；无法确定时省略；关系两端必须是本次抽取出的实体。"
+        },
+        {
+          "name": "extra_instructions",
+          "description": "领域额外指令（每行一条）",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "max_entities",
+          "description": "单 chunk 最多实体数",
+          "required": true
+        },
+        {
+          "name": "max_relations",
+          "description": "单 chunk 最多关系数",
+          "required": true
+        }
+      ]
+    },
+    "rag.graph.user": {
+      "file": "rag/graph.user.md",
+      "version": 1,
+      "description": "垂直领域图抽取的 user prompt",
+      "purpose": "rag.graph_extraction",
+      "static": false,
+      "cacheable": false,
+      "variables": [
+        {
+          "name": "heading",
+          "description": "标题路径",
+          "required": false,
+          "default": "（无）"
+        },
+        {
+          "name": "block_type",
+          "description": "chunk 内容类型",
+          "required": true
+        },
+        {
+          "name": "text",
+          "description": "chunk 正文",
+          "required": true
+        }
+      ]
+    },
+    "rag.table.description.system": {
+      "file": "rag/table.description.system.md",
+      "version": 1,
+      "description": "表格/Excel 语义描述的 system prompt",
+      "purpose": "rag.special_embedding",
+      "static": false,
+      "cacheable": true,
+      "variables": [
+        {
+          "name": "max_chars",
+          "description": "生成的描述最大字符数",
+          "required": true
+        }
+      ]
+    },
+    "rag.table.description.user": {
+      "file": "rag/table.description.user.md",
+      "version": 1,
+      "description": "表格/Excel 语义描述的 user prompt",
+      "purpose": "rag.special_embedding",
+      "static": false,
+      "cacheable": false,
+      "variables": [
+        {"name": "doc_type", "required": false, "default": ""},
+        {"name": "heading", "required": false, "default": "（无）"},
+        {"name": "filename", "required": false, "default": ""},
+        {"name": "sheet", "required": false, "default": ""},
+        {"name": "caption", "required": false, "default": ""},
+        {"name": "context", "required": false, "default": ""},
+        {"name": "headers", "required": false, "default": ""},
+        {"name": "rows", "required": false, "default": ""}
+      ]
+    },
+    "rag.code.description.system": {
+      "file": "rag/code.description.system.md",
+      "version": 1,
+      "description": "代码语义描述的 system prompt",
+      "purpose": "rag.special_embedding",
+      "static": false,
+      "cacheable": true,
+      "variables": [
+        {
+          "name": "max_chars",
+          "description": "生成的描述最大字符数",
+          "required": true
+        }
+      ]
+    },
+    "rag.code.description.user": {
+      "file": "rag/code.description.user.md",
+      "version": 1,
+      "description": "代码语义描述的 user prompt",
+      "purpose": "rag.special_embedding",
+      "static": false,
+      "cacheable": false,
+      "variables": [
+        {"name": "heading", "required": false, "default": "（无）"},
+        {"name": "file_path", "required": false, "default": ""},
+        {"name": "symbol_path", "required": false, "default": ""},
+        {"name": "signature", "required": false, "default": ""},
+        {"name": "docstring", "required": false, "default": ""},
+        {"name": "context", "required": false, "default": ""},
+        {"name": "code", "required": false, "default": ""}
+      ]
+    }
+  }
+}

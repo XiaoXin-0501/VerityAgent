@@ -62,6 +62,7 @@ from .pg import (
     PGUniqueViolationError,
 )
 from .rag import RagError, RagErrorCode
+from .prompt import PromptError, PromptErrorCode
 from .tool import (
     TOOL_ERROR_CATEGORIES,
     TOOL_ERROR_RETRYABLE,
@@ -159,6 +160,9 @@ __all__ = [
     # rag
     "RagError",
     "RagErrorCode",
+    # prompt
+    "PromptError",
+    "PromptErrorCode",
     # tool
     "ToolErrorCode",
     "ToolErrorCategory",

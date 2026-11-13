@@ -320,6 +320,9 @@ class ChunkDraft(_Model):
     page_no: int | None = None
     heading: str | None = None
     heading_path: list[str] = Field(default_factory=list)
+    # 特殊块（表格/代码/Excel）的语义描述；用于 heading+描述向量化，
+    # 纯文本 chunk 为空。由切片阶段写入，落 Weaviate 便于观察/管理。
+    semantic_description: str | None = None
     language: str | None = None
     quality_flags: set[QualityFlag] = Field(default_factory=set)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -335,8 +338,13 @@ class Chunk(_Model):
     page_no: int | None = None
     content: str
     token_count: int = 0
+    # chunker 提供的标题展示串（可能是完整路径拼接）；落 Weaviate 时
+    # DocChunk.heading 取 heading_path 末级，完整路径写 heading_path
     heading: str | None = None
+    # 一级标题到当前标题的完整路径；写入 Weaviate DocChunk.heading_path
     heading_path: list[str] = Field(default_factory=list)
+    # 特殊块语义描述；写入 Weaviate DocChunk.semantic_description
+    semantic_description: str | None = None
     language: str | None = None
     quality_score: float = Field(default=1.0, ge=0.0, le=1.0)
     chunk_hash: str
@@ -384,6 +392,10 @@ class ChunkGraphExtraction(_Model):
     chunk_id: str
     keywords: list[str] = Field(default_factory=list)
     relations: list[GraphRelation] = Field(default_factory=list)
+    # 抽取来源模型；规则/词典模式为空（预留字段，便于审计）
+    model: str | None = None
+    # 整体置信度；词典模式可视为 1.0，LLM 可保留模型自评
+    confidence: float | None = None
 
 
 class EmbeddingInput(_Model):
@@ -569,6 +581,8 @@ class RetrievedChunk(_Model):
     rerank_score: float | None = None
     heading: str | None = None
     heading_path: list[str] = Field(default_factory=list)
+    # 特殊块（表格/代码）的语义描述；纯文本 chunk 为空
+    semantic_description: str | None = None
     language: str | None = None
     quality_score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
