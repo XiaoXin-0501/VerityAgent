@@ -33,7 +33,7 @@
       "enabled": true,
       "capabilities": {
         "dimensions": 1024,
-        "max_batch_size": 64,
+        "max_batch_size": 20,
         "supports_dimensions": true
       },
       "pricing": {

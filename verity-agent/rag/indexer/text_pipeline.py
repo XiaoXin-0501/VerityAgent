@@ -60,6 +60,7 @@ class TextIngestionPipeline:
         table_describer: TableDescriber | None = None,
         code_describer: CodeDescriber | None = None,
     ) -> None:
+        """保存配置与注册表；未注入时按配置构建默认 parser/chunker 与策略。"""
         self.config = config or IndexerConfig()
         self.parsers = parser_registry or build_parser_registry(self.config)
         self.chunkers = chunker_registry or build_chunker_registry(

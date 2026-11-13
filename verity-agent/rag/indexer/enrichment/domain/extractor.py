@@ -11,6 +11,9 @@
 
 该抽取器不调用 LLM，适合无模型或强调确定性的场景；需要语义泛化时用
 ``LLMGraphExtractor`` / ``HybridGraphExtractor``。
+
+所有模式统一只处理标题 + 正文（``PARAGRAPH / LIST``）；表格、代码等
+低语义块返回空结果，不写入图。
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from ..graph import (
     _normalize_keyword,
     extract_keywords,
     filter_relations,
+    graph_nearest_heading,
+    graph_source_text,
     merge_relation_whitelist,
 )
 from ...policy import IndexerPolicy, get_indexer_policy
@@ -102,16 +107,18 @@ class DomainGraphExtractor:
         )
 
     async def extract(self, chunk: Chunk) -> ChunkGraphExtraction:
-        """从单个 chunk 抽取关键词；关系默认留空或由注入器提供。"""
+        """从单个 chunk 抽取关键词；关系默认留空或由注入器提供。
+
+        只处理标题 + 正文；表格/代码等低语义块返回空结果，不建图。
+        """
         if self.config.graph_extraction_mode == "off":
             return ChunkGraphExtraction(chunk_id=chunk.chunk_id)
 
-        text = _chunk_text(chunk)
-        heading = (
-            " ".join(chunk.heading_path)
-            if chunk.heading_path
-            else (chunk.heading or "")
-        )
+        text = graph_source_text(chunk)
+        if not text:
+            return ChunkGraphExtraction(chunk_id=chunk.chunk_id)
+        # 标题只取最近一级，避免同一章节下每个 chunk 重复抽取祖先标题。
+        heading = graph_nearest_heading(chunk)
         keywords = self.extract_keywords(text, heading=heading)
         relations: list[GraphRelation] = []
         if self.relation_extractor is not None:
@@ -194,16 +201,6 @@ class DomainGraphExtractor:
         if self.profile.is_stopword(term):
             return False
         return not any(key != item and key in item for item in matched_keys)
-
-
-def _chunk_text(chunk: Chunk) -> str:
-    """把标题路径与正文拼成抽取文本；标题为空时只用正文。"""
-    heading = (
-        " ".join(chunk.heading_path)
-        if chunk.heading_path
-        else (chunk.heading or "")
-    )
-    return f"{heading}\n{chunk.content}" if heading else chunk.content
 
 
 def _build_postokenizer(profile: DomainProfile):

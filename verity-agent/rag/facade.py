@@ -52,22 +52,28 @@ class Indexer:
     """知识库写入门面；实际流水线由 dependencies 注入。"""
 
     def __init__(self, config: IndexerConfig, pipeline: IndexingPipeline) -> None:
+        """保存配置与已装配的入库流水线。"""
         self.config = config
         self._pipeline = pipeline
 
     async def index(self, request: IndexDocumentRequest) -> IndexingJobView:
+        """提交入库任务，返回可轮询的任务视图。"""
         return await self._pipeline.submit(request)
 
     async def get_job(self, job_id: str) -> IndexingJobView | None:
+        """查询任务状态；不存在返回 None。"""
         return await self._pipeline.get_job(job_id)
 
     async def cancel(self, job_id: str) -> None:
+        """幂等取消任务；不存在或已终态时 no-op。"""
         await self._pipeline.cancel(job_id)
 
     async def delete(self, doc_id: UUID) -> IndexingJobView:
+        """删除文档在 Weaviate/Neo4j/MinIO/PG 上的全部索引数据。"""
         return await self._pipeline.delete(doc_id)
 
     async def close(self) -> None:
+        """停止后台任务并释放连接。"""
         await self._pipeline.close()
 
 
@@ -75,13 +81,16 @@ class Retriever:
     """知识库召回门面；实际流水线由 dependencies 注入。"""
 
     def __init__(self, config: RetrieverConfig, pipeline: RetrievalPipeline) -> None:
+        """保存配置与已装配的检索流水线。"""
         self.config = config
         self._pipeline = pipeline
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+        """执行只读检索；权限过滤由流水线在召回前完成。"""
         return await self._pipeline.retrieve(request)
 
     async def close(self) -> None:
+        """释放检索流水线持有的连接/缓存资源。"""
         await self._pipeline.close()
 
 
@@ -90,6 +99,7 @@ async def create_indexer(
     *,
     dependencies: RagDependencies | None = None,
 ) -> Indexer:
+    """创建 Indexer；未注入 ``IndexingPipeline`` 时抛 DEPENDENCY_UNAVAILABLE。"""
     deps = dependencies or RagDependencies()
     if deps.indexing_pipeline is None:
         raise RagError(
@@ -104,6 +114,7 @@ async def create_retriever(
     *,
     dependencies: RagDependencies | None = None,
 ) -> Retriever:
+    """创建 Retriever；未注入 ``RetrievalPipeline`` 时抛 DEPENDENCY_UNAVAILABLE。"""
     deps = dependencies or RagDependencies()
     if deps.retrieval_pipeline is None:
         raise RagError(

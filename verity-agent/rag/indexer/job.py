@@ -24,6 +24,7 @@ TERMINAL_STATUSES = frozenset(
 
 
 def to_job_view(job: IndexingJob) -> IndexingJobView:
+    """把内部运行态 job 投影成公共视图，去掉锁与租约字段。"""
     return IndexingJobView(
         job_id=job.job_id,
         kb_id=job.kb_id,
@@ -45,21 +46,37 @@ def to_job_view(job: IndexingJob) -> IndexingJobView:
 
 
 class JobStore(Protocol):
-    async def put(self, job: IndexingJob) -> IndexingJob: ...
-    async def get(self, job_id: str) -> IndexingJob | None: ...
-    async def delete(self, job_id: str) -> bool: ...
+    """运行态 job 存储协议；生产实现可把状态投影到 PG ``documents.index_*``。"""
+
+    async def put(self, job: IndexingJob) -> IndexingJob:
+        """保存/覆盖 job，返回保存后的对象。"""
+        ...
+
+    async def get(self, job_id: str) -> IndexingJob | None:
+        """按 id 读取 job；不存在返回 None。"""
+        ...
+
+    async def delete(self, job_id: str) -> bool:
+        """删除 job；返回是否真的删除。"""
+        ...
 
 
 class InMemoryJobStore:
+    """进程内 JobStore；只适合单实例/开发与测试。"""
+
     def __init__(self) -> None:
+        """初始化空 job 表。"""
         self._jobs: dict[str, IndexingJob] = {}
 
     async def put(self, job: IndexingJob) -> IndexingJob:
+        """覆盖保存 job。"""
         self._jobs[job.job_id] = job
         return job
 
     async def get(self, job_id: str) -> IndexingJob | None:
+        """按 id 读取 job。"""
         return self._jobs.get(job_id)
 
     async def delete(self, job_id: str) -> bool:
+        """删除 job；返回是否存在。"""
         return self._jobs.pop(job_id, None) is not None

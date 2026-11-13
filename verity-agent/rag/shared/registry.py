@@ -18,10 +18,14 @@ __all__ = ["ParserRegistry", "ProcessorSpec", "ProcessorRegistry", "ChunkerRegis
 
 
 class ParserRegistry:
+    """解析器注册表：按扩展名/MIME/doc_type 选择实现。"""
+
     def __init__(self) -> None:
+        """初始化空注册表。"""
         self._items: dict[str, tuple[ParserSpec, Any]] = {}
 
     def register(self, spec: ParserSpec, parser: Any) -> None:
+        """注册一个 parser；重复 id 视为配置冲突。"""
         if not spec.parser_id:
             raise RagError(RagErrorCode.INVALID_CONFIG, "parser_id 不能为空")
         if spec.parser_id in self._items:
@@ -31,10 +35,12 @@ class ParserRegistry:
         self._items[spec.parser_id] = (spec, parser)
 
     def get(self, parser_id: str) -> Any | None:
+        """按 id 取 parser 实现；不存在返回 None。"""
         item = self._items.get(parser_id)
         return item[1] if item else None
 
     def list(self, doc_type: DocumentType | None = None) -> list[ParserSpec]:
+        """列出已注册 spec，可按 doc_type 过滤。"""
         specs = [spec for spec, _ in self._items.values()]
         if doc_type is not None:
             specs = [spec for spec in specs if doc_type in spec.doc_types]
@@ -105,6 +111,7 @@ class ParserRegistry:
             raise RagError(RagErrorCode.INVALID_CONFIG, "没有可用的 parser")
 
         def score(spec: ParserSpec) -> int:
+            """按 MIME、扩展名、doc_type 的顺序为候选 parser 打分。"""
             value = 0
             if mime_type and mime_type in {item.lower() for item in spec.mime_types}:
                 value += 100
@@ -133,6 +140,8 @@ class ParserRegistry:
 
 
 class ProcessorSpec:
+    """处理器元数据；v1 只保留协议，按 block/doc 类型选择实现。"""
+
     def __init__(
         self,
         processor_id: str,
@@ -143,6 +152,7 @@ class ProcessorSpec:
         enabled: bool = True,
         options: dict[str, Any] | None = None,
     ) -> None:
+        """保存处理器标识、适用类型与优先级。"""
         self.processor_id = processor_id
         self.block_types = frozenset(block_types)
         self.doc_types = frozenset(doc_types)
@@ -152,10 +162,14 @@ class ProcessorSpec:
 
 
 class ProcessorRegistry:
+    """处理器注册表；同一 block_type 取优先级最高且 doc_type 匹配的实现。"""
+
     def __init__(self) -> None:
+        """初始化空注册表。"""
         self._items: dict[str, tuple[ProcessorSpec, Any]] = {}
 
     def register(self, spec: ProcessorSpec, processor: Any) -> None:
+        """注册处理器；重复 id 视为配置冲突。"""
         if spec.processor_id in self._items:
             raise RagError(
                 RagErrorCode.CONFLICT,
@@ -168,6 +182,7 @@ class ProcessorRegistry:
         block_type: BlockType,
         doc_type: DocumentType = DocumentType.UNKNOWN,
     ) -> tuple[ProcessorSpec, Any] | None:
+        """选择处理器；没有匹配返回 None。"""
         candidates = [
             (spec, impl)
             for spec, impl in self._items.values()
@@ -185,14 +200,19 @@ class ProcessorRegistry:
         return candidates[0]
 
     def list(self) -> list[ProcessorSpec]:
+        """列出全部已注册处理器 spec。"""
         return [spec for spec, _ in self._items.values()]
 
 
 class ChunkerRegistry:
+    """切片器注册表；按 ``(doc_type, block_type)`` 选择策略。"""
+
     def __init__(self) -> None:
+        """初始化空注册表。"""
         self._items: dict[str, tuple[ChunkingSpec, Any]] = {}
 
     def register(self, spec: ChunkingSpec, chunker: Any) -> None:
+        """注册切片器；重复 strategy_id 视为配置冲突。"""
         if spec.strategy_id in self._items:
             raise RagError(
                 RagErrorCode.CONFLICT,
@@ -207,6 +227,7 @@ class ChunkerRegistry:
         *,
         profile: str | None = None,
     ) -> tuple[ChunkingSpec, Any] | None:
+        """选择切片器；没有精确匹配时返回 None，由调用方回退文本策略。"""
         candidates = [
             (spec, impl)
             for spec, impl in self._items.values()
@@ -224,4 +245,5 @@ class ChunkerRegistry:
         return candidates[0]
 
     def list(self) -> list[ChunkingSpec]:
+        """列出全部已注册切片 spec。"""
         return [spec for spec, _ in self._items.values()]

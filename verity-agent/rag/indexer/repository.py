@@ -24,6 +24,16 @@ class IndexingRepository(Protocol):
         """入库开始：pending/failed/completed → processing。"""
         ...
 
+    async def acquire_index_lease(
+        self,
+        doc_id,
+        *,
+        worker_id: str,
+        lease_seconds: int = 300,
+    ) -> None:
+        """直接执行时获取文档租约；worker claim 路径可不实现。"""
+        ...
+
     async def update_progress(
         self,
         doc_id,
@@ -97,6 +107,20 @@ class PgIndexingRepository:
     async def mark_processing(self, doc_id) -> None:
         """置 processing；状态机允许 pending/failed/completed → processing。"""
         await self.documents.mark_processing(doc_id)
+
+    async def acquire_index_lease(
+        self,
+        doc_id,
+        *,
+        worker_id: str,
+        lease_seconds: int = 300,
+    ) -> None:
+        """直接执行入库时获取租约，补齐 index_locked_by/until。"""
+        await self.documents.acquire_index_lease(
+            doc_id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
 
     async def update_progress(
         self,

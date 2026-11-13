@@ -1,6 +1,6 @@
 # 垂直领域画像目录
 
-一个部署只加载 **一个** 领域画像；默认 `medical.json`。切换领域不需要改代码：
+一个部署只加载 **一个** 领域画像；默认 `pet_medical.json`（宠物医疗）。切换领域不需要改代码：
 
 1. 在本目录（或 `IndexerConfig.domain_profile_dir` 指向的目录）新增 `<domain>.json`；
 2. 修改 `IndexerConfig.domain_profile = "<domain>"`；
@@ -12,8 +12,8 @@
 
 ```jsonc
 {
-  "name": "medical",                 // 必填，唯一标识
-  "display_name": "医疗",
+  "name": "pet_medical",            // 必填，唯一标识
+  "display_name": "宠物医疗",
   "version": "1",
   "language": "zh",
   "description": "……",
@@ -40,7 +40,7 @@
 
   // LLM 提示词片段；实体/关系类型清单由程序自动追加
   "prompt": {
-    "role": "你是医疗知识图谱的实体与关系抽取器。",
+    "role": "你是宠物医疗知识图谱的实体与关系抽取器。",
     "entity_guidance": "只抽取文本中明确出现的医学概念……",
     "relation_guidance": "只抽取正文明确表达的关系……",
     "extra_instructions": ["……"]

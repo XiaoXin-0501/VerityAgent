@@ -153,7 +153,6 @@ class CodeChunker(BaseChunker):
 
         prefix_parts = [
             block.heading_text,
-            document_description,
             code.file_path if code else None,
             code.symbol_path if code else None,
             code.signature if code else None,

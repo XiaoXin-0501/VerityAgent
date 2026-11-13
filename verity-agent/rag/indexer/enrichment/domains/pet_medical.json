@@ -1,0 +1,2049 @@
+{
+  "name": "pet_medical",
+  "display_name": "宠物医疗",
+  "version": "1",
+  "language": "zh",
+  "description": "宠物医疗垂直领域画像：犬猫疾病、症状、药物、疫苗、检查、治疗、解剖、品种、寄生虫、食物毒物与风险因素。",
+  "include_generic_terms": true,
+  "generic_candidate_factor": 2,
+  "entity_types": [
+    {
+      "name": "disease",
+      "label": "疾病/综合征",
+      "weight": 1.3
+    },
+    {
+      "name": "drug",
+      "label": "药物/活性成分",
+      "weight": 1.3
+    },
+    {
+      "name": "vaccine",
+      "label": "疫苗",
+      "weight": 1.2
+    },
+    {
+      "name": "parasite",
+      "label": "寄生虫",
+      "weight": 1.1
+    },
+    {
+      "name": "food",
+      "label": "食物/毒物",
+      "weight": 1.1
+    },
+    {
+      "name": "exam",
+      "label": "检查/检验",
+      "weight": 1.0
+    },
+    {
+      "name": "symptom",
+      "label": "症状/体征",
+      "weight": 0.9
+    },
+    {
+      "name": "treatment",
+      "label": "治疗/操作",
+      "weight": 0.9
+    },
+    {
+      "name": "breed",
+      "label": "品种",
+      "weight": 0.9
+    },
+    {
+      "name": "risk_factor",
+      "label": "风险因素",
+      "weight": 0.9
+    },
+    {
+      "name": "anatomy",
+      "label": "解剖部位",
+      "weight": 0.8
+    },
+    {
+      "name": "species",
+      "label": "物种/年龄阶段",
+      "weight": 0.7
+    }
+  ],
+  "stopwords": [
+    "宠物",
+    "动物",
+    "犬猫",
+    "犬只",
+    "猫咪",
+    "主人",
+    "饲主",
+    "宠主",
+    "兽医",
+    "医生",
+    "医师",
+    "护士",
+    "医院",
+    "诊所",
+    "病例",
+    "患病",
+    "发病",
+    "感染",
+    "临床表现",
+    "症状",
+    "体征",
+    "诊断",
+    "治疗",
+    "治疗方案",
+    "药物",
+    "用药",
+    "剂量",
+    "用法",
+    "疗程",
+    "疗效",
+    "不良反应",
+    "注意事项",
+    "禁忌",
+    "适应症",
+    "病因",
+    "发病机制",
+    "流行病学",
+    "预后",
+    "随访",
+    "复查",
+    "就诊",
+    "门诊",
+    "住院",
+    "护理",
+    "饲养",
+    "喂养",
+    "饮食",
+    "疫苗",
+    "驱虫",
+    "预防",
+    "建议",
+    "需要",
+    "如果",
+    "出现",
+    "导致",
+    "引起",
+    "表现",
+    "常见",
+    "可能",
+    "主要",
+    "一般",
+    "目前",
+    "相关",
+    "明显",
+    "正常",
+    "异常",
+    "轻度",
+    "重度",
+    "急性",
+    "慢性",
+    "早期",
+    "晚期",
+    "检查",
+    "检测",
+    "结果",
+    "显示",
+    "提示",
+    "注意"
+  ],
+  "entities": [
+    {
+      "name": "犬瘟热",
+      "type": "disease",
+      "aliases": [
+        "犬瘟",
+        "CDV"
+      ]
+    },
+    {
+      "name": "犬细小病毒病",
+      "type": "disease",
+      "aliases": [
+        "犬细小",
+        "细小病毒病",
+        "CPV"
+      ]
+    },
+    {
+      "name": "犬传染性肝炎",
+      "type": "disease",
+      "aliases": [
+        "犬腺病毒病",
+        "ICH"
+      ]
+    },
+    {
+      "name": "犬副流感",
+      "type": "disease",
+      "aliases": [
+        "犬副流感病毒感染",
+        "CPIV"
+      ]
+    },
+    {
+      "name": "犬冠状病毒感染",
+      "type": "disease",
+      "aliases": [
+        "犬冠状病毒",
+        "CCV"
+      ]
+    },
+    {
+      "name": "犬窝咳",
+      "type": "disease",
+      "aliases": [
+        "传染性气管支气管炎",
+        "CIRDC"
+      ]
+    },
+    {
+      "name": "犬钩端螺旋体病",
+      "type": "disease",
+      "aliases": [
+        "钩端螺旋体病",
+        "犬钩体病"
+      ]
+    },
+    {
+      "name": "犬疱疹病毒感染",
+      "type": "disease",
+      "aliases": [
+        "犬疱疹病毒",
+        "CHV"
+      ]
+    },
+    {
+      "name": "猫瘟",
+      "type": "disease",
+      "aliases": [
+        "猫泛白细胞减少症",
+        "猫细小病毒病",
+        "FPV"
+      ]
+    },
+    {
+      "name": "猫杯状病毒感染",
+      "type": "disease",
+      "aliases": [
+        "猫杯状病毒",
+        "FCV"
+      ]
+    },
+    {
+      "name": "猫疱疹病毒感染",
+      "type": "disease",
+      "aliases": [
+        "猫鼻气管炎",
+        "猫疱疹病毒",
+        "FHV-1"
+      ]
+    },
+    {
+      "name": "猫传染性腹膜炎",
+      "type": "disease",
+      "aliases": [
+        "猫传腹",
+        "FIP"
+      ]
+    },
+    {
+      "name": "猫白血病",
+      "type": "disease",
+      "aliases": [
+        "猫白血病病毒感染",
+        "FeLV"
+      ]
+    },
+    {
+      "name": "猫免疫缺陷病毒感染",
+      "type": "disease",
+      "aliases": [
+        "猫艾滋",
+        "FIV"
+      ]
+    },
+    {
+      "name": "猫下泌尿道综合征",
+      "type": "disease",
+      "aliases": [
+        "猫泌尿综合征",
+        "FLUTD"
+      ]
+    },
+    {
+      "name": "猫上呼吸道感染",
+      "type": "disease",
+      "aliases": [
+        "猫上感",
+        "URI"
+      ]
+    },
+    {
+      "name": "支气管炎",
+      "type": "disease"
+    },
+    {
+      "name": "肺炎",
+      "type": "disease"
+    },
+    {
+      "name": "哮喘",
+      "type": "disease",
+      "aliases": [
+        "猫哮喘",
+        "支气管哮喘"
+      ]
+    },
+    {
+      "name": "心力衰竭",
+      "type": "disease",
+      "aliases": [
+        "心衰",
+        "充血性心力衰竭",
+        "CHF"
+      ]
+    },
+    {
+      "name": "肥厚型心肌病",
+      "type": "disease",
+      "aliases": [
+        "HCM"
+      ]
+    },
+    {
+      "name": "扩张型心肌病",
+      "type": "disease",
+      "aliases": [
+        "DCM"
+      ]
+    },
+    {
+      "name": "二尖瓣反流",
+      "type": "disease",
+      "aliases": [
+        "二尖瓣关闭不全",
+        "MMVD"
+      ]
+    },
+    {
+      "name": "心律失常",
+      "type": "disease"
+    },
+    {
+      "name": "高血压",
+      "type": "disease"
+    },
+    {
+      "name": "胃肠炎",
+      "type": "disease",
+      "aliases": [
+        "肠胃炎"
+      ]
+    },
+    {
+      "name": "胰腺炎",
+      "type": "disease"
+    },
+    {
+      "name": "炎症性肠病",
+      "type": "disease",
+      "aliases": [
+        "IBD"
+      ]
+    },
+    {
+      "name": "便秘",
+      "type": "disease"
+    },
+    {
+      "name": "巨结肠",
+      "type": "disease"
+    },
+    {
+      "name": "胃扩张扭转",
+      "type": "disease",
+      "aliases": [
+        "胃扭转",
+        "GDV"
+      ]
+    },
+    {
+      "name": "异物阻塞",
+      "type": "disease",
+      "aliases": [
+        "肠道异物",
+        "消化道异物"
+      ]
+    },
+    {
+      "name": "慢性肾病",
+      "type": "disease",
+      "aliases": [
+        "慢性肾脏病",
+        "CKD"
+      ]
+    },
+    {
+      "name": "急性肾损伤",
+      "type": "disease",
+      "aliases": [
+        "AKI"
+      ]
+    },
+    {
+      "name": "肾结石",
+      "type": "disease"
+    },
+    {
+      "name": "膀胱结石",
+      "type": "disease",
+      "aliases": [
+        "尿结石",
+        "膀胱石"
+      ]
+    },
+    {
+      "name": "尿道结石",
+      "type": "disease"
+    },
+    {
+      "name": "膀胱炎",
+      "type": "disease"
+    },
+    {
+      "name": "尿闭",
+      "type": "disease",
+      "aliases": [
+        "尿道阻塞",
+        "排尿不出"
+      ]
+    },
+    {
+      "name": "尿路感染",
+      "type": "disease",
+      "aliases": [
+        "泌尿道感染",
+        "UTI"
+      ]
+    },
+    {
+      "name": "糖尿病",
+      "type": "disease",
+      "aliases": [
+        "猫糖尿病",
+        "犬糖尿病",
+        "DM"
+      ]
+    },
+    {
+      "name": "甲状腺功能亢进",
+      "type": "disease",
+      "aliases": [
+        "甲亢",
+        "hyperthyroidism"
+      ]
+    },
+    {
+      "name": "甲状腺功能减退",
+      "type": "disease",
+      "aliases": [
+        "甲减",
+        "hypothyroidism"
+      ]
+    },
+    {
+      "name": "库欣综合征",
+      "type": "disease",
+      "aliases": [
+        "肾上腺皮质功能亢进",
+        "Cushing"
+      ]
+    },
+    {
+      "name": "艾迪生病",
+      "type": "disease",
+      "aliases": [
+        "肾上腺皮质功能减退",
+        "Addison"
+      ]
+    },
+    {
+      "name": "癫痫",
+      "type": "disease",
+      "aliases": [
+        "癫痫发作",
+        "epilepsy"
+      ]
+    },
+    {
+      "name": "椎间盘突出",
+      "type": "disease",
+      "aliases": [
+        "椎间盘疾病",
+        "IVDD"
+      ]
+    },
+    {
+      "name": "髋关节发育不良",
+      "type": "disease",
+      "aliases": [
+        "髋关节发育异常",
+        "HD"
+      ]
+    },
+    {
+      "name": "关节炎",
+      "type": "disease",
+      "aliases": [
+        "骨关节炎",
+        "退行性关节病",
+        "OA"
+      ]
+    },
+    {
+      "name": "骨折",
+      "type": "disease"
+    },
+    {
+      "name": "十字韧带断裂",
+      "type": "disease",
+      "aliases": [
+        "前十字韧带断裂",
+        "CCL断裂"
+      ]
+    },
+    {
+      "name": "过敏性皮炎",
+      "type": "disease",
+      "aliases": [
+        "异位性皮炎",
+        "CAD"
+      ]
+    },
+    {
+      "name": "真菌感染",
+      "type": "disease",
+      "aliases": [
+        "皮肤癣菌病",
+        "猫癣",
+        "ringworm"
+      ]
+    },
+    {
+      "name": "细菌性皮肤病",
+      "type": "disease",
+      "aliases": [
+        "脓皮病"
+      ]
+    },
+    {
+      "name": "螨虫感染",
+      "type": "disease",
+      "aliases": [
+        "螨病",
+        "demodicosis"
+      ]
+    },
+    {
+      "name": "跳蚤过敏性皮炎",
+      "type": "disease",
+      "aliases": [
+        "跳蚤过敏"
+      ]
+    },
+    {
+      "name": "外耳炎",
+      "type": "disease",
+      "aliases": [
+        "耳炎",
+        "otitis externa"
+      ]
+    },
+    {
+      "name": "中耳炎",
+      "type": "disease"
+    },
+    {
+      "name": "牙周病",
+      "type": "disease",
+      "aliases": [
+        "牙周炎",
+        "periodontal disease"
+      ]
+    },
+    {
+      "name": "口炎",
+      "type": "disease",
+      "aliases": [
+        "猫口炎",
+        "口腔炎症"
+      ]
+    },
+    {
+      "name": "角膜溃疡",
+      "type": "disease",
+      "aliases": [
+        "角膜损伤"
+      ]
+    },
+    {
+      "name": "白内障",
+      "type": "disease",
+      "aliases": [
+        "晶状体混浊"
+      ]
+    },
+    {
+      "name": "青光眼",
+      "type": "disease"
+    },
+    {
+      "name": "结膜炎",
+      "type": "disease"
+    },
+    {
+      "name": "贫血",
+      "type": "disease",
+      "aliases": [
+        "贫血症"
+      ]
+    },
+    {
+      "name": "血小板减少症",
+      "type": "disease",
+      "aliases": [
+        "血小板减少"
+      ]
+    },
+    {
+      "name": "肥胖症",
+      "type": "disease",
+      "aliases": [
+        "肥胖",
+        "obese"
+      ]
+    },
+    {
+      "name": "中暑",
+      "type": "disease",
+      "aliases": [
+        "热射病"
+      ]
+    },
+    {
+      "name": "巧克力中毒",
+      "type": "disease"
+    },
+    {
+      "name": "葡萄中毒",
+      "type": "disease",
+      "aliases": [
+        "葡萄干中毒"
+      ]
+    },
+    {
+      "name": "洋葱中毒",
+      "type": "disease"
+    },
+    {
+      "name": "木糖醇中毒",
+      "type": "disease"
+    },
+    {
+      "name": "灭鼠药中毒",
+      "type": "disease",
+      "aliases": [
+        "抗凝血灭鼠药中毒"
+      ]
+    },
+    {
+      "name": "有机磷中毒",
+      "type": "disease"
+    },
+    {
+      "name": "蛇咬伤",
+      "type": "disease"
+    },
+    {
+      "name": "前列腺增生",
+      "type": "disease",
+      "aliases": [
+        "良性前列腺增生",
+        "BPH"
+      ]
+    },
+    {
+      "name": "子宫蓄脓",
+      "type": "disease",
+      "aliases": [
+        "子宫积脓",
+        "pyometra"
+      ]
+    },
+    {
+      "name": "乳腺肿瘤",
+      "type": "disease",
+      "aliases": [
+        "乳腺癌"
+      ]
+    },
+    {
+      "name": "肥大细胞瘤",
+      "type": "disease"
+    },
+    {
+      "name": "淋巴瘤",
+      "type": "disease"
+    },
+    {
+      "name": "呕吐",
+      "type": "symptom"
+    },
+    {
+      "name": "腹泻",
+      "type": "symptom",
+      "aliases": [
+        "拉稀"
+      ]
+    },
+    {
+      "name": "便血",
+      "type": "symptom",
+      "aliases": [
+        "血便"
+      ]
+    },
+    {
+      "name": "黑便",
+      "type": "symptom",
+      "aliases": [
+        "柏油样便"
+      ]
+    },
+    {
+      "name": "食欲不振",
+      "type": "symptom",
+      "aliases": [
+        "厌食",
+        "食欲下降"
+      ]
+    },
+    {
+      "name": "精神沉郁",
+      "type": "symptom",
+      "aliases": [
+        "嗜睡",
+        "精神差"
+      ]
+    },
+    {
+      "name": "发热",
+      "type": "symptom",
+      "aliases": [
+        "发烧",
+        "体温升高"
+      ]
+    },
+    {
+      "name": "咳嗽",
+      "type": "symptom"
+    },
+    {
+      "name": "打喷嚏",
+      "type": "symptom",
+      "aliases": [
+        "喷嚏"
+      ]
+    },
+    {
+      "name": "流鼻涕",
+      "type": "symptom",
+      "aliases": [
+        "鼻分泌物"
+      ]
+    },
+    {
+      "name": "呼吸困难",
+      "type": "symptom",
+      "aliases": [
+        "呼吸急促"
+      ]
+    },
+    {
+      "name": "抽搐",
+      "type": "symptom",
+      "aliases": [
+        "惊厥"
+      ]
+    },
+    {
+      "name": "黄疸",
+      "type": "symptom"
+    },
+    {
+      "name": "多饮多尿",
+      "type": "symptom",
+      "aliases": [
+        "烦渴多尿"
+      ]
+    },
+    {
+      "name": "体重下降",
+      "type": "symptom",
+      "aliases": [
+        "消瘦"
+      ]
+    },
+    {
+      "name": "瘙痒",
+      "type": "symptom",
+      "aliases": [
+        "抓挠"
+      ]
+    },
+    {
+      "name": "脱毛",
+      "type": "symptom",
+      "aliases": [
+        "掉毛"
+      ]
+    },
+    {
+      "name": "皮肤红肿",
+      "type": "symptom",
+      "aliases": [
+        "红斑"
+      ]
+    },
+    {
+      "name": "跛行",
+      "type": "symptom",
+      "aliases": [
+        "瘸腿"
+      ]
+    },
+    {
+      "name": "腹痛",
+      "type": "symptom",
+      "aliases": [
+        "腹部疼痛"
+      ]
+    },
+    {
+      "name": "脱水",
+      "type": "symptom"
+    },
+    {
+      "name": "口腔溃疡",
+      "type": "symptom"
+    },
+    {
+      "name": "流涎",
+      "type": "symptom",
+      "aliases": [
+        "流口水"
+      ]
+    },
+    {
+      "name": "眼分泌物",
+      "type": "symptom",
+      "aliases": [
+        "眼屎"
+      ]
+    },
+    {
+      "name": "尿频",
+      "type": "symptom"
+    },
+    {
+      "name": "血尿",
+      "type": "symptom"
+    },
+    {
+      "name": "尿失禁",
+      "type": "symptom"
+    },
+    {
+      "name": "无尿",
+      "type": "symptom"
+    },
+    {
+      "name": "阿莫西林克拉维酸",
+      "type": "drug",
+      "aliases": [
+        "阿莫西林克拉维酸钾",
+        "Augmentin"
+      ]
+    },
+    {
+      "name": "头孢氨苄",
+      "type": "drug"
+    },
+    {
+      "name": "恩诺沙星",
+      "type": "drug",
+      "aliases": [
+        "拜有利",
+        "Enrofloxacin"
+      ]
+    },
+    {
+      "name": "甲硝唑",
+      "type": "drug"
+    },
+    {
+      "name": "多西环素",
+      "type": "drug",
+      "aliases": [
+        "强力霉素",
+        "Doxycycline"
+      ]
+    },
+    {
+      "name": "泼尼松",
+      "type": "drug",
+      "aliases": [
+        "强的松",
+        "Prednisone"
+      ]
+    },
+    {
+      "name": "地塞米松",
+      "type": "drug"
+    },
+    {
+      "name": "胰岛素",
+      "type": "drug"
+    },
+    {
+      "name": "甲巯咪唑",
+      "type": "drug",
+      "aliases": [
+        "他巴唑",
+        "Methimazole"
+      ]
+    },
+    {
+      "name": "苯巴比妥",
+      "type": "drug",
+      "aliases": [
+        "苯巴比妥钠",
+        "Phenobarbital"
+      ]
+    },
+    {
+      "name": "加巴喷丁",
+      "type": "drug",
+      "aliases": [
+        "Gabapentin"
+      ]
+    },
+    {
+      "name": "非泼罗尼",
+      "type": "drug",
+      "aliases": [
+        "福来恩",
+        "Fipronil"
+      ]
+    },
+    {
+      "name": "塞拉菌素",
+      "type": "drug",
+      "aliases": [
+        "大宠爱",
+        "Selamectin"
+      ]
+    },
+    {
+      "name": "伊维菌素",
+      "type": "drug",
+      "aliases": [
+        "Ivermectin"
+      ]
+    },
+    {
+      "name": "美洛昔康",
+      "type": "drug",
+      "aliases": [
+        "Meloxicam"
+      ]
+    },
+    {
+      "name": "卡洛芬",
+      "type": "drug",
+      "aliases": [
+        "Carprofen"
+      ]
+    },
+    {
+      "name": "奥美拉唑",
+      "type": "drug",
+      "aliases": [
+        "Omeprazole"
+      ]
+    },
+    {
+      "name": "马罗匹坦",
+      "type": "drug",
+      "aliases": [
+        "止吐宁",
+        "Maropitant"
+      ]
+    },
+    {
+      "name": "蒙脱石",
+      "type": "drug",
+      "aliases": [
+        "蒙脱石散"
+      ]
+    },
+    {
+      "name": "益生菌",
+      "type": "drug"
+    },
+    {
+      "name": "口服补液盐",
+      "type": "drug",
+      "aliases": [
+        "补液盐"
+      ]
+    },
+    {
+      "name": "呋塞米",
+      "type": "drug",
+      "aliases": [
+        "速尿",
+        "Furosemide"
+      ]
+    },
+    {
+      "name": "依那普利",
+      "type": "drug",
+      "aliases": [
+        "Enalapril"
+      ]
+    },
+    {
+      "name": "氨氯地平",
+      "type": "drug",
+      "aliases": [
+        "Amlodipine"
+      ]
+    },
+    {
+      "name": "氯吡格雷",
+      "type": "drug",
+      "aliases": [
+        "Clopidogrel"
+      ]
+    },
+    {
+      "name": "多巴酚丁胺",
+      "type": "drug",
+      "aliases": [
+        "Dobutamine"
+      ]
+    },
+    {
+      "name": "维生素K1",
+      "type": "drug",
+      "aliases": [
+        "维生素K"
+      ]
+    },
+    {
+      "name": "活性炭",
+      "type": "drug"
+    },
+    {
+      "name": "犬四联疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "犬四联",
+        "DHPP"
+      ]
+    },
+    {
+      "name": "犬六联疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "犬六联"
+      ]
+    },
+    {
+      "name": "犬八联疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "犬八联"
+      ]
+    },
+    {
+      "name": "狂犬病疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "狂犬疫苗",
+        "Rabies vaccine"
+      ]
+    },
+    {
+      "name": "猫三联疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "猫三联",
+        "FVRCP"
+      ]
+    },
+    {
+      "name": "犬瘟热疫苗",
+      "type": "vaccine"
+    },
+    {
+      "name": "犬细小病毒疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "犬细小疫苗"
+      ]
+    },
+    {
+      "name": "犬传染性肝炎疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "犬腺病毒疫苗"
+      ]
+    },
+    {
+      "name": "钩端螺旋体疫苗",
+      "type": "vaccine"
+    },
+    {
+      "name": "猫杯状病毒疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "猫杯状疫苗"
+      ]
+    },
+    {
+      "name": "猫疱疹病毒疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "猫疱疹疫苗"
+      ]
+    },
+    {
+      "name": "支气管败血波氏杆菌疫苗",
+      "type": "vaccine",
+      "aliases": [
+        "波氏杆菌疫苗"
+      ]
+    },
+    {
+      "name": "血常规",
+      "type": "exam",
+      "aliases": [
+        "CBC"
+      ]
+    },
+    {
+      "name": "生化检查",
+      "type": "exam",
+      "aliases": [
+        "生化",
+        "血生化"
+      ]
+    },
+    {
+      "name": "尿常规",
+      "type": "exam",
+      "aliases": [
+        "尿液分析"
+      ]
+    },
+    {
+      "name": "粪便检查",
+      "type": "exam",
+      "aliases": [
+        "便检",
+        "粪检"
+      ]
+    },
+    {
+      "name": "X线检查",
+      "type": "exam",
+      "aliases": [
+        "X光",
+        "DR",
+        "X射线"
+      ]
+    },
+    {
+      "name": "超声检查",
+      "type": "exam",
+      "aliases": [
+        "B超",
+        "超声"
+      ]
+    },
+    {
+      "name": "CT检查",
+      "type": "exam"
+    },
+    {
+      "name": "MRI检查",
+      "type": "exam",
+      "aliases": [
+        "核磁共振"
+      ]
+    },
+    {
+      "name": "PCR检测",
+      "type": "exam",
+      "aliases": [
+        "PCR"
+      ]
+    },
+    {
+      "name": "抗体检测",
+      "type": "exam"
+    },
+    {
+      "name": "抗原检测",
+      "type": "exam"
+    },
+    {
+      "name": "皮肤刮片",
+      "type": "exam"
+    },
+    {
+      "name": "耳镜检查",
+      "type": "exam"
+    },
+    {
+      "name": "眼压测量",
+      "type": "exam"
+    },
+    {
+      "name": "心电图",
+      "type": "exam"
+    },
+    {
+      "name": "血压测量",
+      "type": "exam"
+    },
+    {
+      "name": "血气分析",
+      "type": "exam"
+    },
+    {
+      "name": "凝血功能",
+      "type": "exam"
+    },
+    {
+      "name": "细胞学检查",
+      "type": "exam"
+    },
+    {
+      "name": "真菌培养",
+      "type": "exam"
+    },
+    {
+      "name": "药敏试验",
+      "type": "exam"
+    },
+    {
+      "name": "PKD基因检测",
+      "type": "exam",
+      "aliases": [
+        "PKD检测"
+      ]
+    },
+    {
+      "name": "输液治疗",
+      "type": "treatment",
+      "aliases": [
+        "输液",
+        "补液"
+      ]
+    },
+    {
+      "name": "止吐治疗",
+      "type": "treatment"
+    },
+    {
+      "name": "止痛治疗",
+      "type": "treatment"
+    },
+    {
+      "name": "抗生素治疗",
+      "type": "treatment"
+    },
+    {
+      "name": "驱虫治疗",
+      "type": "treatment",
+      "aliases": [
+        "驱虫"
+      ]
+    },
+    {
+      "name": "绝育手术",
+      "type": "treatment",
+      "aliases": [
+        "绝育"
+      ]
+    },
+    {
+      "name": "洗牙",
+      "type": "treatment",
+      "aliases": [
+        "口腔洁治"
+      ]
+    },
+    {
+      "name": "外科手术",
+      "type": "treatment",
+      "aliases": [
+        "手术"
+      ]
+    },
+    {
+      "name": "化疗",
+      "type": "treatment"
+    },
+    {
+      "name": "放疗",
+      "type": "treatment",
+      "aliases": [
+        "放射治疗"
+      ]
+    },
+    {
+      "name": "针灸",
+      "type": "treatment"
+    },
+    {
+      "name": "物理治疗",
+      "type": "treatment",
+      "aliases": [
+        "康复治疗"
+      ]
+    },
+    {
+      "name": "处方粮",
+      "type": "treatment"
+    },
+    {
+      "name": "隔离治疗",
+      "type": "treatment",
+      "aliases": [
+        "隔离"
+      ]
+    },
+    {
+      "name": "氧疗",
+      "type": "treatment"
+    },
+    {
+      "name": "输血",
+      "type": "treatment"
+    },
+    {
+      "name": "导尿",
+      "type": "treatment"
+    },
+    {
+      "name": "灌肠",
+      "type": "treatment"
+    },
+    {
+      "name": "皮肤",
+      "type": "anatomy"
+    },
+    {
+      "name": "耳朵",
+      "type": "anatomy"
+    },
+    {
+      "name": "外耳",
+      "type": "anatomy"
+    },
+    {
+      "name": "中耳",
+      "type": "anatomy"
+    },
+    {
+      "name": "眼睛",
+      "type": "anatomy"
+    },
+    {
+      "name": "角膜",
+      "type": "anatomy"
+    },
+    {
+      "name": "晶状体",
+      "type": "anatomy"
+    },
+    {
+      "name": "口腔",
+      "type": "anatomy"
+    },
+    {
+      "name": "牙齿",
+      "type": "anatomy"
+    },
+    {
+      "name": "牙龈",
+      "type": "anatomy"
+    },
+    {
+      "name": "食道",
+      "type": "anatomy"
+    },
+    {
+      "name": "胃部",
+      "type": "anatomy"
+    },
+    {
+      "name": "小肠",
+      "type": "anatomy"
+    },
+    {
+      "name": "大肠",
+      "type": "anatomy"
+    },
+    {
+      "name": "肝脏",
+      "type": "anatomy"
+    },
+    {
+      "name": "胆囊",
+      "type": "anatomy"
+    },
+    {
+      "name": "胰腺",
+      "type": "anatomy"
+    },
+    {
+      "name": "肾脏",
+      "type": "anatomy"
+    },
+    {
+      "name": "膀胱",
+      "type": "anatomy"
+    },
+    {
+      "name": "尿道",
+      "type": "anatomy"
+    },
+    {
+      "name": "心脏",
+      "type": "anatomy"
+    },
+    {
+      "name": "二尖瓣",
+      "type": "anatomy"
+    },
+    {
+      "name": "肺部",
+      "type": "anatomy"
+    },
+    {
+      "name": "气管",
+      "type": "anatomy"
+    },
+    {
+      "name": "支气管",
+      "type": "anatomy"
+    },
+    {
+      "name": "鼻腔",
+      "type": "anatomy"
+    },
+    {
+      "name": "喉部",
+      "type": "anatomy"
+    },
+    {
+      "name": "脑部",
+      "type": "anatomy"
+    },
+    {
+      "name": "脊髓",
+      "type": "anatomy"
+    },
+    {
+      "name": "脊柱",
+      "type": "anatomy"
+    },
+    {
+      "name": "椎间盘",
+      "type": "anatomy"
+    },
+    {
+      "name": "关节",
+      "type": "anatomy"
+    },
+    {
+      "name": "髋关节",
+      "type": "anatomy"
+    },
+    {
+      "name": "膝关节",
+      "type": "anatomy"
+    },
+    {
+      "name": "十字韧带",
+      "type": "anatomy"
+    },
+    {
+      "name": "骨骼",
+      "type": "anatomy"
+    },
+    {
+      "name": "肌肉",
+      "type": "anatomy"
+    },
+    {
+      "name": "子宫",
+      "type": "anatomy"
+    },
+    {
+      "name": "卵巢",
+      "type": "anatomy"
+    },
+    {
+      "name": "睾丸",
+      "type": "anatomy"
+    },
+    {
+      "name": "前列腺",
+      "type": "anatomy"
+    },
+    {
+      "name": "乳腺",
+      "type": "anatomy"
+    },
+    {
+      "name": "甲状腺",
+      "type": "anatomy"
+    },
+    {
+      "name": "肾上腺",
+      "type": "anatomy"
+    },
+    {
+      "name": "淋巴结",
+      "type": "anatomy"
+    },
+    {
+      "name": "脾脏",
+      "type": "anatomy"
+    },
+    {
+      "name": "血液",
+      "type": "anatomy"
+    },
+    {
+      "name": "视网膜",
+      "type": "anatomy"
+    },
+    {
+      "name": "中华田园犬",
+      "type": "breed",
+      "aliases": [
+        "土狗",
+        "柴狗"
+      ]
+    },
+    {
+      "name": "金毛寻回犬",
+      "type": "breed",
+      "aliases": [
+        "金毛",
+        "黄金猎犬"
+      ]
+    },
+    {
+      "name": "拉布拉多寻回犬",
+      "type": "breed",
+      "aliases": [
+        "拉布拉多",
+        "Labrador"
+      ]
+    },
+    {
+      "name": "贵宾犬",
+      "type": "breed",
+      "aliases": [
+        "泰迪",
+        "贵妇犬",
+        "Poodle"
+      ]
+    },
+    {
+      "name": "比熊犬",
+      "type": "breed",
+      "aliases": [
+        "比熊"
+      ]
+    },
+    {
+      "name": "威尔士柯基犬",
+      "type": "breed",
+      "aliases": [
+        "柯基"
+      ]
+    },
+    {
+      "name": "柴犬",
+      "type": "breed",
+      "aliases": [
+        "Shiba Inu"
+      ]
+    },
+    {
+      "name": "西伯利亚雪橇犬",
+      "type": "breed",
+      "aliases": [
+        "哈士奇"
+      ]
+    },
+    {
+      "name": "萨摩耶犬",
+      "type": "breed",
+      "aliases": [
+        "萨摩耶"
+      ]
+    },
+    {
+      "name": "边境牧羊犬",
+      "type": "breed",
+      "aliases": [
+        "边牧"
+      ]
+    },
+    {
+      "name": "博美犬",
+      "type": "breed",
+      "aliases": [
+        "博美"
+      ]
+    },
+    {
+      "name": "吉娃娃",
+      "type": "breed",
+      "aliases": [
+        "Chihuahua"
+      ]
+    },
+    {
+      "name": "英国短毛猫",
+      "type": "breed",
+      "aliases": [
+        "英短",
+        "British Shorthair"
+      ]
+    },
+    {
+      "name": "美国短毛猫",
+      "type": "breed",
+      "aliases": [
+        "美短"
+      ]
+    },
+    {
+      "name": "布偶猫",
+      "type": "breed",
+      "aliases": [
+        "Ragdoll"
+      ]
+    },
+    {
+      "name": "暹罗猫",
+      "type": "breed",
+      "aliases": [
+        "Siamese"
+      ]
+    },
+    {
+      "name": "波斯猫",
+      "type": "breed",
+      "aliases": [
+        "Persian"
+      ]
+    },
+    {
+      "name": "异国短毛猫",
+      "type": "breed",
+      "aliases": [
+        "加菲猫",
+        "Exotic Shorthair"
+      ]
+    },
+    {
+      "name": "中华田园猫",
+      "type": "breed",
+      "aliases": [
+        "狸花猫"
+      ]
+    },
+    {
+      "name": "缅因猫",
+      "type": "breed",
+      "aliases": [
+        "Maine Coon"
+      ]
+    },
+    {
+      "name": "苏格兰折耳猫",
+      "type": "breed",
+      "aliases": [
+        "折耳猫"
+      ]
+    },
+    {
+      "name": "巧克力",
+      "type": "food"
+    },
+    {
+      "name": "葡萄",
+      "type": "food",
+      "aliases": [
+        "葡萄干"
+      ]
+    },
+    {
+      "name": "洋葱",
+      "type": "food"
+    },
+    {
+      "name": "大蒜",
+      "type": "food"
+    },
+    {
+      "name": "木糖醇",
+      "type": "food"
+    },
+    {
+      "name": "澳洲坚果",
+      "type": "food",
+      "aliases": [
+        "夏威夷果"
+      ]
+    },
+    {
+      "name": "酒精",
+      "type": "food",
+      "aliases": [
+        "乙醇"
+      ]
+    },
+    {
+      "name": "咖啡因",
+      "type": "food",
+      "aliases": [
+        "咖啡"
+      ]
+    },
+    {
+      "name": "生肉",
+      "type": "food"
+    },
+    {
+      "name": "牛奶",
+      "type": "food"
+    },
+    {
+      "name": "骨头",
+      "type": "food"
+    },
+    {
+      "name": "高盐食物",
+      "type": "food",
+      "aliases": [
+        "高盐",
+        "咸食"
+      ]
+    },
+    {
+      "name": "跳蚤",
+      "type": "parasite"
+    },
+    {
+      "name": "蜱虫",
+      "type": "parasite"
+    },
+    {
+      "name": "蛔虫",
+      "type": "parasite",
+      "aliases": [
+        "犬蛔虫",
+        "猫蛔虫"
+      ]
+    },
+    {
+      "name": "钩虫",
+      "type": "parasite"
+    },
+    {
+      "name": "绦虫",
+      "type": "parasite"
+    },
+    {
+      "name": "心丝虫",
+      "type": "parasite",
+      "aliases": [
+        "犬心丝虫",
+        "Dirofilaria immitis"
+      ]
+    },
+    {
+      "name": "耳螨",
+      "type": "parasite"
+    },
+    {
+      "name": "疥螨",
+      "type": "parasite"
+    },
+    {
+      "name": "弓形虫",
+      "type": "parasite",
+      "aliases": [
+        "Toxoplasma"
+      ]
+    },
+    {
+      "name": "球虫",
+      "type": "parasite"
+    },
+    {
+      "name": "贾第虫",
+      "type": "parasite",
+      "aliases": [
+        "贾第鞭毛虫"
+      ]
+    },
+    {
+      "name": "犬只",
+      "type": "species",
+      "aliases": [
+        "狗狗",
+        "成犬"
+      ]
+    },
+    {
+      "name": "猫咪",
+      "type": "species",
+      "aliases": [
+        "猫猫",
+        "成猫"
+      ]
+    },
+    {
+      "name": "幼犬",
+      "type": "species",
+      "aliases": [
+        "小狗",
+        "puppy"
+      ]
+    },
+    {
+      "name": "幼猫",
+      "type": "species",
+      "aliases": [
+        "小猫",
+        "kitten"
+      ]
+    },
+    {
+      "name": "老年犬",
+      "type": "species",
+      "aliases": [
+        "老年狗",
+        "senior dog"
+      ]
+    },
+    {
+      "name": "老年猫",
+      "type": "species",
+      "aliases": [
+        "老年猫咪",
+        "senior cat"
+      ]
+    },
+    {
+      "name": "超重",
+      "type": "risk_factor",
+      "aliases": [
+        "体重超标",
+        "obesity"
+      ]
+    },
+    {
+      "name": "应激",
+      "type": "risk_factor",
+      "aliases": [
+        "应激反应",
+        "stress"
+      ]
+    },
+    {
+      "name": "潮湿环境",
+      "type": "risk_factor",
+      "aliases": [
+        "潮湿",
+        "潮湿饲养环境"
+      ]
+    },
+    {
+      "name": "未接种疫苗",
+      "type": "risk_factor",
+      "aliases": [
+        "未免疫",
+        "免疫不全"
+      ]
+    },
+    {
+      "name": "未驱虫",
+      "type": "risk_factor",
+      "aliases": [
+        "未做驱虫"
+      ]
+    },
+    {
+      "name": "外伤",
+      "type": "risk_factor",
+      "aliases": [
+        "创伤",
+        "受伤"
+      ]
+    },
+    {
+      "name": "误食",
+      "type": "risk_factor",
+      "aliases": [
+        "误吞",
+        "食入异物"
+      ]
+    },
+    {
+      "name": "近亲繁殖",
+      "type": "risk_factor",
+      "aliases": [
+        "近交"
+      ]
+    },
+    {
+      "name": "幼龄",
+      "type": "risk_factor",
+      "aliases": [
+        "幼年"
+      ]
+    },
+    {
+      "name": "老龄",
+      "type": "risk_factor",
+      "aliases": [
+        "老年",
+        "高龄"
+      ]
+    },
+    {
+      "name": "季节变化",
+      "type": "risk_factor",
+      "aliases": [
+        "换季",
+        "季节交替"
+      ]
+    },
+    {
+      "name": "多宠家庭",
+      "type": "risk_factor",
+      "aliases": [
+        "多只饲养",
+        "群养"
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "name": "has_symptom",
+      "label": "疾病→症状",
+      "description": "疾病表现出某症状/体征"
+    },
+    {
+      "name": "treated_by",
+      "label": "疾病→药物/治疗",
+      "description": "疾病使用某药物或治疗手段"
+    },
+    {
+      "name": "diagnosed_by",
+      "label": "疾病→检查",
+      "description": "疾病通过某检查/检验诊断"
+    },
+    {
+      "name": "complication_of",
+      "label": "并发症→原发病",
+      "description": "某疾病是另一疾病的并发症"
+    },
+    {
+      "name": "causes",
+      "label": "病因→结果",
+      "description": "某因素/疾病/寄生虫导致另一疾病或症状"
+    },
+    {
+      "name": "affects",
+      "label": "疾病→部位",
+      "description": "疾病影响某解剖部位"
+    },
+    {
+      "name": "contraindicated_with",
+      "label": "药物→禁忌对象",
+      "description": "药物与疾病/药物的禁忌关系"
+    },
+    {
+      "name": "interacts_with",
+      "label": "药物→药物",
+      "description": "药物相互作用"
+    },
+    {
+      "name": "risk_factor_for",
+      "label": "风险因素→疾病",
+      "description": "某因素增加疾病风险"
+    },
+    {
+      "name": "prevents",
+      "label": "疫苗/驱虫→疾病",
+      "description": "疫苗或驱虫措施预防某疾病"
+    },
+    {
+      "name": "predisposes",
+      "label": "品种/物种→疾病",
+      "description": "品种或年龄阶段易患某疾病"
+    },
+    {
+      "name": "toxic_to",
+      "label": "毒物→物种",
+      "description": "食物/物质对某物种有毒性"
+    },
+    {
+      "name": "part_of",
+      "label": "部分→整体",
+      "description": "解剖结构或疾病的从属关系"
+    },
+    {
+      "name": "is_a",
+      "label": "子类→父类",
+      "description": "实体之间的分类关系"
+    }
+  ],
+  "prompt": {
+    "role": "你是宠物医疗知识图谱的实体与关系抽取器，熟悉犬猫疾病、症状、药物、疫苗、检查、治疗、解剖、品种、寄生虫与食物毒物。",
+    "entity_guidance": "只从标题和正文抽取明确出现的宠物医疗概念；使用兽医临床标准全称或完整通用名；缩略语只有在上下文能唯一确定时才抽取；不要把宠物、主人、兽医、诊断、治疗等通用词当作实体；不要把数值、单位、剂量当作实体；不要把人类疾病或人类用药当作宠物实体，除非文本明确用于犬猫。",
+    "relation_guidance": "只抽取正文明确表达的关系，不要根据常识推断；subject 和 object 必须是本次 entities 中的 name；relation 只能取关系类型清单中的值；不确定时省略。",
+    "extra_instructions": [
+      "同义实体会被归一为标准名，可以放心输出文本中出现的缩写和俗称。",
+      "只从标题与正文抽取；表格、代码、图片等低语义内容不参与图构建。"
+    ]
+  }
+}

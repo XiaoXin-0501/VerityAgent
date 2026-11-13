@@ -50,7 +50,8 @@ def drafts_to_chunks(
       只做检索降权，不在这里丢弃内容；
     - ``semantic_description`` 只由表格/代码切片器写入，纯文本 chunk 为空；
     - ``doc_type/parser_id/chunking_version/index_version`` 来自本次入库；
-    - 标题路径只保留在模型里（Weaviate v1 不写 heading，见 D-76）。
+    - 标题与完整路径写入模型，最终由 ``chunk_properties`` 落
+      Weaviate ``heading`` / ``heading_path``（D-76）。
     """
     effective = policy or get_indexer_policy()
     created_at = utcnow()

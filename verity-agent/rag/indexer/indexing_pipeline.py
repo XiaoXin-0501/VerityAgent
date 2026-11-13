@@ -179,15 +179,13 @@ class DefaultIndexingPipeline:
         return to_job_view(job) if job is not None else None
 
     async def cancel(self, job_id: str) -> None:
-        """取消排队/运行中的 job；终态 job 无副作用。"""
+        """取消排队/运行中的 job。
+
+        幂等语义（§1.6）：job 不存在或已是终态时直接 no-op，调用方不需要先
+        查询状态；worker 只在阶段边界检查取消信号，已写入的 chunk 不回滚。
+        """
         job = await self.job_store.get(job_id)
-        if job is None:
-            raise RagError(
-                RagErrorCode.NOT_FOUND,
-                "入库任务不存在",
-                details={"job_id": job_id},
-            )
-        if job.status in TERMINAL_STATUSES:
+        if job is None or job.status in TERMINAL_STATUSES:
             return
         self._cancelled.add(job_id)
         if job.status is IndexingStatus.QUEUED:
@@ -272,8 +270,23 @@ class DefaultIndexingPipeline:
         """删除任务主流程；失败时保留 deleting 状态供补偿重试。"""
         job = await self._begin(job)
         try:
+            # 删除阶段同样会写 index_progress；先拿租约，满足 worker 校验。
+            acquire = (
+                getattr(self.repository, "acquire_index_lease", None)
+                if self.repository is not None
+                else None
+            )
+            if acquire is not None:
+                await acquire(
+                    job.doc_id,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.config.index_lease_seconds,
+                )
             job = await self._delete(job)
+        except _Cancelled:
+            await self._finish_cancelled(job)
         except asyncio.CancelledError:
+            # 保留取消语义：收尾后继续向上传播，避免 asyncio 任务吞掉取消。
             await self._finish_cancelled(job)
             raise
         except Exception as exc:  # noqa: BLE001 - 任务边界统一收敛
@@ -431,6 +444,10 @@ class DefaultIndexingPipeline:
             for chunk in chunks:
                 extraction = extractions.get(chunk.chunk_id)
                 if extraction is None:
+                    continue
+                # 表格/代码等低语义块在抽取器里返回空结果；不写空 ChunkRef，
+                # 保证图里只保留来自标题 + 正文的概念与关系。
+                if not extraction.keywords and not extraction.relations:
                     continue
                 await self.graph_store.upsert_chunk(
                     chunk.chunk_id,
@@ -708,10 +725,11 @@ class DefaultIndexingPipeline:
             )
 
     async def _ensure_processing(self, document) -> None:
-        """入库前把文档置 processing，确保读路径立即过滤旧索引。
+        """入库前把文档置 processing，并确保当前 worker 持有租约。
 
-        worker 通过 ``claim_index_jobs`` 领取时状态已经是 processing；
-        pending/failed/completed（重切片）才需要显式迁移。
+        worker 通过 ``claim_index_jobs`` 领取时锁字段已经写好；直接调用
+        ``submit``/``execute`` 时没有 claim，需要补租约，否则后续
+        ``update_index_progress/mark_index_completed`` 的 worker 校验会失败。
         """
         if self.repository is None or document is None:
             return
@@ -722,6 +740,14 @@ class DefaultIndexingPipeline:
                 "文档正在删除或已删除，不能入库",
                 details={"doc_id": str(document.id), "status": str(value)},
             )
+        acquire = getattr(self.repository, "acquire_index_lease", None)
+        if acquire is not None:
+            await acquire(
+                document.id,
+                worker_id=self.worker_id,
+                lease_seconds=self.config.index_lease_seconds,
+            )
+            return
         if value != "processing":
             await self.repository.mark_processing(document.id)
 

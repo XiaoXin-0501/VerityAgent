@@ -61,8 +61,8 @@ class BaseChunker:
     def __init__(
         self,
         *,
-        target_tokens: int = 512,
-        max_tokens: int = 800,
+        target_tokens: int = 300,
+        max_tokens: int = 600,
         min_tokens: int = 40,
         overlap_tokens: int = 80,
         chunking_version: str = "v1",

@@ -1,5 +1,13 @@
 """RAG 入库内部实现。"""
 
+from .caching import (
+    ChunkCache,
+    InMemoryChunkCache,
+    ResilientChunkCache,
+    build_default_chunk_cache,
+    description_cache_key,
+    embedding_cache_key,
+)
 from .chunkers import ChatCodeDescriber, ChatTableDescriber
 from .embedding import EmbeddingResult, EmbeddingService
 from .enrichment import (
@@ -49,6 +57,12 @@ __all__ = [
     "JobStore",
     "InMemoryJobStore",
     "to_job_view",
+    "ChunkCache",
+    "InMemoryChunkCache",
+    "ResilientChunkCache",
+    "build_default_chunk_cache",
+    "embedding_cache_key",
+    "description_cache_key",
     "EmbeddingService",
     "EmbeddingResult",
     "ChatTableDescriber",

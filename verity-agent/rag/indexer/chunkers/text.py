@@ -1,6 +1,6 @@
 """文本/列表切片策略。
 
-- ``TextChunker``：按句子/段落单元打包，默认目标 300、硬上限 800（由
+- ``TextChunker``：按句子/段落单元打包，默认目标 300、硬上限 600（由
   `IndexerConfig.chunk_size_tokens / max_chunk_tokens` 控制），overlap 只用于
   正文；中文单元之间不插空格（由 ``smart_join`` 处理）；
 - ``ListChunker``：按列表项打包，保留换行与项目符号，不把列表压成一段话；

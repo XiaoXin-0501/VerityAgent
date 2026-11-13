@@ -70,22 +70,26 @@ class _SimpleTableParser(HTMLParser):
     """stdlib 兜底：只收集 tr/td/th 文本，不展开合并单元格。"""
 
     def __init__(self) -> None:
+        """初始化行/单元格缓冲。"""
         super().__init__()
         self.rows: list[list[str]] = []
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        """遇到 tr 开新行，遇到 td/th 开新单元格。"""
         if tag == "tr":
             self._row = []
         elif tag in {"td", "th"}:
             self._cell = []
 
     def handle_data(self, data: str) -> None:
+        """把文本写入当前单元格缓冲。"""
         if self._cell is not None:
             self._cell.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        """闭合单元格时落文本，闭合行时落整行。"""
         if tag in {"td", "th"} and self._cell is not None:
             if self._row is None:
                 self._row = []

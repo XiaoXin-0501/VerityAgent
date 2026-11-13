@@ -156,6 +156,10 @@ class IndexerConfig(ConfigModel):
     embedding_version: str = "v1"
     # 单批 embedding 文本数
     embedding_batch_size: int = Field(default=32, ge=1)
+    # 是否缓存 chunk/query 向量；命中后重试/重灌不再调用 embedding 模型
+    embedding_cache_enabled: bool = True
+    # 向量缓存 TTL（秒）；默认 30 天，模型/维度变化通过 key 版本失效
+    embedding_cache_ttl_s: int = Field(default=2_592_000, ge=0)
 
     # 文档描述生成模型 id
     description_model_id: str | None = None
@@ -170,6 +174,10 @@ class IndexerConfig(ConfigModel):
     description_use_filename: bool = True
     # 扫描描述规则时只看前 N 个内容块
     description_max_early_blocks: int = Field(default=20, ge=1)
+    # 是否缓存 LLM 生成的 chunk/文档描述，避免重试重复消耗 token
+    description_cache_enabled: bool = True
+    # 描述缓存 TTL（秒）；模型/Prompt 版本变化通过 key 失效
+    description_cache_ttl_s: int = Field(default=2_592_000, ge=0)
     # 扫描件/图片 PDF 的 OCR 配置
     ocr: OcrConfig = Field(default_factory=OcrConfig)
     # 纯图片/扫描 PDF 的版式解析（MinerU/RapidOCR）
@@ -205,8 +213,8 @@ class IndexerConfig(ConfigModel):
     )
     # 入库是否建图；v1 默认 true（D-56）
     graph_build_enabled: bool = True
-    # 垂直领域画像名；一个部署只接入一个领域（默认医疗参考画像）
-    domain_profile: str = "medical"
+    # 垂直领域画像名；一个部署只接入一个领域（默认宠物医疗参考画像）
+    domain_profile: str = "pet_medical"
     # 自定义领域画像目录；为空时使用内置 domains/ 目录
     domain_profile_dir: str | None = None
     # 自定义领域画像文件；设置后优先于 domain_profile/domain_profile_dir
@@ -305,6 +313,14 @@ class RetrieverConfig(ConfigModel):
     min_quality_score: float | None = None
     # 上下文 token 预算；None 表示不限制
     token_budget: int | None = Field(default=None, gt=0)
+    # RAG 上下文最大 token；调用方未传 token_budget 时的默认预算
+    max_context_tokens: int = Field(default=3000, gt=0)
+    # 权限粒度：KB_ONLY / KB_AND_DOC
+    permission_mode: str = "KB_AND_DOC"
+    # 最终 top-k 确定后是否按 doc_id 批量补文档描述（D-103）
+    include_doc_meta: bool = True
+    # 是否注册/暴露 resolve_chunk_conflict 工具（D-88）
+    chunk_conflict_tool_enabled: bool = False
 
     # 是否启用 rerank
     rerank_enabled: bool = True
@@ -365,6 +381,8 @@ class RetrieverConfig(ConfigModel):
     # 邻居是否限定同 block_type
     neighbor_same_block_type: bool = True
 
+    # 是否启用检索结果缓存
+    cache_enabled: bool = True
     # 检索结果缓存 TTL（秒）；0 表示不缓存
     cache_ttl_s: int = Field(default=300, ge=0)
     # 文档状态缓存 TTL（秒）

@@ -3,11 +3,14 @@
 v1 能力：
 - 读取文本层，按页面文本块（而不是整页一段）输出，保留页码和阅读顺序；
 - 依据字号/编号识别标题，写入 ``heading_level`` / ``heading_text``，
-  让后续 chunk 获得标题上下文；
+  让后续 chunk 获得标题上下文；支持 ``1.诊断`` / ``1.1 病例信息`` 等编号标题；
+- 双栏页面按“跨栏块锚点 + 左栏先于右栏”还原阅读顺序，避免左右栏逐行交错；
 - 识别跨页重复的水印/页眉页脚短行并在解析阶段丢弃（每行都会记录告警）；
-- 只对有足够横竖线的页面做表格检测（PyMuPDF ``find_tables``），避免对纯
-  文本 PDF 做昂贵的表格推断；表格输出为 ``TableBlock``；
-- 图片不 OCR、不建 FigureBlock、不进入 chunk；只记录 ``has_images``。
+- 只对有足够横竖线的页面做表格检测（PyMuPDF ``find_tables``）；复杂矢量页
+  会改用 pdfplumber 抽表，避免 PyMuPDF 在超大图元页面上崩溃；表格输出为
+  ``TableBlock``；
+- 图片页先尝试简单 OCR；整篇均为图片/扫描页时交给 ``image_pdf`` 版式解析
+  流水线（MinerU/RapidOCR）；都不进入正文时只记录 ``has_images``；
 
 PDF 解析是同步阻塞操作，通过 ``asyncio.to_thread`` 隔离，避免卡住事件循环。
 """
@@ -53,6 +56,27 @@ _PAGE_NUMBER = re.compile(
 )
 # 粗体 flag（PyMuPDF span.flags bit 4）。
 _BOLD_FLAG = 1 << 4
+
+# PDF 常见的分级编号标题：
+#   1.诊断 / 4.讨论      → 一级小节（挂在文档标题下）
+#   1.1 病例信息         → 二级小节
+#   1.3.1 血常规检查     → 三级小节
+# 要求编号后紧跟中文/英文，避免把 “1. 列表项” 或表格数值误判成标题。
+_NUMBERED_COMPOUND_HEADING = re.compile(
+    r"^\s*\d{1,2}(?:\.\d{1,2})+\s*[一-鿿A-Za-z]"
+)
+_NUMBERED_SINGLE_HEADING = re.compile(
+    r"^\s*\d{1,2}\.(?=[一-鿿A-Za-z])\s*"
+)
+
+# 版面阅读顺序：宽度超过页面 60% 的块视为“跨栏块”，作为上下分区的锚点；
+# 左右栏之间的最小空白用于判定双栏。
+_WIDE_BLOCK_RATIO = 0.6
+_COLUMN_SPLIT_MIN_GAP = 15.0
+
+# PyMuPDF find_tables 在“线条极多”的复杂页面上可能崩溃（进程级 segfault），
+# 超过该绘制对象数时改用 pdfplumber 抽表，避免整篇文档解析失败。
+_PYMUPDF_TABLE_MAX_DRAWINGS = 150
 
 
 @dataclass(slots=True)
@@ -126,6 +150,143 @@ def _overlap_ratio(
 def _normalize_line(text: str) -> str:
     """用于重复行统计的归一化：去掉所有空白。"""
     return re.sub(r"\s+", "", text)
+
+
+def _numbered_heading_level(text: str) -> int | None:
+    """识别 ``1.诊断`` / ``1.1 病例信息`` / ``1.3.1 血常规`` 这类编号标题。
+
+    编号层级映射：``1.`` → 2，``1.1`` → 3，``1.3.1`` → 4；文档大标题保持 1。
+    只接受编号后直接跟中文/英文的短行，避免把编号列表和表格数值当标题。
+    """
+    value = (text or "").strip()
+    if not value or len(value) > 80:
+        return None
+    match = _NUMBERED_COMPOUND_HEADING.match(value)
+    if match:
+        number = value.split()[0].rstrip(".")
+        return min(6, number.count(".") + 2)
+    if _NUMBERED_SINGLE_HEADING.match(value):
+        return 2
+    return None
+
+
+def _bbox_width(bbox: tuple[float, float, float, float]) -> float:
+    """返回 bbox 宽度。"""
+    return max(0.0, bbox[2] - bbox[0])
+
+
+def _detect_column_split(
+    entries: list[tuple[tuple[float, float, float, float], str, object]],
+    page_width: float,
+) -> float | None:
+    """检测双栏页面的竖向分栏位置；单栏返回 ``None``。
+
+    只使用“不跨页面中线、且不是跨栏块”的文本/表格框，避免标题、摘要等
+    居中或通栏内容干扰；左右两侧都需要足够多的块，且中间存在明确空白。
+    """
+    mid = page_width / 2
+    left: list[tuple[float, float, float, float]] = []
+    right: list[tuple[float, float, float, float]] = []
+    for bbox, _kind, _item in entries:
+        if _bbox_width(bbox) >= page_width * _WIDE_BLOCK_RATIO:
+            continue
+        if bbox[2] <= mid:
+            left.append(bbox)
+        elif bbox[0] >= mid:
+            right.append(bbox)
+    if len(left) < 3 or len(right) < 3:
+        return None
+    gap_left = max(bbox[2] for bbox in left)
+    gap_right = min(bbox[0] for bbox in right)
+    if gap_right - gap_left < _COLUMN_SPLIT_MIN_GAP:
+        return None
+    return (gap_left + gap_right) / 2
+
+
+def _order_interval(
+    entries: list[tuple[tuple[float, float, float, float], str, object]],
+    split_x: float,
+) -> list[tuple[tuple[float, float, float, float], str, object]]:
+    """对同一纵向区间内的块排序：左栏整体在前，右栏整体在后。"""
+    if not entries:
+        return []
+    if any(bbox[0] < split_x < bbox[2] for bbox, _kind, _item in entries):
+        # 含跨栏/居中块时无法安全分栏，退化为从上到下、从左到右。
+        return sorted(
+            entries,
+            key=lambda entry: (round(entry[0][1], 1), round(entry[0][0], 1)),
+        )
+    left = [entry for entry in entries if entry[0][2] <= split_x]
+    right = [entry for entry in entries if entry[0][0] >= split_x]
+    if left and right and len(left) + len(right) == len(entries):
+        return sorted(
+            left,
+            key=lambda entry: (round(entry[0][1], 1), round(entry[0][0], 1)),
+        ) + sorted(
+            right,
+            key=lambda entry: (round(entry[0][1], 1), round(entry[0][0], 1)),
+        )
+    return sorted(
+        entries,
+        key=lambda entry: (round(entry[0][1], 1), round(entry[0][0], 1)),
+    )
+
+
+def _page_entries_in_reading_order(
+    entries: list[tuple[tuple[float, float, float, float], str, object]],
+    page_width: float,
+) -> list[tuple[tuple[float, float, float, float], str, object]]:
+    """按双栏版面还原阅读顺序。
+
+    采用“跨栏块作为纵向锚点 + 栏内自上而下 + 左栏先于右栏”的简单 XY-cut：
+
+    1. 跨栏块（标题、通栏摘要、通栏表格行）按 y 顺序插入；
+    2. 锚点之间的窄块，若页面判定为双栏，则先输出左栏再输出右栏；
+    3. 单栏页面直接按 y/x 排序。
+    """
+    if len(entries) <= 1:
+        return entries
+    split_x = _detect_column_split(entries, page_width)
+    if split_x is None:
+        return sorted(
+            entries,
+            key=lambda entry: (round(entry[0][1], 1), round(entry[0][0], 1)),
+        )
+
+    wide: list[tuple[tuple[float, float, float, float], str, object]] = []
+    narrow: list[tuple[tuple[float, float, float, float], str, object]] = []
+    for entry in entries:
+        bbox = entry[0]
+        # 跨栏块本身也作为锚点：通栏标题/摘要，以及略越过中线的段落行。
+        if (
+            _bbox_width(bbox) >= page_width * _WIDE_BLOCK_RATIO
+            or bbox[0] < split_x < bbox[2]
+        ):
+            wide.append(entry)
+        else:
+            narrow.append(entry)
+
+    ordered: list[tuple[tuple[float, float, float, float], str, object]] = []
+    pending = list(narrow)
+    for anchor in sorted(
+        wide,
+        key=lambda entry: (round(entry[0][1], 1), round(entry[0][0], 1)),
+    ):
+        anchor_top = anchor[0][1]
+        above: list[tuple[tuple[float, float, float, float], str, object]] = []
+        rest: list[tuple[tuple[float, float, float, float], str, object]] = []
+        for entry in pending:
+            if entry[0][3] <= anchor_top + 1:
+                above.append(entry)
+            else:
+                rest.append(entry)
+        pending = rest
+        if above:
+            ordered.extend(_order_interval(above, split_x))
+        ordered.append(anchor)
+    if pending:
+        ordered.extend(_order_interval(pending, split_x))
+    return ordered
 
 
 class PdfParser:
@@ -212,7 +373,7 @@ class PdfParser:
         try:
             payloads: list[_PdfPage] = []
             for page_no, page in enumerate(document, start=1):
-                payload = self._extract_page(page, page_no)
+                payload = self._extract_page(page, page_no, data=data)
                 if self._should_ocr(payload):
                     if (
                         self._ocr_provider is not None
@@ -371,7 +532,7 @@ class PdfParser:
             warnings=warnings,
         )
 
-    def _extract_page(self, page, page_no: int) -> _PdfPage:
+    def _extract_page(self, page, page_no: int, *, data: bytes) -> _PdfPage:
         """抽取一页的文本块、表格和基础版面信息。"""
         payload = _PdfPage(
             page_no=page_no,
@@ -387,7 +548,7 @@ class PdfParser:
         text_dict = page.get_text("dict")
         for raw_block in text_dict.get("blocks", []):
             if raw_block.get("type") != 0:
-                # type=1 是图片块；v1 不 OCR。
+                # type=1 是图片块；图片页由 _apply_ocr / image_pdf 流水线处理。
                 continue
             block = _PdfTextBlock(bbox=_bbox_tuple(raw_block.get("bbox", (0, 0, 0, 0))))
             for raw_line in raw_block.get("lines", []):
@@ -412,7 +573,7 @@ class PdfParser:
             if block.lines:
                 payload.blocks.append(block)
 
-        payload.tables = self._extract_tables(page)
+        payload.tables = self._extract_tables(page, page_no=page_no, data=data)
         return payload
 
     @staticmethod
@@ -480,14 +641,28 @@ class PdfParser:
         for line in lines:
             payload.size_chars[10.0] += len(line.text)
 
-    def _extract_tables(self, page) -> list[_PdfTable]:
-        """仅在页面具备表格线结构时调用 ``find_tables``，避免昂贵误判。"""
-        if not self._has_table_structure(page):
+    def _extract_tables(
+        self,
+        page,
+        *,
+        page_no: int,
+        data: bytes,
+    ) -> list[_PdfTable]:
+        """抽取页面表格；复杂页面用 pdfplumber 兜底，避免 find_tables 崩溃。"""
+        try:
+            drawings = page.get_drawings()
+        except Exception:
+            drawings = []
+        # find_tables 在复杂矢量页上可能直接 segfault（无法用 try 捕获），
+        # 超过阈值时改用 pdfplumber；pdfplumber 失败则退回纯文本，不阻断解析。
+        if len(drawings) > _PYMUPDF_TABLE_MAX_DRAWINGS:
+            return self._extract_tables_pdfplumber(data, page_no)
+        if not self._has_table_structure(page, drawings=drawings):
             return []
         try:
             finder = page.find_tables()
         except Exception:
-            return []
+            return self._extract_tables_pdfplumber(data, page_no)
 
         tables: list[_PdfTable] = []
         for raw_table in getattr(finder, "tables", []):
@@ -495,14 +670,8 @@ class PdfParser:
                 raw_rows = raw_table.extract()
             except Exception:
                 continue
-            rows = [
-                ["" if cell is None else str(cell).strip() for cell in row]
-                for row in raw_rows
-                if row
-            ]
-            rows = [row for row in rows if any(cell for cell in row)]
-            # 单行/单列的“表格”多为文本框或分隔线，不作为表格处理。
-            if len(rows) < 2 or max((len(row) for row in rows), default=0) < 2:
+            rows = self._normalize_table_rows(raw_rows)
+            if not rows:
                 continue
             tables.append(
                 _PdfTable(
@@ -512,8 +681,49 @@ class PdfParser:
             )
         return tables
 
+    def _extract_tables_pdfplumber(
+        self,
+        data: bytes,
+        page_no: int,
+    ) -> list[_PdfTable]:
+        """用 pdfplumber 抽取一页表格；依赖缺失或失败时返回空列表。"""
+        try:
+            import pdfplumber  # type: ignore[import-not-found]
+
+            with pdfplumber.open(__import__("io").BytesIO(data)) as document:
+                if page_no < 1 or page_no > len(document.pages):
+                    return []
+                page = document.pages[page_no - 1]
+                tables: list[_PdfTable] = []
+                for raw_table in page.find_tables():
+                    rows = self._normalize_table_rows(raw_table.extract())
+                    if not rows:
+                        continue
+                    tables.append(
+                        _PdfTable(
+                            bbox=_bbox_tuple(raw_table.bbox),
+                            rows=rows,
+                        )
+                    )
+                return tables
+        except Exception:
+            return []
+
     @staticmethod
-    def _has_table_structure(page) -> bool:
+    def _normalize_table_rows(raw_rows) -> list[list[str]]:
+        """把表格二维数据清理成非空行；单行/单列视作非表格。"""
+        rows = [
+            ["" if cell is None else str(cell).strip() for cell in row]
+            for row in (raw_rows or [])
+            if row
+        ]
+        rows = [row for row in rows if any(cell for cell in row)]
+        if len(rows) < 2 or max((len(row) for row in rows), default=0) < 2:
+            return []
+        return rows
+
+    @staticmethod
+    def _has_table_structure(page, *, drawings=None) -> bool:
         """判断页面是否真的存在表格网格，避免把代码框/引用框当表格。
 
         表格至少要满足：
@@ -525,10 +735,11 @@ class PdfParser:
         """
         horizontals: list[tuple[float, float, float]] = []
         verticals: list[tuple[float, float, float]] = []
-        try:
-            drawings = page.get_drawings()
-        except Exception:
-            return False
+        if drawings is None:
+            try:
+                drawings = page.get_drawings()
+            except Exception:
+                return False
 
         for drawing in drawings:
             for item in drawing.get("items", []):
@@ -624,7 +835,7 @@ class PdfParser:
         ``headings`` 是跨页共享的标题栈；本页标题会更新栈，后续页继续沿用。
         返回本页块、是否含表格、过滤行数。
         """
-        entries: list[tuple[float, float, str, object]] = []
+        entries: list[tuple[tuple[float, float, float, float], str, object]] = []
         for block in payload.blocks:
             # 与表格区域重叠的文本块会由表格结构表达，跳过以避免重复。
             if any(
@@ -632,17 +843,17 @@ class PdfParser:
                 for table in payload.tables
             ):
                 continue
-            entries.append((block.bbox[1], block.bbox[0], "text", block))
+            entries.append((block.bbox, "text", block))
         for table in payload.tables:
-            entries.append((table.bbox[1], table.bbox[0], "table", table))
-        entries.sort(key=lambda item: (round(item[0], 1), round(item[1], 1)))
+            entries.append((table.bbox, "table", table))
+        entries = _page_entries_in_reading_order(entries, payload.width)
 
         blocks: list[ContentBlock] = []
         order = start_order
         dropped = 0
         has_table = False
 
-        for _y, _x, kind, item in entries:
+        for _bbox, kind, item in entries:
             if kind == "table":
                 table = item  # type: ignore[assignment]
                 structured = make_table(table.rows[0], table.rows[1:])
@@ -755,7 +966,7 @@ class PdfParser:
         elif ratio >= 1.15:
             font_level = 4
 
-        inferred = heading_level_from_text(text)
+        inferred = _numbered_heading_level(text) or heading_level_from_text(text)
         if inferred is not None and font_level is not None:
             return min(inferred, font_level)
         if inferred is not None:

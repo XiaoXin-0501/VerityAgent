@@ -41,6 +41,8 @@ from .graph import (
     _is_valid_keyword,
     _normalize_keyword,
     filter_relations,
+    graph_nearest_heading,
+    graph_source_text,
 )
 from ..policy import IndexerPolicy, get_indexer_policy
 
@@ -123,10 +125,10 @@ class LLMGraphExtractor:
         与 ``extract`` 分开是为了让 ``HybridGraphExtractor`` 能区分
         “模型失败”和“模型成功但没有抽到实体”。
         """
-        text = (chunk.content or "").strip()
+        text = (graph_source_text(chunk) or "").strip()
         if not text:
             return ChunkGraphExtraction(chunk_id=chunk.chunk_id)
-        # 过短的 chunk（如单个表头）语义不足，直接交给词典/规则。
+        # 过短的 chunk（如单个标题）语义不足，直接交给词典/规则。
         if len(text) < self.config.graph_llm_min_chunk_chars:
             return None
 
@@ -160,11 +162,7 @@ class LLMGraphExtractor:
             chunk.content or "",
             self.config.graph_llm_max_input_chars,
         )
-        heading = (
-            " > ".join(chunk.heading_path)
-            if chunk.heading_path
-            else (chunk.heading or "")
-        )
+        heading = graph_nearest_heading(chunk)
         user_values: dict[str, Any] = {
             "block_type": chunk.block_type.value,
             "text": text,

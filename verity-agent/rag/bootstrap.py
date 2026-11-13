@@ -16,6 +16,7 @@ from .facade import Indexer, RagDependencies, create_indexer
 from .indexer import (
     ChatCodeDescriber,
     ChatTableDescriber,
+    ChunkCache,
     DefaultIndexingPipeline,
     EmbeddingService,
     GraphExtractor,
@@ -29,6 +30,7 @@ from .indexer import (
     PgIndexingRepository,
     TextIngestionPipeline,
     WeaviateChunkStore,
+    build_default_chunk_cache,
     build_graph_extractor,
     get_indexer_policy,
 )
@@ -87,6 +89,7 @@ def build_default_indexing_pipeline(
     table_describer: Any | None = None,
     code_describer: Any | None = None,
     description_refiner: Any | None = None,
+    cache: ChunkCache | None = None,
     worker_id: str = "rag-indexer",
     run_in_background: bool = True,
 ) -> DefaultIndexingPipeline:
@@ -105,18 +108,25 @@ def build_default_indexing_pipeline(
 
     表格/代码语义描述：显式注入 ``table_describer`` / ``code_describer`` 优先；
     否则在对应 LLM 开关打开且注入 chat model 时构造 ChatDescriber，用于
-    “heading + 描述”的向量化文本。
+    “heading + 描述”的向量化文本。``cache`` 为空时默认使用带熔断的 Redis
+    缓存，用于复用 chunk 向量与 LLM 描述；测试可注入 InMemoryChunkCache。
     """
     cfg = config or IndexerConfig()
     policy = indexer_policy or get_indexer_policy(
         cfg.indexer_policy_path
     )
     prompts = prompt_registry
+    # 默认使用带熔断的 Redis 缓存；Redis 不可用时自动降级为 miss，不阻塞入库。
+    rag_cache = cache
+    if rag_cache is None and (
+        cfg.embedding_cache_enabled or cfg.description_cache_enabled
+    ):
+        rag_cache = build_default_chunk_cache()
     table_describer = table_describer or _build_table_describer(
-        cfg, prompts, table_summary_chat_model
+        cfg, prompts, table_summary_chat_model, rag_cache
     )
     code_describer = code_describer or _build_code_describer(
-        cfg, prompts, code_summary_chat_model
+        cfg, prompts, code_summary_chat_model, rag_cache
     )
     return DefaultIndexingPipeline(
         cfg,
@@ -131,6 +141,12 @@ def build_default_indexing_pipeline(
             embedding_model,
             model_id=cfg.embedding_model_id,
             batch_size=cfg.embedding_batch_size,
+            semantic_embedding_enabled=cfg.semantic_embedding_enabled,
+            cache=rag_cache,
+            cache_enabled=cfg.embedding_cache_enabled,
+            cache_ttl_s=cfg.embedding_cache_ttl_s,
+            cache_version=cfg.embedding_version,
+            configured_dimensions=cfg.embedding_dimensions,
         ),
         vector_store=vector_store or WeaviateChunkStore(),
         graph_store=graph_store or Neo4jGraphIndexStore(),
@@ -195,6 +211,7 @@ def build_table_describer_from_registry(
     config: IndexerConfig,
     *,
     prompts: PromptRegistry | None = None,
+    cache: ChunkCache | None = None,
 ):
     """从 ProviderRegistry 解析 ``table_summary_model_id`` 并构造描述器。
 
@@ -204,13 +221,14 @@ def build_table_describer_from_registry(
     if not config.table_summary_llm_enabled or not config.table_summary_model_id:
         return None
     chat_model = registry.get_model_by_id(config.table_summary_model_id)
-    return _build_table_describer(config, prompts, chat_model)
+    return _build_table_describer(config, prompts, chat_model, cache)
 
 
 def _build_table_describer(
     config: IndexerConfig,
     prompts: PromptRegistry | None,
     chat_model: Any | None,
+    cache: ChunkCache | None = None,
 ):
     """按配置构造表格/Excel 语义描述器；未启用或未注入模型返回 None。"""
     if not config.table_summary_llm_enabled:
@@ -233,6 +251,9 @@ def _build_table_describer(
         temperature=config.semantic_description_temperature,
         max_output_tokens=config.semantic_description_max_output_tokens,
         max_chars=config.semantic_description_max_chars,
+        cache=cache,
+        cache_enabled=config.description_cache_enabled,
+        cache_ttl_s=config.description_cache_ttl_s,
     )
 
 
@@ -240,6 +261,7 @@ def _build_code_describer(
     config: IndexerConfig,
     prompts: PromptRegistry | None,
     chat_model: Any | None,
+    cache: ChunkCache | None = None,
 ):
     """按配置构造代码语义描述器；未启用或未注入模型返回 None。"""
     if not config.code_summary_enabled:
@@ -262,4 +284,7 @@ def _build_code_describer(
         temperature=config.semantic_description_temperature,
         max_output_tokens=config.semantic_description_max_output_tokens,
         max_chars=config.semantic_description_max_chars,
+        cache=cache,
+        cache_enabled=config.description_cache_enabled,
+        cache_ttl_s=config.description_cache_ttl_s,
     )

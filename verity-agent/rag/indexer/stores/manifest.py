@@ -166,6 +166,7 @@ class InMemoryManifestStore:
 
     @staticmethod
     def _key(kb_id, doc_id) -> tuple[str, str]:
+        """内存表的统一 key，统一转成字符串避免 UUID 与 str 混用。"""
         return str(kb_id), str(doc_id)
 
     async def read(self, kb_id, doc_id) -> ParseManifest | None:

@@ -8,8 +8,8 @@
 - LLM 提示词：领域角色与抽取要求。
 
 切换领域只需要换一份 JSON（或改 ``domain_profile`` 配置），
-抽取代码、流水线、存储都不需要改。医疗画像见
-``rag/indexer/enrichment/domains/medical.json``。
+抽取代码、流水线、存储都不需要改。默认宠物医疗画像见
+``rag/indexer/enrichment/domains/pet_medical.json``。
 """
 
 from __future__ import annotations
@@ -66,6 +66,8 @@ class DomainMatch:
 
 
 class _Model(BaseModel):
+    """领域画像模型基类：拒绝未知字段并保持只读。"""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 

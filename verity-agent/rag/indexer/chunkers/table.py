@@ -328,12 +328,12 @@ class TableChunker(BaseChunker):
         text = "\n".join(
             item for item in (context, caption, markdown) if item
         ).strip()
-        # 旧策略：heading + 文档描述 + 局部描述 + 表头 + 摘要 + 整表。
+        # 旧策略：heading + 局部描述 + 表头 + 摘要 + 整表。
         # 仅在新策略无可用 heading/描述时兜底，避免产出空向量。
+        # 文档描述不进入 embedding（D-103），只保留在 metadata。
         legacy_parts: list[str] = []
         for item in (
             block.heading_text,
-            document_description,
             context,
             caption,
             header_text,

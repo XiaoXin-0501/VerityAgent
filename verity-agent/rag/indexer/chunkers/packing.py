@@ -157,7 +157,12 @@ def build_group_chunk(
     joiner: Callable[[list[str]], str],
     document_description: str | None = None,
 ) -> ChunkDraft:
-    """把一组单元构造为 ``ChunkDraft``（正文与 embedding 分离）。"""
+    """把一组单元构造为 ``ChunkDraft``（正文与 embedding 分离）。
+
+    ``document_description`` 只写入 metadata 供展示/审计，不拼进
+    ``embedding_text``：同一文档所有 chunk 共享描述会让向量趋同，稀释检索
+    信号；文档描述按 D-103 在检索结果中按 ``doc_id`` 单独注入。
+    """
     text = joiner([unit.text for unit in units])
     if not text:
         text = ""
@@ -166,13 +171,7 @@ def build_group_chunk(
         flags.update(unit.quality_flags)
     page_no = next((unit.page_no for unit in units if unit.page_no), None)
     language = next((unit.language for unit in units if unit.language), None)
-    embedding_parts: list[str] = []
-    for item in (document_description, heading_text):
-        if item and item not in embedding_parts:
-            embedding_parts.append(item)
-    embedding_text = (
-        "\n".join([*embedding_parts, text]) if embedding_parts else text
-    )
+    embedding_text = f"{heading_text}\n{text}" if heading_text else text
     metadata = (
         {"document_description": document_description}
         if document_description

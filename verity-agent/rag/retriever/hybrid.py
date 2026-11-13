@@ -14,6 +14,8 @@ __all__ = ["HybridRecallResult", "HybridRecaller"]
 
 
 class HybridRecallResult:
+    """一次混合召回的候选：BM25、向量与降级告警分开保留。"""
+
     def __init__(
         self,
         *,
@@ -21,12 +23,15 @@ class HybridRecallResult:
         vector: list[RetrievedChunk] | None = None,
         warnings: list[str] | None = None,
     ) -> None:
+        """保存两路候选与告警；空值统一成空列表。"""
         self.bm25 = bm25 or []
         self.vector = vector or []
         self.warnings = warnings or []
 
 
 class HybridRecaller(Protocol):
+    """混合召回协议；具体 Weaviate 实现由检索流水线注入。"""
+
     async def recall(
         self,
         query: str,
@@ -37,4 +42,5 @@ class HybridRecaller(Protocol):
         top_k_vector: int,
         filters=None,
     ) -> HybridRecallResult:
+        """返回 BM25 与向量两路候选；权限过滤必须在召回前完成。"""
         ...

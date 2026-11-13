@@ -36,6 +36,10 @@ class CacheScope(StrEnum):
     TOOL_RESULT = "tool"
     RAG_RETRIEVAL = "rag:retrieval"
     QUERY_EMBEDDING = "rag:embedding"
+    # 文档 chunk 向量：key 由模型/维度/切片文本决定，重试/重灌直接复用
+    CHUNK_EMBEDDING = "rag:chunk_embedding"
+    # chunk 级 LLM 描述（表格/代码/文档描述），key 带模型 + Prompt 版本
+    CHUNK_DESCRIPTION = "rag:chunk_description"
     RERANK = "rag:rerank"
     GRAPH_NEXT_HOP = "graph"
     MEMORY_PROFILE = "memory:profile"
@@ -49,6 +53,10 @@ DEFAULT_TTLS: dict[CacheScope, int] = {
     CacheScope.TOOL_RESULT: 300,
     CacheScope.RAG_RETRIEVAL: 300,
     CacheScope.QUERY_EMBEDDING: 86_400,
+    # chunk 向量/描述按内容寻址，模型/维度/Prompt 不变即可长期复用；
+    # 30 天 TTL 只作为容量兜底，模型切换通过 key 版本天然失效。
+    CacheScope.CHUNK_EMBEDDING: 2_592_000,
+    CacheScope.CHUNK_DESCRIPTION: 2_592_000,
     CacheScope.RERANK: 3_600,
     CacheScope.GRAPH_NEXT_HOP: 3_600,
     CacheScope.MEMORY_PROFILE: 600,
@@ -87,6 +95,7 @@ class CachePolicy(BaseModel):
     ttl_jitter: float = Field(default=0.1, ge=0.0, le=1.0)
 
     def effective_ttl(self, scope: CacheScope) -> int:
+        """返回该 scope 的实际 TTL；未显式配置时用默认表。"""
         return self.ttl_s if self.ttl_s is not None else DEFAULT_TTLS[scope]
 
 
@@ -113,6 +122,7 @@ class CacheKey(BaseModel):
         return sha256_text(self.redis_key())
 
     def redis_key(self) -> str:
+        """拼接最终 Redis key；只包含 digest/版本，不包含明文正文。"""
         parts: list[str] = [self.scope.value]
         if self.user_id is not None:
             parts.append(str(self.user_id))
@@ -173,6 +183,7 @@ class CacheStats:
 
     @property
     def hit_rate(self) -> float:
+        """命中率；没有访问时返回 0。"""
         total = self.hits + self.misses
         return self.hits / total if total else 0.0
 
@@ -191,15 +202,18 @@ class RedisCache:
         *,
         policy: CachePolicy | None = None,
     ) -> None:
+        """保存连接管理器与缓存策略；连接在首次访问时惰性建立。"""
         self._redis = redis
         self._policy = policy or CachePolicy()
         self._stats: dict[CacheScope, CacheStats] = {}
 
     @property
     def redis(self) -> RedisConnectionManager:
+        """返回显式注入或进程默认的 Redis 管理器。"""
         return self._redis or get_redis()
 
     def stats(self, scope: CacheScope) -> CacheStats:
+        """取某个 scope 的命中统计对象。"""
         return self._stats.setdefault(scope, CacheStats())
 
     async def get(
@@ -210,6 +224,7 @@ class RedisCache:
         policy: CachePolicy | None = None,
         expected_version: str | None = None,
     ) -> Any | None:
+        """读取缓存值；miss/版本不符/序列化失败按 miss 处理。"""
         cfg = policy or self._policy
         if not cfg.enabled:
             return None
@@ -255,6 +270,7 @@ class RedisCache:
         version: str | None = None,
         ttl_s: int | None = None,
     ) -> bool:
+        """写入缓存值；超过大小上限或 Redis 失败返回 False。"""
         cfg = policy or self._policy
         if not cfg.enabled:
             return False
@@ -297,6 +313,7 @@ class RedisCache:
         version: str | None = None,
         ttl_s: int | None = None,
     ) -> Any:
+        """先读缓存，miss 时执行 loader 并写回。"""
         cached = await self.get(key, policy=policy, expected_version=version)
         if cached is not None:
             return cached
@@ -305,10 +322,12 @@ class RedisCache:
         return value
 
     async def delete(self, key: str | CacheKey) -> bool:
+        """删除单个 key；返回是否真的删除。"""
         redis_key = key.redis_key() if isinstance(key, CacheKey) else key
         return await self.redis.delete(redis_key) > 0
 
     async def delete_many(self, keys: list[str | CacheKey]) -> int:
+        """批量删除；返回删除数量。"""
         redis_keys = [k.redis_key() if isinstance(k, CacheKey) else k for k in keys]
         if not redis_keys:
             return 0

@@ -76,8 +76,8 @@ def build_parser_registry(
                 doc_types={DocumentType.PDF},
                 extensions={".pdf"},
                 mime_types={"application/pdf"},
-                # v1 只取文本层 + 带线表格，不做 OCR
-                supports_scanned=False,
+                # 文本层优先；纯图片/扫描页走 image_pdf 版式解析或简单 OCR。
+                supports_scanned=True,
                 supports_tables=True,
                 priority=50,
             ),

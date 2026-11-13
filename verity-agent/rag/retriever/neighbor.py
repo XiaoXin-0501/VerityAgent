@@ -10,6 +10,8 @@ __all__ = ["NeighborExpander"]
 
 
 class NeighborExpander(Protocol):
+    """邻居扩展协议；只补上下文，不改变主 chunk 的 citation。"""
+
     async def expand(
         self,
         chunks: list[RetrievedChunk],

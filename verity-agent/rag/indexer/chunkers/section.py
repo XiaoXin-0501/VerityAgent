@@ -5,9 +5,10 @@
 2. 取文档中“第二浅”的标题层级作为默认切片层级（通常就是二级标题；
    如果文档只有一级标题，则用一级标题）；
 3. 默认层级节点的整棵子树不超过 ``max_tokens`` 时，在该标题下打包正文，
-   不继续下钻到三级/四级标题；
+   不继续下钻到三级/四级标题；**整节组装只适用于纯正文/列表**；
 4. 只有超过 ``max_tokens`` 才进入下一级标题，递归处理；
-5. 表格/代码保持独立切片，并携带其所在的最深标题路径；
+5. 表格/代码保持独立切片（不变量：不跨 block_type），并携带其所在的最深
+   标题路径；章节里只要出现特殊块，该章节不做整节组装；
 6. 紧贴表格/代码的短描述会被吸附到该特殊块，避免代码/表格脱离语义。
 
 这样既不会一上来就按最细标题切成一堆小 chunk，也不会让单个 chunk 超过
@@ -22,7 +23,6 @@ from uuid import UUID
 from config.rag import IndexerConfig
 from rag.shared.enums import (
     BlockType,
-    CodeParseStatus,
     DocumentType,
     QualityFlag,
     SectionType,
@@ -292,15 +292,22 @@ class SectionAwareChunker:
             index += len(produced)
 
         async def assemble(node: SectionNode, path: list[str]) -> bool:
-            """把一个放得下的章节整体组装成一个语义完整的 chunk。
+            """把“纯正文/列表”章节整体组装成一个语义完整的 chunk。
 
-            代码/表格不再单独拆出，而是按原始顺序连同正文一起写入 chunk；
-            表格用 Markdown、代码保留换行。若组装后仍超过 ``max_tokens``，
-            返回 ``False``，由调用方回退到按块类型切分。
+            硬规则（《RAG 模块数据结构设计》§5.4 / §15）：表格、代码等特殊块
+            必须各自独立切片，不能与正文混进同一个 chunk。因此本函数只处理
+            ``_TEXT_BLOCK_TYPES``；章节里只要出现特殊块，调用方会回退到
+            ``process_items``，由 TableChunker / CodeChunker 保留结构、表头
+            和语义描述。
+
+            组装后超过 ``max_tokens`` 时返回 ``False``，由调用方回退到按块处理。
             """
             nonlocal index
             content = _collect_content_blocks(node)
-            if not content:
+            if not content or any(
+                block.block_type not in _TEXT_BLOCK_TYPES
+                for block in content
+            ):
                 return False
 
             parts: list[str] = []
@@ -323,74 +330,40 @@ class SectionAwareChunker:
 
             for block in content:
                 block_types.add(block.block_type)
-                context = contexts.get(block.block_id)
-                if block.block_type in _TEXT_BLOCK_TYPES:
-                    add_part(block.text)
-                    add_ids([block.block_id])
-                    if (
-                        block.metadata.get("ocr")
-                        and block.confidence is not None
-                        and block.confidence < self.config.quality.min_ocr_confidence
-                    ):
-                        flags.add(QualityFlag.LOW_OCR)
-                elif block.block_type is BlockType.CODE:
-                    if context is not None:
-                        add_part(context.before_text)
-                        add_ids(context.before_block_ids)
-                    add_part(block.text)
-                    add_ids([block.block_id])
-                    if context is not None:
-                        add_part(context.after_text)
-                        add_ids(context.after_block_ids)
-                    if (
-                        block.code is not None
-                        and block.code.parse_status is CodeParseStatus.FALLBACK
-                    ):
-                        flags.add(QualityFlag.CODE_PARSE_FALLBACK)
-                elif block.block_type is BlockType.TABLE:
-                    if context is not None:
-                        add_part(context.before_text)
-                        add_ids(context.before_block_ids)
-                    if block.table is not None:
-                        add_part(block.table.caption)
-                        if (
-                            block.table.confidence is not None
-                            and block.table.confidence
-                            < self.config.quality.min_table_confidence
-                        ):
-                            flags.add(QualityFlag.LOW_TABLE)
-                    add_part(block.text)
-                    add_ids([block.block_id])
-                    if context is not None:
-                        add_part(context.after_text)
-                        add_ids(context.after_block_ids)
+                add_part(block.text)
+                add_ids([block.block_id])
+                if (
+                    block.metadata.get("ocr")
+                    and block.confidence is not None
+                    and block.confidence < self.config.quality.min_ocr_confidence
+                ):
+                    flags.add(QualityFlag.LOW_OCR)
                 if page_no is None and block.page_no:
                     page_no = block.page_no
                 if language is None and block.language:
                     language = block.language
 
-            text = "\n\n".join(parts).strip()
+            text = (
+                smart_join(parts)
+                if block_types <= {BlockType.PARAGRAPH, BlockType.FOOTNOTE}
+                else "\n".join(parts)
+            ).strip()
             if not text or estimate_tokens(text) > self.max_tokens:
                 return False
 
-            if block_types == {BlockType.TABLE}:
-                section_type, block_type = SectionType.TABLE, BlockType.TABLE
-            elif block_types == {BlockType.CODE}:
-                section_type, block_type = SectionType.CODE, BlockType.CODE
-            elif block_types == {BlockType.LIST}:
+            if block_types == {BlockType.LIST}:
                 section_type, block_type = SectionType.LIST, BlockType.LIST
             else:
-                section_type, block_type = SectionType.PARAGRAPH, BlockType.PARAGRAPH
+                section_type, block_type = (
+                    SectionType.PARAGRAPH,
+                    BlockType.PARAGRAPH,
+                )
 
             heading_text = " > ".join(path) if path else None
-            embedding_parts: list[str] = []
-            for item in (document_description, heading_text):
-                if item and item not in embedding_parts:
-                    embedding_parts.append(item)
+            # 文档描述只作为 chunk metadata 供展示/审计，不进入 embedding：
+            # 同一文档的所有 chunk 共享描述会让向量趋同，稀释检索信号（D-103）。
             embedding_text = (
-                "\n".join([*embedding_parts, text])
-                if embedding_parts
-                else text
+                f"{heading_text}\n{text}" if heading_text else text
             )
             metadata = {
                 "mixed": len(block_types) > 1,
@@ -442,8 +415,9 @@ class SectionAwareChunker:
             """按“默认层级优先、超限再下钻”的规则处理章节节点。
 
             - 比默认层级更浅的节点（如一级标题）：按文档顺序处理自身正文和子标题；
-            - 默认层级及更深的节点：整棵子树不超过 max_tokens 时整体组装成一个
-              chunk（含代码/表格），保持语义完整；
+            - 默认层级及更深的节点：整棵子树不超过 max_tokens 时，只有“纯正文/
+              列表”章节才整体组装成一个 chunk；含表格/代码的章节必须回退到按
+              块处理，保证特殊块独立切片（§5.4 不变量）；
             - 超限时按文档顺序处理自身正文，并逐个递归子标题。
             """
             if (
@@ -458,6 +432,7 @@ class SectionAwareChunker:
                 ):
                     await emit_special(content[0])
                     return
+                # 只有纯正文/列表才能整节组装；混入表格/代码时必须保持结构边界。
                 if await assemble(node, node.path):
                     return
             await process_items(node)

@@ -15,6 +15,7 @@ LLM 只通过 ``DescriptionRefiner`` 协议注入，主链路默认不导入任�
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from utils.text import (
     truncate,
 )
 
+from .caching import ChunkCache, description_cache_key
 from .policy import (
     IndexerPolicy,
     get_indexer_policy,
@@ -50,6 +52,8 @@ __all__ = [
     "ChatDescriptionRefiner",
     "DocumentDescriptionExtractor",
 ]
+
+logger = logging.getLogger(__name__)
 
 # 可靠描述标题词表由索引策略管理（config/rag_policy.json），
 # 这里只保留“像描述但不够可靠”的标题正则。
@@ -114,6 +118,7 @@ class CallableDescriptionRefiner:
         self,
         call: Callable[..., Awaitable[str | None]],
     ) -> None:
+        """保存外部异步 callable；调用签名需与 ``refine`` 一致。"""
         self._call = call
 
     async def refine(
@@ -149,13 +154,19 @@ class ChatDescriptionRefiner:
         temperature: float = 0.1,
         max_output_tokens: int = 256,
         prompts: PromptRegistry | None = None,
+        cache: ChunkCache | None = None,
+        cache_enabled: bool = True,
+        cache_ttl_s: int = 2_592_000,
     ) -> None:
-        """保存 ChatModel 句柄、生成参数与可选的 Prompt 注册表。"""
+        """保存 ChatModel 句柄、生成参数、Prompt 注册表与可选描述缓存。"""
         self.chat_model = chat_model
         self.model_id = model_id
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.prompts = prompts or get_default_prompt_registry()
+        self.cache = cache
+        self.cache_enabled = bool(cache_enabled and cache is not None)
+        self.cache_ttl_s = int(cache_ttl_s)
 
     async def refine(
         self,
@@ -165,7 +176,36 @@ class ChatDescriptionRefiner:
         source: str,
         max_chars: int,
     ) -> str | None:
-        """调用 ChatModel.complete，返回清理后的描述。"""
+        """调用 ChatModel.complete，返回清理后的描述。
+
+        文档描述同样按“模型 + Prompt 版本 + 候选/上下文摘要”缓存；重试时
+        不再重复调用模型。
+        """
+        system = self.prompts.get(PromptId.RAG_DESCRIPTION_SYSTEM)
+        user = self.prompts.get(PromptId.RAG_DESCRIPTION_USER)
+        key = description_cache_key(
+            model_id=self.model_id,
+            prompt_id=str(PromptId.RAG_DESCRIPTION_USER),
+            prompt_version=user.version,
+            prompt_checksum=f"{system.checksum}:{user.checksum}",
+            max_chars=max_chars,
+            payload={
+                "candidate": candidate,
+                "context": context,
+                "source": source,
+            },
+        )
+        if self.cache_enabled and self.cache is not None:
+            try:
+                cached = await self.cache.get(key)
+            except Exception as exc:  # noqa: BLE001 - 缓存失败只降级
+                logger.warning("读取文档描述缓存失败: %s", exc)
+                cached = None
+            if isinstance(cached, dict):
+                cached = cached.get("text")
+            if isinstance(cached, str) and cached.strip():
+                return cached.strip()
+
         # 局部导入，避免 RAG 模块在未启用 LLM 时加载 provider wire 类型。
         from provider.enums import ModelRole, ResponseFormatType
         from provider.llm.types import (
@@ -220,7 +260,17 @@ class ChatDescriptionRefiner:
             for part in response.message.content
             if isinstance(part, ModelTextPart)
         ).strip()
-        return truncate(text, max_chars) if text else None
+        result = truncate(text, max_chars) if text else None
+        if result and self.cache_enabled and self.cache is not None:
+            try:
+                await self.cache.set(
+                    key,
+                    {"text": result},
+                    ttl_s=self.cache_ttl_s,
+                )
+            except Exception as exc:  # noqa: BLE001 - 缓存失败只降级
+                logger.warning("写入文档描述缓存失败: %s", exc)
+        return result
 
 
 def _is_reliable_heading(text: str, policy: IndexerPolicy) -> bool:

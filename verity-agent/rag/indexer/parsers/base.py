@@ -33,6 +33,8 @@ def detect_profile(
 
 
 class DocumentParser(Protocol):
+    """文档解析器协议：字节 + 画像 → ParsedDocument。"""
+
     async def parse(
         self,
         source: DocumentSource,

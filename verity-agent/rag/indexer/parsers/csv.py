@@ -20,6 +20,8 @@ __all__ = ["CsvParser"]
 
 
 class CsvParser:
+    """CSV 解析器；v1 未注册，保留给后续版本。"""
+
     parser_id = "csv"
     parser_version = "1"
 
@@ -32,6 +34,7 @@ class CsvParser:
         kb_id: UUID,
         data: bytes,
     ) -> ParsedDocument:
+        """探测分隔符，首行作为表头，其余作为数据行。"""
         text = decode_text(data)
         sample = text[:4096]
         try:

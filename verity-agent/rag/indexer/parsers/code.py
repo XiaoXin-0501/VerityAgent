@@ -34,6 +34,8 @@ _GO_SYMBOL = re.compile(r"^(?P<indent>\s*)func\s+(?:\([^)]*\)\s*)?(?P<name>\w+)"
 
 
 class CodeParser:
+    """正则兜底代码解析器；v1 未注册（tree-sitter 接入前保留）。"""
+
     parser_id = "code_regex"
     parser_version = "1"
 
@@ -46,6 +48,7 @@ class CodeParser:
         kb_id: UUID,
         data: bytes,
     ) -> ParsedDocument:
+        """按扩展名识别语言，用正则切出文件/类/函数块。"""
         text = decode_text(data).replace("\r\n", "\n").replace("\r", "\n")
         extension = source.extension.lower()
         if not extension.startswith("."):
@@ -120,6 +123,7 @@ class CodeParser:
         text: str,
         language: CodeLanguage | None,
     ) -> list[dict]:
+        """按行正则识别符号块，返回 body/行号/类型等结构。"""
         lines = text.splitlines()
         pattern = (
             _PYTHON_SYMBOL

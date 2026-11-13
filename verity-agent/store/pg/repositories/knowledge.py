@@ -674,6 +674,49 @@ class DocumentRepository(BaseRepository):
         )
         return docs[0] if docs else None
 
+    async def acquire_index_lease(
+        self,
+        doc_id: UUID | str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 300,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Document:
+        """直接执行入库时获取文档租约并置 processing。
+
+        ``claim_index_jobs`` 是 worker 批量领取路径；``Indexer.index()`` 直接
+        调用流水线时没有 claim，需要在这里补 `index_locked_by/until`，否则后续
+        `update_index_progress/mark_index_completed` 的租约校验会查不到行。
+        """
+        if lease_seconds <= 0:
+            raise ValidationError("lease_seconds 必须 > 0")
+        worker = require_text(worker_id, "worker_id")
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                UPDATE documents
+                SET status = 'processing',
+                    index_locked_by = %s,
+                    index_locked_until = now() + make_interval(secs => %s),
+                    updated_at = now()
+                WHERE id = %s
+                  AND deleted_at IS NULL
+                  AND status IN ('pending', 'processing', 'failed', 'completed', 'deleting')
+                  -- 不抢占其他 worker 未过期的租约；同一 worker 可续租。
+                  AND (
+                      index_locked_until IS NULL
+                      OR index_locked_until < now()
+                      OR index_locked_by = %s
+                  )
+                RETURNING *
+                """,
+                (worker, lease_seconds, as_uuid(doc_id), worker),
+            )
+        if row is None:
+            raise NotFoundError("文档", doc_id)
+        return Document.model_validate(row)
+
     async def update_index_progress(
         self,
         doc_id: UUID | str,

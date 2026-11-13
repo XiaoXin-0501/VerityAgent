@@ -20,6 +20,8 @@ __all__ = ["PptxParser"]
 
 
 class PptxParser:
+    """PPTX 解析器；v1 未注册，保留给后续版本。"""
+
     parser_id = "pptx_python_pptx"
     parser_version = "1"
 
@@ -32,6 +34,7 @@ class PptxParser:
         kb_id: UUID,
         data: bytes,
     ) -> ParsedDocument:
+        """按幻灯片顺序提取文本框、表格与备注。"""
         try:
             from pptx import Presentation  # type: ignore[import-not-found]
         except ImportError as exc:

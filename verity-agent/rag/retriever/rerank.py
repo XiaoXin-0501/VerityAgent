@@ -10,6 +10,8 @@ __all__ = ["Reranker"]
 
 
 class Reranker(Protocol):
+    """重排协议；失败由检索流水线降级为 warning。"""
+
     async def rerank(
         self,
         query: str,

@@ -25,6 +25,7 @@ from .enums import (
     IndexingWarningCode,
     IndexMode,
     QualityFlag,
+    QueryIntent,
     RAGMode,
     RetrievalMode,
     RetrievalStage,
@@ -84,6 +85,8 @@ __all__ = [
 
 
 class _Model(BaseModel):
+    """RAG 模型基类：拒绝未知字段，默认不可变，字段名即序列化名。"""
+
     model_config = ConfigDict(
         extra="forbid", frozen=True, populate_by_name=True
     )
@@ -293,8 +296,8 @@ class ChunkingSpec(_Model):
     version: str = "1"
     doc_types: set[DocumentType] = Field(default_factory=set)
     block_types: set[BlockType] = Field(default_factory=set)
-    target_tokens: int = 512
-    max_tokens: int = 800
+    target_tokens: int = 300
+    max_tokens: int = 600
     min_tokens: int = 40
     overlap_tokens: int = 80
     respect_block_boundaries: bool = True
@@ -648,6 +651,7 @@ class RetrievalWarning(_Model):
     code: RetrievalWarningCode
     message: str
     stage: RetrievalStage | None = None
+    user_visible: bool = False
     details: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -670,5 +674,7 @@ class QueryAnalysis(_Model):
     language: str | None = None
     keywords: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
+    intent: QueryIntent | None = None
     suggested_filters: RetrievalFilter | None = None
+    # query rewrite 开启后生成的变体；关闭时为空
     variants: list[str] = Field(default_factory=list)

@@ -6,8 +6,8 @@ v1 提供三类实现：
 - ``DomainGraphExtractor``（``domain/extractor.py``）：领域词典 + jieba 补充；
 - ``LLMGraphExtractor``（``llm_graph.py``）：领域提示词驱动，可选降级到词典。
 
-本模块只保留与领域无关的公共能力：通用分词、关系过滤、白名单合并。
-领域画像与具体抽取器见 ``enrichment/domain``。
+本模块只保留与领域无关的公共能力：通用分词、关系过滤、白名单合并，
+以及“图抽取只看标题 + 正文”的准入规则。
 
 设计对应《RAG 模块数据结构设计》§7.3。
 """
@@ -20,18 +20,26 @@ from collections.abc import Awaitable, Callable, Iterable
 from typing import Protocol
 
 from config.rag import IndexerConfig
+from rag.shared.enums import BlockType
 from rag.shared.models import Chunk, GraphRelation, ChunkGraphExtraction
 
 from ..policy import IndexerPolicy, get_indexer_policy
 
 __all__ = [
+    "GRAPH_TEXT_BLOCK_TYPES",
     "GraphExtractor",
     "RelationExtractor",
     "RuleGraphExtractor",
     "extract_keywords",
     "filter_relations",
+    "graph_nearest_heading",
+    "graph_source_text",
     "merge_relation_whitelist",
 ]
+
+# 只有纯正文/列表参与图关键词与关系抽取；表格、代码、图注、公式等
+# 语义密度低，抽取结果噪声大，且会污染概念/关系图。
+GRAPH_TEXT_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.LIST})
 
 # 只保留名词性词性：普通名词/专名/动名词/动名词短语/形容词性名词/英文
 _KEYWORD_POS = frozenset({"n", "nr", "ns", "nt", "nz", "vn", "an", "eng"})
@@ -89,6 +97,39 @@ def _is_valid_keyword(value: str, *, stopwords: Iterable[str] = ()) -> bool:
     return True
 
 
+def graph_nearest_heading(chunk: Chunk) -> str:
+    """返回离当前 chunk 最近的标题，不带祖先路径。
+
+    图抽取只需要“本节标题”作为语义锚点；带完整 ``heading_path`` 会让同一
+    章节下每个 chunk 都重复抽取祖先标题里的实体，造成关键词/关系重复。
+    优先取 ``heading_path[-1]``；没有路径时再兼容 chunker 拼好的
+    ``"一级 > 二级"`` 展示串，只取最后一级。
+    """
+    path = [item.strip() for item in chunk.heading_path if item and item.strip()]
+    if path:
+        return path[-1]
+    heading = (chunk.heading or "").strip()
+    if not heading:
+        return ""
+    return heading.split(" > ")[-1].strip()
+
+
+def graph_source_text(chunk: Chunk) -> str | None:
+    """返回用于图抽取的文本：最近一级标题 + 正文。
+
+    表格/代码/图注/公式等低语义块返回 ``None``，由各抽取器直接产出空结果；
+    这样图里的概念、关系与 ChunkRef 只来自正文，不会把表头、代码符号或
+    公式变量误当成领域实体。
+    """
+    if chunk.block_type not in GRAPH_TEXT_BLOCK_TYPES:
+        return None
+    heading = graph_nearest_heading(chunk)
+    body = (chunk.content or "").strip()
+    if heading and body:
+        return f"{heading}\n{body}"
+    return heading or body
+
+
 def extract_keywords(
     text: str,
     *,
@@ -130,6 +171,7 @@ def extract_keywords(
     }
 
     def add(raw: str, *, from_ascii: bool = False) -> None:
+        """归一化后计入词频；英文技术词保留原始大小写用于展示。"""
         value = _normalize_keyword(raw)
         if not _is_valid_keyword(value, stopwords=extra_stopwords):
             return
@@ -242,15 +284,16 @@ class RuleGraphExtractor:
         self.policy = policy or get_indexer_policy()
 
     async def extract(self, chunk: Chunk) -> ChunkGraphExtraction:
-        """抽取关键词；关系为空或由注入的抽取器提供。"""
+        """抽取关键词；关系为空或由注入的抽取器提供。
+
+        只处理标题 + 正文；表格/代码等低语义块返回空结果，不建图。
+        """
         if self.config.graph_extraction_mode == "off":
             return ChunkGraphExtraction(chunk_id=chunk.chunk_id)
 
-        # 标题路径参与关键词抽取：表格/代码正文很短时，标题能补足语义。
-        heading = " ".join(chunk.heading_path) if chunk.heading_path else (
-            chunk.heading or ""
-        )
-        text = f"{heading}\n{chunk.content}" if heading else chunk.content
+        text = graph_source_text(chunk)
+        if not text:
+            return ChunkGraphExtraction(chunk_id=chunk.chunk_id)
         keywords = extract_keywords(
             text,
             top_k=self.config.graph_max_keywords_per_chunk,

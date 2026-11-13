@@ -18,6 +18,8 @@ __all__ = ["OcrParser"]
 
 
 class OcrParser:
+    """图片 OCR 解析器；v1 未注册，保留给后续版本。"""
+
     parser_id = "image_paddleocr"
     parser_version = "1"
 
@@ -30,6 +32,7 @@ class OcrParser:
         kb_id: UUID,
         data: bytes,
     ) -> ParsedDocument:
+        """用 PaddleOCR 识别图片，把所有文本行合成一个段落块。"""
         try:
             from paddleocr import PaddleOCR  # type: ignore[import-not-found]
         except ImportError as exc:

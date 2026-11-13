@@ -10,6 +10,8 @@ __all__ = ["GraphExpander"]
 
 
 class GraphExpander(Protocol):
+    """图扩展协议：seed 实体 → 1 跳强关系 → next-hop 实体。"""
+
     async def expand(
         self,
         *,

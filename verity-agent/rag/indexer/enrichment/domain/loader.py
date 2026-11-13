@@ -45,12 +45,12 @@ def resolve_domain_profile_path(
     if path:
         candidate = Path(path).expanduser()
         if candidate.is_dir():
-            candidate = candidate / _file_name(name or "medical")
+            candidate = candidate / _file_name(name or "pet_medical")
         if not candidate.is_file():
             raise _error(f"领域画像文件不存在: {candidate}", name=name)
         return candidate
 
-    domain_name = (name or "medical").strip()
+    domain_name = (name or "pet_medical").strip()
     if domain_name.lower().endswith(".json"):
         domain_name = domain_name[:-5]
     if not _NAME_RE.match(domain_name):
@@ -101,7 +101,7 @@ def load_domain_profile(
 
 
 def _file_name(name: str) -> str:
-    """领域名 → 文件名；允许调用方直接写 ``medical.json``。"""
+    """领域名 → 文件名；允许调用方直接写 ``pet_medical.json``。"""
     return name if name.lower().endswith(".json") else f"{name}.json"
 
 
@@ -112,7 +112,7 @@ def _error(
     details: dict[str, str] | None = None,
 ) -> RagError:
     """统一收敛为 RagError(INVALID_CONFIG)，便于启动期直接暴露配置问题。"""
-    merged: dict[str, str] = {"profile": name or "medical"}
+    merged: dict[str, str] = {"profile": name or "pet_medical"}
     merged.update(details or {})
     return RagError(
         RagErrorCode.INVALID_CONFIG,

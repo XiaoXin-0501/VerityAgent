@@ -11,6 +11,8 @@ __all__ = ["RagErrorCode", "RagError"]
 
 
 class RagErrorCode(StrEnum):
+    """RAG 公共错误码；与 HTTP 状态和是否可重试解耦。"""
+
     INVALID_CONFIG = "INVALID_CONFIG"
     INVALID_REQUEST = "INVALID_REQUEST"
     PERMISSION_DENIED = "PERMISSION_DENIED"
@@ -47,6 +49,7 @@ class RagError(VerityError):
         cause: str | None = None,
         retryable: bool | None = None,
     ) -> None:
+        """保存错误码、可重试性与 HTTP 映射；message 需已脱敏。"""
         self.error_code = code
         self.cause = cause
         self.code = f"RAG_{code.value}"

@@ -61,4 +61,7 @@ class VlmLayoutEngine(Protocol):
 
     name: str
 
-    def available(self) -> bool: ...
+    def available(self) -> bool:
+        """引擎依赖是否就绪；由具体实现提供。"""
+        ...
+

@@ -25,7 +25,10 @@ _HEADING_TAGS = {f"h{level}": level for level in range(1, 7)}
 
 
 class _Collector(HTMLParser):
+    """把 HTML 结构流式收集成标题/段落/代码/表格条目。"""
+
     def __init__(self) -> None:
+        """初始化文本缓冲与表格单元格状态。"""
         super().__init__(convert_charrefs=True)
         self.items: list[tuple[str, str, int | None, TableBlock | None]] = []
         self._buffer: list[str] = []
@@ -36,6 +39,7 @@ class _Collector(HTMLParser):
         self._cell: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        """遇到结构标签时落盘上一段文本并切换当前上下文。"""
         if tag in _HEADING_TAGS or tag in {"p", "li", "pre", "code"}:
             self._flush()
             self._tag = tag
@@ -49,6 +53,7 @@ class _Collector(HTMLParser):
             self._cell = []
 
     def handle_endtag(self, tag: str) -> None:
+        """闭合标签时完成单元格/行/表格或当前文本条目。"""
         if tag in {"td", "th"} and self._row is not None and self._cell is not None:
             self._row.append(" ".join("".join(self._cell).split()))
             self._cell = None
@@ -68,12 +73,14 @@ class _Collector(HTMLParser):
             self._flush()
 
     def handle_data(self, data: str) -> None:
+        """把文本写入当前单元格或当前块缓冲。"""
         if self._cell is not None:
             self._cell.append(data)
         elif self._tag is not None:
             self._buffer.append(data)
 
     def _flush(self) -> None:
+        """把当前缓冲的文本落成一个条目并清空状态。"""
         text = " ".join("".join(self._buffer).split())
         if text and self._tag:
             self.items.append((self._tag, text, self._level, None))
@@ -83,6 +90,8 @@ class _Collector(HTMLParser):
 
 
 class HtmlParser:
+    """HTML 解析器；v1 未注册，保留给后续版本。"""
+
     parser_id = "html"
     parser_version = "1"
 
@@ -95,6 +104,7 @@ class HtmlParser:
         kb_id: UUID,
         data: bytes,
     ) -> ParsedDocument:
+        """用 stdlib 收集正文/标题/表格，再按阅读顺序构造内容块。"""
         collector = _Collector()
         collector.feed(decode_text(data))
         collector.close()
