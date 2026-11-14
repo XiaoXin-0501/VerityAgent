@@ -13,7 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from agent.llm.types import LLMUsage, ModelPricing, ModelPurpose
+from agent.llm import LLMUsage, ModelPricing, ModelPurpose
 from utils.ids import uuid7
 from utils.time import utcnow
 

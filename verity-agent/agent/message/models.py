@@ -3,7 +3,7 @@
 - 基类只放公共字段，角色私有字段挂在子类；
 - ``content`` 是文本正文；多模态/思考/工具/产物都是旁路字段；
 - ``seq_no`` 只在存储层（``StoredMessage``），不进领域消息；
-- ``GenerationInfo`` 的权威定义在 ``agent.llm.types``，这里只引用。
+- ``GenerationInfo`` 的权威定义在 ``agent.llm``，这里只引用。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from agent.llm.types import GenerationInfo
+from agent.llm import GenerationInfo
 from utils.ids import uuid7
 from utils.serialization import to_jsonable
 from utils.time import utcnow
@@ -24,9 +24,9 @@ from .enum import (
     ImageDetail,
     MessageRole,
     MessageStatus,
+    MessageTurnStatus,
     SystemOrigin,
     ToolCallStatus,
-    TurnStatus,
 )
 
 __all__ = [
@@ -278,7 +278,7 @@ class Turn(BaseModel):
     ordinal: int = Field(ge=1)
     user_message_id: UUID
     message_ids: list[UUID] = Field(default_factory=list)
-    status: TurnStatus = TurnStatus.RUNNING
+    status: MessageTurnStatus = MessageTurnStatus.RUNNING
     started_at: datetime = Field(default_factory=utcnow)
     ended_at: datetime | None = None
 

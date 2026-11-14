@@ -29,7 +29,8 @@ class ModelConfig(ConfigModel):
 
     # 应用模型 id；LLM / RAG 配置引用它，全局唯一
     id: str = Field(min_length=1)
-    # 厂商/适配器名：chat=openai/anthropic；embedding=bge/openai；rerank=cohere/bge/dashscope
+    # 厂商/适配器名：chat=openai/anthropic/deepseek/vllm；
+    # embedding=bge/openai；rerank=cohere/bge/dashscope/qwen
     provider: str = Field(min_length=1)
     # 厂商实际模型名（调用 API 时发送）
     model: str = Field(min_length=1)

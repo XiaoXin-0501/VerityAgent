@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
-from agent.llm.types import LLMUsage, ModelPricing
+from agent.llm import LLMUsage, ModelPricing
 from config.hooks import TokenUsageHookConfig
 
 from utils.time import utcnow

@@ -1,0 +1,170 @@
+"""Agent 依赖端口。
+
+AgentLoop 只依赖这些窄协议；生产适配器在 ``agent.adapters`` 中实现，
+测试用 fake 端口即可，不启动 PG/Redis/Provider。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+from uuid import UUID
+
+from agent.llm import FilePart, LLMRequest, LLMResponse
+from agent.message.models import (
+    AssistantMessage,
+    StoredMessage,
+    ToolMessage,
+    UserMessage,
+)
+from agent.tools.models import ToolContext, ToolResult, ToolSelection
+
+__all__ = [
+    "LeasePort",
+    "MessagePort",
+    "LLMPort",
+    "ToolPort",
+    "HookPort",
+    "AttachmentPort",
+    "AgentDependencies",
+]
+
+
+class LeasePort(Protocol):
+    """会话级 run 租约；同一会话同一时刻只允许一个 run。"""
+
+    async def acquire(
+        self,
+        conversation_id: UUID,
+        run_id: str,
+        lease_seconds: int,
+    ) -> bool:
+        """条件抢占；成功 True，已有活跃 run 返回 False。"""
+        ...
+
+    async def heartbeat(self, conversation_id: UUID, run_id: str, lease_seconds: int) -> bool:
+        """续租；租约已丢失返回 False。"""
+        ...
+
+    async def release(
+        self,
+        conversation_id: UUID,
+        run_id: str,
+        status: str,
+    ) -> None:
+        """幂等释放租约并写终态投影。"""
+        ...
+
+
+class MessagePort(Protocol):
+    """消息事实源；Agent 只做领域对象转换，不拼 SQL/seq_no。"""
+
+    async def find_by_client_message_id(
+        self,
+        conversation_id: UUID,
+        client_message_id: UUID,
+    ) -> StoredMessage | None:
+        """幂等查询；未命中返回 None。"""
+        ...
+
+    async def append_user(
+        self,
+        message: UserMessage,
+        *,
+        client_message_id: UUID,
+    ) -> StoredMessage:
+        """追加用户消息并分配 seq_no。"""
+        ...
+
+    async def append_assistant(self, message: AssistantMessage) -> StoredMessage:
+        """追加 assistant 消息并分配 seq_no。"""
+        ...
+
+    async def append_tool(self, message: ToolMessage) -> StoredMessage:
+        """追加 ToolMessage 并分配 seq_no。"""
+        ...
+
+    async def load_window(
+        self,
+        conversation_id: UUID,
+        *,
+        limit: int = 40,
+    ) -> list[StoredMessage]:
+        """按 seq_no 升序读取最近消息。"""
+        ...
+
+
+class LLMPort(Protocol):
+    """LLM 应用层端口；Agent 不直接 import provider。"""
+
+    async def chat(self, request: LLMRequest) -> LLMResponse:
+        """非流式调用；失败抛异常，由 loop 转成 AgentError。"""
+        ...
+
+
+class ToolPort(Protocol):
+    """工具选择与批量执行端口。"""
+
+    def select(self, permissions: frozenset[str]) -> ToolSelection:
+        """按权限生成本次暴露的工具集合。"""
+        ...
+
+    async def execute_batch(
+        self,
+        calls: list,
+        context: ToolContext,
+        *,
+        max_concurrency: int | None = None,
+    ) -> list[ToolResult]:
+        """执行一批工具；返回顺序与入参一致。"""
+        ...
+
+
+class HookPort(Protocol):
+    """Hooks 最小端口；没有 HookScope 时可不注入。"""
+
+    async def emit(self, event: str, payload: Any = None, **kwargs: Any) -> Any:
+        """发送观测事件；失败不应影响主循环。"""
+        ...
+
+
+class AttachmentPort(Protocol):
+    """会话附件解析端口；把 file_id 解析成模型可消费的文本/URL。"""
+
+    async def resolve(
+        self,
+        file_id: UUID,
+        *,
+        conversation_id: UUID,
+        user_id: UUID,
+    ) -> FilePart:
+        """返回可发送给模型的 FilePart；未就绪时抛异常。"""
+        ...
+
+
+@dataclass(slots=True)
+class AgentDependencies:
+    """Agent 运行依赖；只放端口和稳定配置，不放全局单例。"""
+
+    # LLM 调用端口
+    llm: LLMPort
+    # 默认模型 id；请求可覆盖
+    model_id: str
+    # 消息事实源
+    messages: MessagePort
+    # 会话租约
+    leases: LeasePort
+    # 工具选择/执行；为空表示本次运行不提供工具
+    tools: ToolPort | None = None
+    # Hooks；为空表示不观测
+    hooks: HookPort | None = None
+    # 附件解析；为空表示仅支持已带 url/text 的附件
+    attachments: AttachmentPort | None = None
+    # 可选系统提示词；ContextAssembler 尚未接入时的最小替代
+    system_prompt: str | None = None
+    # 读取最近消息条数；后续由 ContextBudgetPlanner 取代
+    history_limit: int = 40
+    # 传给 ToolContext 的共享服务对象（RAG/存储等由工具执行器解释）
+    services: Any = None
+    # 扩展元数据；不进入 Prompt
+    metadata: dict[str, Any] = field(default_factory=dict)

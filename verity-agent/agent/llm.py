@@ -1,7 +1,9 @@
-"""LLM 应用层公共类型（权威定义）。
+"""LLM 应用层公共类型（单文件版）。
 
-消息模块的 ``GenerationInfo`` 只引用这里的 ``FinishReason / LLMUsage``，
-不重复定义字段；Provider 层不依赖本模块（D-39）。
+消息模块的 ``GenerationInfo``、Hooks 的 ``LLMUsage``、Agent 的
+``LLMRequest/LLMResponse`` 都从这里引用，不重复定义字段。
+ChatService/ModelRegistry/PromptBuilder/Streaming 尚未实现；未来真正需要
+服务实现时再拆分本模块为包，不提前造空文件。
 """
 
 from __future__ import annotations
@@ -13,11 +15,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from config.llm import LLMConfig, StructuredOutputConfig
+from exception.llm import LLMError, LLMErrorCode
 from provider.base import ProviderModelSpec
 from provider.enums import ResponseFormatType, ToolChoiceMode, UsageSource
 from utils.time import utcnow
 
 __all__ = [
+    "LLMConfig",
+    "StructuredOutputConfig",
+    "LLMError",
+    "LLMErrorCode",
     "ModelKind",
     "ModelPurpose",
     "ProviderModelRef",

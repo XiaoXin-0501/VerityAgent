@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from common.enums import RAGMode
+
 __all__ = [
     "DocumentType",
     "SUPPORTED_DOC_TYPES",
@@ -246,12 +248,6 @@ class RetrievalMode(StrEnum):
     HYBRID = "hybrid"
     BM25 = "bm25"
     VECTOR = "vector"
-
-
-class RAGMode(StrEnum):
-    TOOL = "tool"
-    INJECTED = "injected"
-    OFF = "off"
 
 
 class RetrievalStage(StrEnum):

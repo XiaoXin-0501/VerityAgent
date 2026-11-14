@@ -11,6 +11,7 @@ __all__ = [
     "ImageDetail",
     "ToolCallStatus",
     "ArtifactKind",
+    "MessageTurnStatus",
     "TurnStatus",
     "MessageContentVersion",
 ]
@@ -61,12 +62,18 @@ class ArtifactKind(StrEnum):
     OTHER = "other"
 
 
-class TurnStatus(StrEnum):
+class MessageTurnStatus(StrEnum):
+    """消息表的只读回合投影状态；运行态请用 ``agent.runtime.TurnStatus``。"""
+
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"
     CANCELLED = "cancelled"
+
+
+# 兼容旧导入；新代码应使用 MessageTurnStatus 以区分运行态 TurnStatus。
+TurnStatus = MessageTurnStatus
 
 
 class MessageContentVersion(IntEnum):

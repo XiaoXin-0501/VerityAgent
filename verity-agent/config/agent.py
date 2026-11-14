@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .base import ConfigModel
 
@@ -48,3 +48,12 @@ class AgentConfig(ConfigModel):
     run_state_ttl_s: int = Field(default=3600, ge=60)
     # 取消 run 时等待工具/流收尾的宽限时间（秒）
     cancel_grace_s: float = Field(default=5.0, ge=0)
+
+    @model_validator(mode="after")
+    def _check_lease_heartbeat(self) -> "AgentConfig":
+        """续租间隔必须短于租约，否则会在租约过期后才尝试续租。"""
+        if self.policy.run_heartbeat_interval_s >= self.policy.run_lease_seconds:
+            raise ValueError(
+                "run_heartbeat_interval_s 必须小于 run_lease_seconds"
+            )
+        return self

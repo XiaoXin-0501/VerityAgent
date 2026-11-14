@@ -32,11 +32,18 @@ class ProviderRegistry:
         name = provider.name
         if name in self._providers:
             raise ConfigurationError(f"Provider 重复注册: {name}")
+        handles = [(spec.id, provider.get_model(spec.id)) for spec in provider.list_models()]
+        for model_id, _handle in handles:
+            existing = self._models_by_id.get(model_id)
+            if existing is not None:
+                raise ConfigurationError(
+                    f"模型 id 被多个 provider 注册: {model_id}",
+                    details={"provider": name},
+                )
         self._providers[name] = provider
-        for spec in provider.list_models():
-            handle = provider.get_model(spec.id)
-            self._models[(name, spec.id)] = handle
-            self._models_by_id[spec.id] = handle
+        for model_id, handle in handles:
+            self._models[(name, model_id)] = handle
+            self._models_by_id[model_id] = handle
 
     def register_many(self, providers: list[BaseProvider]) -> None:
         for provider in providers:
@@ -74,13 +81,18 @@ class ProviderRegistry:
             self._models[key] = handle
         return handle
 
-    def get_model_by_id(self, model_id: str) -> ModelHandle:
-        """按应用模型 id 取句柄；LLM ModelRegistry 后续直接使用。"""
+    def get_model_by_id(self, model_id: str, *, include_disabled: bool = False) -> ModelHandle:
+        """按应用模型 id 取句柄；默认拒绝禁用模型，避免延迟到调用期报错。"""
         handle = self._models_by_id.get(model_id)
         if handle is None:
             raise ConfigurationError(
                 f"模型不存在: {model_id}",
                 details={"model_id": model_id},
+            )
+        if not include_disabled and not handle.spec.enabled:
+            raise ConfigurationError(
+                f"模型已禁用: {model_id}",
+                details={"model_id": model_id, "provider": handle.spec.provider},
             )
         return handle
 

@@ -1,0 +1,147 @@
+"""PG 端口适配器：run 租约与会话消息事实源。"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from agent.message.codec import decode_stored_row, encode_content
+from agent.message.enum import MessageStatus as AgentMessageStatus
+from agent.message.enum import MessageRole as AgentMessageRole
+from agent.message.models import (
+    AssistantMessage,
+    StoredMessage,
+    ToolMessage,
+    UserMessage,
+)
+from store.pg.models.enums import (
+    MessageRole as PgMessageRole,
+    MessageStatus as PgMessageStatus,
+    RunStatus as PgRunStatus,
+)
+from store.pg.repositories import (
+    ConversationMessageRepository,
+    ConversationRepository,
+)
+
+__all__ = ["PgLeaseAdapter", "PgMessageAdapter"]
+
+
+class PgLeaseAdapter:
+    """会话 run 租约适配器；映射到 conversations.current_run_id。"""
+
+    def __init__(
+        self,
+        repository: ConversationRepository | None = None,
+        *,
+        lease_seconds: int = 60,
+    ) -> None:
+        """保存租约仓储与默认租约时长。"""
+        self.repository = repository or ConversationRepository()
+        self.lease_seconds = lease_seconds
+
+    async def acquire(self, conversation_id: UUID, run_id: str, lease_seconds: int) -> bool:
+        """条件抢占租约；已有活跃 run 返回 False。"""
+        try:
+            run_uuid = UUID(str(run_id))
+        except ValueError:
+            return False
+        conversation = await self.repository.try_acquire_run(
+            conversation_id,
+            run_uuid,
+            lease_seconds=lease_seconds,
+        )
+        return conversation is not None
+
+    async def heartbeat(self, conversation_id: UUID, run_id: str, lease_seconds: int) -> bool:
+        """续租；租约不属于该 run 时返回 False。"""
+        return await self.repository.heartbeat_run(
+            conversation_id,
+            run_id,
+            lease_seconds=lease_seconds,
+        )
+
+    async def release(self, conversation_id: UUID, run_id: str, status: str) -> None:
+        """释放租约；幂等，终态映射到 PG RunStatus。"""
+        try:
+            run_uuid = UUID(str(run_id))
+        except ValueError:
+            return
+        await self.repository.release_run(
+            conversation_id,
+            run_uuid,
+            final_status=PgRunStatus(status),
+        )
+
+
+class PgMessageAdapter:
+    """ConversationMessageRepository -> Agent MessagePort。"""
+
+    def __init__(
+        self,
+        repository: ConversationMessageRepository | None = None,
+    ) -> None:
+        """保存消息仓储；seq_no 由仓储事务分配。"""
+        self.repository = repository or ConversationMessageRepository()
+
+    async def find_by_client_message_id(
+        self,
+        conversation_id: UUID,
+        client_message_id: UUID,
+    ) -> StoredMessage | None:
+        """幂等查询；解码失败时按未命中处理，避免阻断新消息。"""
+        row = await self.repository.find_by_client_message_id(
+            conversation_id,
+            client_message_id,
+        )
+        if row is None:
+            return None
+        try:
+            return decode_stored_row(row.model_dump())
+        except Exception:  # noqa: BLE001 - 坏行不能阻断运行
+            return None
+
+    async def append_user(
+        self,
+        message: UserMessage,
+        *,
+        client_message_id: UUID,
+    ) -> StoredMessage:
+        """追加用户消息；content 使用消息 codec v2。"""
+        row = await self.repository.append(
+            message.conversation_id,
+            PgMessageRole(AgentMessageRole.USER.value),
+            encode_content(message),
+            status=PgMessageStatus(AgentMessageStatus.COMPLETED.value),
+            client_message_id=client_message_id,
+        )
+        return decode_stored_row(row.model_dump())
+
+    async def append_assistant(self, message: AssistantMessage) -> StoredMessage:
+        """追加 assistant 消息；framework 阶段一次写入终态。"""
+        row = await self.repository.append(
+            message.conversation_id,
+            PgMessageRole(AgentMessageRole.ASSISTANT.value),
+            encode_content(message),
+            status=PgMessageStatus(message.status.value),
+        )
+        return decode_stored_row(row.model_dump())
+
+    async def append_tool(self, message: ToolMessage) -> StoredMessage:
+        """追加 ToolMessage；ToolResult -> ToolMessage 已由 Agent 完成。"""
+        row = await self.repository.append(
+            message.conversation_id,
+            PgMessageRole(AgentMessageRole.TOOL.value),
+            encode_content(message),
+            status=PgMessageStatus(message.status.value),
+        )
+        return decode_stored_row(row.model_dump())
+
+    async def load_window(
+        self,
+        conversation_id: UUID,
+        *,
+        limit: int = 40,
+    ) -> list[StoredMessage]:
+        """按 seq_no 升序读取最近消息，作为 v1 消息窗口。"""
+        rows = await self.repository.get_recent(conversation_id, limit=limit)
+        return [decode_stored_row(row.model_dump()) for row in rows]

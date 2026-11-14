@@ -15,6 +15,7 @@ from .enum import (
     MessageContentVersion,
     MessageRole,
     MessageStatus,
+    MessageTurnStatus,
     SystemOrigin,
     ToolCallStatus,
     TurnStatus,
@@ -54,6 +55,7 @@ __all__ = [
     "ImageDetail",
     "ToolCallStatus",
     "ArtifactKind",
+    "MessageTurnStatus",
     "TurnStatus",
     "MessageContentVersion",
     # models
