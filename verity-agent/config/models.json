@@ -20,7 +20,30 @@
         "currency": "CNY"
       },
       "defaults": {
-        "temperature": 0.3
+        "temperature": 0.5
+      }
+    },
+    {
+      "id": "rerank-default",
+      "provider": "dashscope",
+      "model": "qwen3.7-text-rerank",
+      "kind": "rerank",
+      "base_url": "https://maas.qianwenaiapi.com",
+      "api_key_env": "QWEN_API_KEY",
+      "enabled": true,
+      "capabilities": {
+        "max_documents": 100,
+        "max_query_tokens": 512,
+        "max_document_tokens": 4096,
+        "max_batch_size": 16,
+        "supports_return_documents": true
+      },
+      "pricing": {
+        "input_per_million": 0.5,
+        "currency": "CNY"
+      },
+      "metadata": {
+        "endpoint_path": "/api/v1/services/rerank/text-rerank/text-rerank"
       }
     },
     {

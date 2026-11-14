@@ -302,7 +302,7 @@
     {
       // 应用模型 id；RAG__RETRIEVER__RERANK_MODEL_ID 引用它
       "id": "rerank-default",
-      // rerank 适配器：cohere / bge
+      // rerank 适配器：cohere / bge / dashscope（qwen 百炼原生 rerank）
       "provider": "cohere",
       // 厂商实际模型名
       "model": "rerank-v3.5",
@@ -353,9 +353,15 @@
         "effective_from": "2026-11-01T00:00:00Z"
       },
       // rerank 不使用 defaults
+      // 百炼/DashScope 原生 rerank 示例：
+      //   "provider": "dashscope",
+      //   "base_url": "https://maas.qianwenaiapi.com",
+      //   "metadata": {"endpoint_path": "/api/v1/services/rerank/text-rerank/text-rerank"}
       "metadata": {
-        // 文档发送格式：text（字符串数组）/ object（[{"text":...}]）
+        // Cohere/BGE：文档发送格式 text（字符串数组）/ object（[{"text":...}]）
         "documents_format": "text"
+        // DashScope/百炼原生 rerank 的接口路径；不填使用默认原生路径
+        // "endpoint_path": "/api/v1/services/rerank/text-rerank/text-rerank"
       }
     }
   ]

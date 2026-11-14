@@ -22,6 +22,7 @@ from provider.llm.openai_chat import OpenAIChatProvider
 from provider.llm.openai_responses import OpenAIResponsesChatProvider
 from provider.model_specs import model_spec_from_config
 from provider.reranker.cohere import BgeRerankProvider, CohereRerankProvider
+from provider.reranker.dashscope import DashScopeRerankProvider
 from provider.registry import ProviderRegistry
 
 __all__ = ["build_provider", "build_registry"]
@@ -94,12 +95,14 @@ def build_provider(model: ModelConfig) -> BaseProvider:
             return BgeEmbeddingProvider(config)
         return OpenAIEmbeddingProvider(config)
     if model.kind is ProviderKind.RERANK:
-        if provider not in {"cohere", "bge"}:
+        if provider not in {"cohere", "bge", "dashscope", "qwen"}:
             raise ConfigurationError(
                 f"不支持的 rerank provider: {model.provider}",
                 details={"model_id": model.id},
             )
         config = RerankProviderConfig(kind=ProviderKind.RERANK, **_base_kwargs(model))
+        if provider in {"dashscope", "qwen"}:
+            return DashScopeRerankProvider(config)
         if provider == "bge":
             return BgeRerankProvider(config)
         return CohereRerankProvider(config)

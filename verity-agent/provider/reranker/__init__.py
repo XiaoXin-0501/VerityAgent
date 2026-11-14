@@ -2,6 +2,7 @@
 
 from .base import RerankModel, RerankProvider
 from .cohere import BgeRerankProvider, CohereRerankModel, CohereRerankProvider
+from .dashscope import DashScopeRerankModel, DashScopeRerankProvider
 from .types import (
     RerankDocument,
     RerankRequest,
@@ -16,6 +17,8 @@ __all__ = [
     "CohereRerankModel",
     "CohereRerankProvider",
     "BgeRerankProvider",
+    "DashScopeRerankModel",
+    "DashScopeRerankProvider",
     "RerankRequest",
     "RerankResponse",
     "RerankResult",
