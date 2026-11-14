@@ -45,6 +45,8 @@ class CacheScope(StrEnum):
     MEMORY_PROFILE = "memory:profile"
     MEMORY_SUMMARY = "memory:summary"
     MEMORY_FACTS = "memory:facts"
+    # 检索前文档状态（completed/processing/...）；短 TTL，避免重切片期间命中旧状态
+    DOC_STATUS = "doc_status"
     DOC_META = "doc_meta"
 
 
@@ -62,7 +64,8 @@ DEFAULT_TTLS: dict[CacheScope, int] = {
     CacheScope.MEMORY_PROFILE: 600,
     CacheScope.MEMORY_SUMMARY: 600,
     CacheScope.MEMORY_FACTS: 300,
-    CacheScope.DOC_META: 3_600,
+    CacheScope.DOC_STATUS: 60,
+    CacheScope.DOC_META: 300,
 }
 
 
@@ -73,24 +76,12 @@ class CachePolicy(BaseModel):
 
     # 是否启用该缓存
     enabled: bool = True
-    # 后端类型；v1 固定 redis（Prompt cache 不属于 Redis）
-    backend: str = "redis"
     # TTL（秒）；None 时使用 scope 默认值
-    ttl_s: int | None = None
+    ttl_s: int | None = Field(default=None, ge=0)
     # 单值大小上限；超过直接跳过缓存
     max_value_bytes: int = Field(default=64 * 1024, gt=0)
-    # 参与 key 的字段；None 表示全部
-    key_fields: list[str] | None = None
-    # 不参与 key 的字段（如耗时/展示字段）
-    exclude_fields: list[str] = Field(default_factory=list)
-    # key 是否带权限摘要，防止跨用户命中
-    include_permission: bool = True
-    # 版本来源字段名，如 knowledge_bases.index_version
-    version_source: str | None = None
-    # Redis 错误策略：miss（回源）/ raise
+    # Redis 错误策略：miss（回源）/ raise（由熔断包装层处理）
     on_error: str = "miss"
-    # 序列化方式：json / msgpack（v1 只实现 json）
-    serialization: str = "json"
     # TTL 随机抖动比例，防雪崩
     ttl_jitter: float = Field(default=0.1, ge=0.0, le=1.0)
 
@@ -288,7 +279,17 @@ class RedisCache:
         size = len(payload.encode("utf-8"))
         if size > cfg.max_value_bytes:
             return False
-        effective_ttl = ttl_s or (cfg.effective_ttl(actual_scope) if actual_scope else 300)
+        if ttl_s is not None:
+            # 显式 0/负数表示“不缓存”，不能悄悄回退到默认 TTL。
+            if ttl_s <= 0:
+                return False
+            effective_ttl = int(ttl_s)
+        else:
+            effective_ttl = (
+                cfg.effective_ttl(actual_scope) if actual_scope else 300
+            )
+        if effective_ttl <= 0:
+            return False
         effective_ttl = max(1, int(effective_ttl * (1 + random.uniform(0, cfg.ttl_jitter))))
         try:
             await self.redis.set(redis_key, payload, ex=effective_ttl)

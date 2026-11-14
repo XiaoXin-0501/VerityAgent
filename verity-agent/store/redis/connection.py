@@ -12,7 +12,7 @@
 
     await init_redis()
     redis = get_redis()
-    await redis.set("verity:cache:foo", "bar", ex=60)
+    await redis.set(f"{settings.redis.namespace}:cache:foo", "bar", ex=60)
     await close_redis()
 """
 

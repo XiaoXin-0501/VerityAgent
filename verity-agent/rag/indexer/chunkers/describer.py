@@ -164,7 +164,9 @@ class ChatTableDescriber:
         self.max_output_tokens = max_output_tokens
         self.max_chars = max_chars
         self.cache = cache
-        self.cache_enabled = bool(cache_enabled and cache is not None)
+        self.cache_enabled = bool(
+            cache_enabled and cache is not None and int(cache_ttl_s) > 0
+        )
         self.cache_ttl_s = int(cache_ttl_s)
 
     async def describe(
@@ -288,7 +290,9 @@ class ChatCodeDescriber:
         self.max_output_tokens = max_output_tokens
         self.max_chars = max_chars
         self.cache = cache
-        self.cache_enabled = bool(cache_enabled and cache is not None)
+        self.cache_enabled = bool(
+            cache_enabled and cache is not None and int(cache_ttl_s) > 0
+        )
         self.cache_ttl_s = int(cache_ttl_s)
 
     async def describe(

@@ -37,6 +37,7 @@ class ImagePdfConfig(ConfigModel):
     long_page_ratio: float = Field(default=8.0, ge=2.0)
     # tile 高度/重叠（像素，渲染后）
     tile_height: int = Field(default=1400, ge=400)
+    # 相邻 tile 重叠像素；避免长图在 tile 边界切断行
     tile_overlap: int = Field(default=140, ge=0)
     # 单文档最多处理页数；超出部分记 warning
     max_pages: int = Field(default=100, ge=1)
@@ -44,22 +45,29 @@ class ImagePdfConfig(ConfigModel):
     max_tiles_per_page: int = Field(default=24, ge=1)
     # OCR 置信度阈值；低于仍保留，但标记 low_confidence
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    # MinerU CLI 命令与后端
+    # MinerU 命令行；mini 安装可用 `mineru`，自定义环境可改绝对路径
     mineru_command: str = "mineru"
-    # 可选：连接独立的 MinerU API 服务，避免主进程加载重型依赖
+    # 可选：连接独立 MinerU API 服务，避免主进程加载重型依赖
     mineru_api_url: str | None = None
+    # MinerU pipeline 后端（pipeline / vlm 等，取决于安装版本）
     mineru_backend: str = "pipeline"
+    # MinerU 解析方法（ocr / txt）
     mineru_method: str = "ocr"
+    # MinerU OCR 语言（ch / en / ...）
     mineru_language: str = "ch"
-    # 是否启用表格/公式识别
+    # 是否启用 MinerU 表格识别
     mineru_table_enabled: bool = True
+    # 是否启用 MinerU 公式识别
     mineru_formula_enabled: bool = False
+    # MinerU 单文档超时（秒）
     mineru_timeout_s: int = Field(default=900, ge=30)
-    # 模型源：modelscope / huggingface / auto
+    # MinerU 模型源：modelscope / huggingface / auto
     mineru_model_source: str = "modelscope"
     # 预留 LLM 后处理；默认关闭
     llm_enhance_enabled: bool = False
+    # LLM 后处理模型 id；llm_enhance_enabled=true 时使用
     llm_model_id: str | None = None
+    # LLM 后处理要执行的 processor 名称；空表示全部
     llm_processors: list[str] = Field(default_factory=list)
 
 
@@ -91,43 +99,21 @@ class QualityPolicyConfig(ConfigModel):
 
     # 有文本页占比低于此值 → 拒绝或 OCR
     min_text_coverage: float = Field(default=0.3, ge=0.0, le=1.0)
-    # OCR 文本占比过高 → 标记
-    max_ocr_ratio: float = Field(default=0.9, ge=0.0, le=1.0)
-    # 语言检测最低置信度
-    min_language_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    # 单页最小有效 token
-    min_page_tokens: int = Field(default=20, ge=0)
-    # 块最小 token
-    min_block_tokens: int = Field(default=10, ge=0)
     # chunk 最小 token
     min_chunk_tokens: int = Field(default=50, ge=0)
-    # 页眉页脚/导航占比上限
-    max_boilerplate_ratio: float = Field(default=0.3, ge=0.0, le=1.0)
-    # 近重复阈值
-    max_duplicate_similarity: float = Field(default=0.95, ge=0.0, le=1.0)
     # 表格置信度下限
     min_table_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     # OCR 置信度下限
     min_ocr_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    # 是否允许代码解析 fallback
-    code_parse_fallback_allowed: bool = True
     # 是否丢弃低质量 chunk；默认保留并标记
     drop_low_quality_chunks: bool = False
 
 
 class DedupPolicyConfig(ConfigModel):
-    """文档/块/chunk 去重策略。"""
+    """chunk 内容去重策略；文档/块级去重留给上传/解析入口。"""
 
-    # 是否按 sha256 做文档级精确去重
-    document_sha256: bool = True
-    # 是否做文档级近重复检测
-    near_duplicate: bool = True
-    # 块级内容 hash 去重
-    block_hash: bool = True
     # chunk 级内容 hash 去重
     chunk_hash: bool = True
-    # 近重复阈值
-    similarity_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
 
 
 class IndexerConfig(ConfigModel):
@@ -143,10 +129,6 @@ class IndexerConfig(ConfigModel):
             "spreadsheet",
         ]
     )
-    # 默认 profile 名（解析/切片组合）
-    default_profile: str = "default"
-    # 默认切片 profile 名
-    chunking_profile: str = "default"
 
     # 用于入库的 embedding 应用模型 id
     embedding_model_id: str | None = None
@@ -154,8 +136,8 @@ class IndexerConfig(ConfigModel):
     embedding_dimensions: int = Field(default=1024, gt=0)
     # embedding 版本；换模型/维度时递增
     embedding_version: str = "v1"
-    # 单批 embedding 文本数
-    embedding_batch_size: int = Field(default=32, ge=1)
+    # 单批 embedding 文本数；服务会再按模型 max_batch_size 收敛
+    embedding_batch_size: int = Field(default=20, ge=1)
     # 是否缓存 chunk/query 向量；命中后重试/重灌不再调用 embedding 模型
     embedding_cache_enabled: bool = True
     # 向量缓存 TTL（秒）；默认 30 天，模型/维度变化通过 key 版本失效
@@ -170,6 +152,7 @@ class IndexerConfig(ConfigModel):
     description_llm_enabled: bool = True
     # 描述最小/最大字符数；标题+摘要/前言超过上限时优先 LLM 压缩
     description_min_chars: int = Field(default=40, ge=0)
+    # 文档描述最大字符数；标题+摘要超过时 LLM 压缩/按句截断
     description_max_chars: int = Field(default=500, ge=1)
     # 无可信描述时是否允许使用可读文件名作为描述
     description_use_filename: bool = True
@@ -277,10 +260,6 @@ class IndexerConfig(ConfigModel):
     chunking_version: str = "v1"
     # 确定性 chunk_id 的命名空间前缀
     chunk_id_namespace: str = "verity:chunk"
-    # 低于该字符数的块丢弃
-    min_chunk_chars: int = Field(default=30, ge=0)
-    # 超过该字符数的块截断/拆分
-    max_chunk_chars: int = Field(default=8_000, ge=1)
 
     # 是否启用入库降噪质量闸门
     quality_gate_enabled: bool = True
@@ -289,8 +268,6 @@ class IndexerConfig(ConfigModel):
     # 去重策略
     dedup: DedupPolicyConfig = Field(default_factory=DedupPolicyConfig)
 
-    # 单 worker 并发处理文档数
-    max_concurrency: int = Field(default=2, ge=1)
     # 入库最大重试次数
     index_max_attempts: int = Field(default=5, ge=1)
     # 入库 worker 租约时长（秒）
@@ -320,7 +297,7 @@ class RetrieverConfig(ConfigModel):
     permission_mode: str = "KB_AND_DOC"
     # 最终 top-k 确定后是否按 doc_id 批量补文档描述（D-103）
     include_doc_meta: bool = True
-    # 是否注册/暴露 resolve_chunk_conflict 工具（D-88）
+    # 预留：是否注册/暴露 resolve_chunk_conflict 工具（D-88）
     chunk_conflict_tool_enabled: bool = False
 
     # 是否启用 rerank
@@ -334,7 +311,7 @@ class RetrieverConfig(ConfigModel):
     # rerank 最低分
     rerank_min_score: float | None = None
 
-    # 是否启用 query 改写（D-81）
+    # 预留：是否启用 query 改写（D-81，当前未接入 LLM 改写）
     query_rewrite_enabled: bool = False
     # query 改写应用模型 id；为空使用 LLM 默认模型
     query_rewrite_model_id: str | None = None
@@ -386,9 +363,11 @@ class RetrieverConfig(ConfigModel):
     cache_enabled: bool = True
     # 检索结果缓存 TTL（秒）；0 表示不缓存
     cache_ttl_s: int = Field(default=300, ge=0)
-    # 文档状态缓存 TTL（秒）
+    # query embedding 缓存 TTL（秒）；0 表示不缓存查询向量
+    query_embedding_cache_ttl_s: int = Field(default=2_592_000, ge=0)
+    # 文档状态缓存 TTL（秒）；按 doc_id 批量缓存 completed 状态
     doc_status_cache_ttl_s: int = Field(default=60, ge=0)
-    # 文档 meta 缓存 TTL（秒）
+    # 文档描述/meta 缓存 TTL（秒）；按 doc_id + 索引版本缓存
     doc_meta_cache_ttl_s: int = Field(default=300, ge=0)
 
 
@@ -399,9 +378,5 @@ class RagConfig(ConfigModel):
     indexer: IndexerConfig = Field(default_factory=IndexerConfig)
     # 检索配置
     retriever: RetrieverConfig = Field(default_factory=RetrieverConfig)
-    # 文档描述有效最小字符数；低于视为提取失败
-    description_min_chars: int = Field(default=40, ge=0)
-    # 文档描述最大字符数；超过截断
-    description_max_chars: int = Field(default=500, ge=1)
-    # 单条 query 最大字符数
+    # 单条 query 最大字符数；超过截断并写 warning
     max_query_chars: int = Field(default=2000, gt=0)

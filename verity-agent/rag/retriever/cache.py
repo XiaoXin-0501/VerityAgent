@@ -14,6 +14,8 @@ __all__ = [
     "query_digest",
     "permission_digest",
     "filters_digest",
+    "document_status_cache_key",
+    "document_meta_cache_key",
 ]
 
 
@@ -54,6 +56,32 @@ def filters_digest(filters: Any | None) -> str:
     else:
         payload = filters
     return short_digest(canonical_json(payload), 32)
+
+
+def document_status_cache_key(
+    *,
+    doc_id: str,
+    index_version: int,
+) -> CacheKey:
+    """文档状态 key：doc_id + KB 索引版本；重切片/提交后自然失效。"""
+    return CacheKey(
+        scope=CacheScope.DOC_STATUS,
+        resource_ids=[doc_id],
+        version=str(index_version),
+    )
+
+
+def document_meta_cache_key(
+    *,
+    doc_id: str,
+    index_version: int,
+) -> CacheKey:
+    """DocumentMeta key：doc_id + KB 索引版本；描述更新随索引版本失效。"""
+    return CacheKey(
+        scope=CacheScope.DOC_META,
+        resource_ids=[doc_id],
+        version=str(index_version),
+    )
 
 
 def retrieval_cache_key(

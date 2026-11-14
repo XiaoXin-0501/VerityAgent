@@ -2,6 +2,8 @@
 
 from .cache import (
     RetrievalCache,
+    document_meta_cache_key,
+    document_status_cache_key,
     filters_digest,
     permission_digest,
     query_digest,
@@ -39,4 +41,6 @@ __all__ = [
     "query_digest",
     "permission_digest",
     "filters_digest",
+    "document_status_cache_key",
+    "document_meta_cache_key",
 ]

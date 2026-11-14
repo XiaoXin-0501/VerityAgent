@@ -33,6 +33,8 @@ from exception import RagError, RagErrorCode
 from rag.indexer.enrichment import DomainProfile
 from rag.retriever.cache import (
     RetrievalCache,
+    document_meta_cache_key,
+    document_status_cache_key,
     filters_digest,
     permission_digest,
     retrieval_cache_key,
@@ -249,6 +251,10 @@ class DefaultRetrievalPipeline:
             str(getattr(reranker, "model_id")) if reranker is not None else None
         )
 
+    def _effective_top_k(self, request: RetrievalRequest) -> int:
+        """请求 top_k 优先；未传时用 RetrieverConfig.top_k。"""
+        return max(1, int(request.top_k or self.config.top_k))
+
     async def close(self) -> None:
         """释放流水线自身资源；connection manager 由应用生命周期统一关闭。"""
         return None
@@ -433,6 +439,7 @@ class DefaultRetrievalPipeline:
         allowed_ids, status_metadata = await self._filter_documents(
             all_candidates,
             request=request,
+            index_versions=index_versions,
             warnings=warnings,
         )
         bm25 = [item for item in recalled.bm25 if item.chunk_id in allowed_ids]
@@ -557,6 +564,7 @@ class DefaultRetrievalPipeline:
         # 12) 按 unique doc_id 批量补文档描述（D-103），并生成引用。
         documents = await self._load_documents(
             selected,
+            index_versions=index_versions,
             warnings=warnings,
             stages=stages,
         )
@@ -620,7 +628,7 @@ class DefaultRetrievalPipeline:
             kb_ids=authorized_kbs,
             chunks=selected_with_citations,
             documents=documents,
-            top_k=request.top_k,
+            top_k=self._effective_top_k(request),
             duration_ms=elapsed,
             mode=RAGMode.INJECTED,
         )
@@ -926,28 +934,24 @@ class DefaultRetrievalPipeline:
         candidates: list[RetrievedChunk],
         *,
         request: RetrievalRequest,
+        index_versions: dict[UUID, int],
         warnings: list[RetrievalWarning],
     ) -> tuple[set[str], dict[str, Any]]:
         """批量过滤文档状态/文档级权限；返回允许的 chunk id 与统计。"""
         if not candidates:
             return set(), {"status_filtered": 0, "permission_filtered": 0}
         doc_ids = {chunk.doc_id for chunk in candidates}
+        doc_kb = {chunk.doc_id: chunk.kb_id for chunk in candidates}
         allowed_docs = set(doc_ids)
         status_filtered = 0
         permission_filtered = 0
 
         if self.metadata_store is not None:
-            try:
-                statuses = await self.metadata_store.get_document_statuses(
-                    list(doc_ids)
-                )
-            except Exception as exc:  # noqa: BLE001 - 状态过滤是安全边界，失败即拒绝
-                raise RagError(
-                    RagErrorCode.DEPENDENCY_UNAVAILABLE,
-                    "读取文档状态失败，检索已中止",
-                    details={"cause": str(exc)},
-                    retryable=True,
-                ) from exc
+            statuses = await self._load_document_statuses(
+                doc_kb,
+                index_versions=index_versions,
+                warnings=warnings,
+            )
             allowed_docs = {
                 doc_id
                 for doc_id in doc_ids
@@ -995,6 +999,84 @@ class DefaultRetrievalPipeline:
             "status_filtered": status_filtered,
             "permission_filtered": permission_filtered,
         }
+
+    async def _load_document_statuses(
+        self,
+        doc_kb: dict[UUID, UUID],
+        *,
+        index_versions: dict[UUID, int],
+        warnings: list[RetrievalWarning],
+    ) -> dict[UUID, str]:
+        """按 doc_id 读文档状态；Redis 可用时按 doc_id + 索引版本短缓存。"""
+        if self.metadata_store is None or not doc_kb:
+            return {}
+        cached: dict[UUID, str] = {}
+        misses: list[UUID] = list(doc_kb)
+        cache_enabled = bool(
+            self.cache is not None
+            and self.config.cache_enabled
+            and self.config.doc_status_cache_ttl_s > 0
+        )
+        if cache_enabled:
+            misses = []
+            for doc_id, kb_id in doc_kb.items():
+                key = document_status_cache_key(
+                    doc_id=str(doc_id),
+                    index_version=index_versions.get(kb_id, 0),
+                )
+                try:
+                    payload = await self.cache.get(key)
+                except Exception as exc:  # noqa: BLE001 - 状态缓存失败回源 PG
+                    warnings.append(
+                        _warning(
+                            RetrievalWarningCode.CACHE_ERROR,
+                            "读取文档状态缓存失败，回源 PG",
+                            stage=RetrievalStage.DOC_STATUS,
+                            details={"cause": str(exc)},
+                        )
+                    )
+                    payload = None
+                status = (
+                    payload.get("status")
+                    if isinstance(payload, dict)
+                    else payload if isinstance(payload, str) else None
+                )
+                if status:
+                    cached[doc_id] = str(status)
+                else:
+                    misses.append(doc_id)
+
+        if misses:
+            try:
+                from_store = await self.metadata_store.get_document_statuses(
+                    misses
+                )
+            except Exception as exc:  # noqa: BLE001 - 状态过滤是安全边界，失败即拒绝
+                raise RagError(
+                    RagErrorCode.DEPENDENCY_UNAVAILABLE,
+                    "读取文档状态失败，检索已中止",
+                    details={"cause": str(exc)},
+                    retryable=True,
+                ) from exc
+            cached.update(from_store)
+            if cache_enabled:
+                for doc_id, status in from_store.items():
+                    kb_id = doc_kb.get(doc_id)
+                    if kb_id is None:
+                        continue
+                    key = document_status_cache_key(
+                        doc_id=str(doc_id),
+                        index_version=index_versions.get(kb_id, 0),
+                    )
+                    try:
+                        await self.cache.set(
+                            key,
+                            {"status": status},
+                            ttl_s=self.config.doc_status_cache_ttl_s,
+                        )
+                    except Exception:  # noqa: BLE001 - 写缓存失败不影响检索
+                        pass
+        return cached
 
     @staticmethod
     def _matches_post_filters(
@@ -1266,7 +1348,7 @@ class DefaultRetrievalPipeline:
                     details={"filtered": quality_filtered},
                 )
             )
-        limit = max(1, int(request.top_k))
+        limit = self._effective_top_k(request)
         # rerank 成功时再受 RetrieverConfig.rerank_top_k 约束；未启用/失败降级
         # 时完全按调用方 top_k 返回，避免“配置里一个数、请求里一个数”暗冲突。
         if rerank_active:
@@ -1458,10 +1540,11 @@ class DefaultRetrievalPipeline:
         self,
         chunks: list[RetrievedChunk],
         *,
+        index_versions: dict[UUID, int],
         warnings: list[RetrievalWarning],
         stages: list[RetrievalStageTrace],
     ) -> dict[str, DocumentMeta]:
-        """按 unique doc_id 批量补文档描述（D-103）。"""
+        """按 unique doc_id 批量补文档描述（D-103），可选短 TTL 缓存。"""
         started = time.perf_counter()
         if not chunks:
             _stage(
@@ -1492,20 +1575,14 @@ class DefaultRetrievalPipeline:
                 metadata={"skipped": True},
             )
             return {}
-        doc_ids = list(dict.fromkeys(chunk.doc_id for chunk in chunks))
+        doc_kb = {chunk.doc_id: chunk.kb_id for chunk in chunks}
+        doc_ids = list(doc_kb)
         doc_id_set = set(doc_ids)
-        try:
-            meta = await self.metadata_store.get_document_meta(doc_ids)
-        except Exception as exc:  # noqa: BLE001 - 文档描述失败不影响召回正文
-            warnings.append(
-                _warning(
-                    RetrievalWarningCode.DOC_META_MISSING,
-                    "读取文档描述失败，使用文件名/空描述",
-                    stage=RetrievalStage.DOC_META,
-                    details={"cause": str(exc)},
-                )
-            )
-            meta = {}
+        meta = await self._load_document_meta(
+            doc_kb,
+            index_versions=index_versions,
+            warnings=warnings,
+        )
         documents = {
             str(doc_id): item
             for doc_id, item in meta.items()
@@ -1531,6 +1608,83 @@ class DefaultRetrievalPipeline:
             output_count=len(documents),
         )
         return documents
+
+    async def _load_document_meta(
+        self,
+        doc_kb: dict[UUID, UUID],
+        *,
+        index_versions: dict[UUID, int],
+        warnings: list[RetrievalWarning],
+    ) -> dict[UUID, DocumentMeta]:
+        """读文档描述；缓存 key 带 doc_id + KB 索引版本，描述更新后自然失效。"""
+        if self.metadata_store is None:
+            return {}
+        cached: dict[UUID, DocumentMeta] = {}
+        misses: list[UUID] = list(doc_kb)
+        cache_enabled = bool(
+            self.cache is not None
+            and self.config.cache_enabled
+            and self.config.doc_meta_cache_ttl_s > 0
+        )
+        if cache_enabled:
+            misses = []
+            for doc_id, kb_id in doc_kb.items():
+                key = document_meta_cache_key(
+                    doc_id=str(doc_id),
+                    index_version=index_versions.get(kb_id, 0),
+                )
+                try:
+                    payload = await self.cache.get(key)
+                except Exception as exc:  # noqa: BLE001 - 描述缓存失败回源 PG
+                    warnings.append(
+                        _warning(
+                            RetrievalWarningCode.CACHE_ERROR,
+                            "读取文档描述缓存失败，回源 PG",
+                            stage=RetrievalStage.DOC_META,
+                            details={"cause": str(exc)},
+                        )
+                    )
+                    payload = None
+                if isinstance(payload, dict):
+                    try:
+                        cached[doc_id] = DocumentMeta.model_validate(payload)
+                        continue
+                    except Exception:  # noqa: BLE001 - 旧格式按 miss 处理
+                        pass
+                misses.append(doc_id)
+
+        if misses:
+            try:
+                from_store = await self.metadata_store.get_document_meta(misses)
+            except Exception as exc:  # noqa: BLE001 - 文档描述失败不影响召回正文
+                warnings.append(
+                    _warning(
+                        RetrievalWarningCode.DOC_META_MISSING,
+                        "读取文档描述失败，使用文件名/空描述",
+                        stage=RetrievalStage.DOC_META,
+                        details={"cause": str(exc)},
+                    )
+                )
+                from_store = {}
+            cached.update(from_store)
+            if cache_enabled:
+                for doc_id, item in from_store.items():
+                    kb_id = doc_kb.get(doc_id)
+                    if kb_id is None:
+                        continue
+                    key = document_meta_cache_key(
+                        doc_id=str(doc_id),
+                        index_version=index_versions.get(kb_id, 0),
+                    )
+                    try:
+                        await self.cache.set(
+                            key,
+                            item.model_dump(mode="json"),
+                            ttl_s=self.config.doc_meta_cache_ttl_s,
+                        )
+                    except Exception:  # noqa: BLE001 - 写缓存失败不影响检索
+                        pass
+        return cached
 
     def _build_citation(self, chunk: RetrievedChunk) -> Citation:
         """由命中 chunk 构造引用；邻居不调用此方法。"""
@@ -1631,7 +1785,7 @@ class DefaultRetrievalPipeline:
                 if rerank_policy.enabled and self.reranker is not None
                 else None
             ),
-            top_k=request.top_k,
+            top_k=self._effective_top_k(request),
             filters_digest=scope_digest,
         )
 

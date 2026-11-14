@@ -103,6 +103,32 @@ class SchemaManager:
     def expected_collections(self) -> dict[str, Mapping[str, Any]]:
         return {item["class"]: item for item in self._schema.get("classes", [])}
 
+    def _schema_version_warning(self) -> str | None:
+        """校验 ``WeaviateConfig.expected_schema_version`` 与 manifest 版本。
+
+        版本不一致只写 warning，不阻断启动：自定义 schema 文件可能没有
+        manifest；prod 的强校验仍由 schema 属性/分词/维度检查负责。
+        """
+        expected = (self.config.expected_schema_version or "").strip()
+        if not expected:
+            return None
+        path = Path(self.config.schema_import_path)
+        if not path.is_absolute() and not path.exists():
+            path = PROJECT_ROOT / path
+        manifest = path.with_name("weaviate_schema_manifest.json")
+        if not manifest.is_file():
+            return f"schema manifest 不存在，跳过版本校验: {manifest}"
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return f"schema manifest 读取失败，跳过版本校验: {exc}"
+        actual = str(payload.get("schema_version") or "").strip()
+        if actual and actual != expected:
+            return (
+                f"schema_version 不一致（expected={expected}, actual={actual}）"
+            )
+        return None
+
     async def check(
         self,
         client,
@@ -121,6 +147,9 @@ class SchemaManager:
         tokenization_mismatches: list[dict[str, Any]] = []
         dimension_mismatches: list[dict[str, Any]] = []
         warnings: list[str] = []
+        version_warning = self._schema_version_warning()
+        if version_warning:
+            warnings.append(version_warning)
 
         for name, expected in self.expected_collections.items():
             actual = existing.get(name)

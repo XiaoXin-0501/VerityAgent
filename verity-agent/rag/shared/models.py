@@ -554,7 +554,8 @@ class RetrievalRequest(_Model):
     kb_ids: list[UUID]
     user_id: UUID
     permissions: frozenset[str] = frozenset()
-    top_k: int = 8
+    # 为空时使用 RetrieverConfig.top_k；显式传值覆盖配置默认
+    top_k: int | None = Field(default=None, ge=1)
     mode: RetrievalMode = RetrievalMode.HYBRID
     filters: RetrievalFilter | None = None
     hybrid: HybridPolicy | None = None

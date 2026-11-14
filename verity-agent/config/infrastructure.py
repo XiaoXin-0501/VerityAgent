@@ -34,8 +34,8 @@ class PGConfig(ConfigModel):
     user: str = "agent"
     # 登录密码；SecretStr 防止日志/异常直接打印明文
     password: SecretStr = SecretStr("agent")
-    # 数据库名
-    db: str = "agent"
+    # 数据库名；与 docker-compose 的 POSTGRES_DB 默认约定一致
+    db: str = "agent_db"
 
     # 连接池最少保持的空闲连接数
     pool_min_size: int = Field(default=0, ge=0)
@@ -80,8 +80,17 @@ class RedisConfig(ConfigModel):
     health_check_interval: int = Field(default=30, ge=0)
     # 是否把命令结果解码为 str；缓存 JSON 时保持 True
     decode_responses: bool = True
-    # 逻辑 key 命名空间；实际 key 前缀由 store.redis.keys.RedisKeyPrefix 固定
+    # 逻辑 key 命名空间；所有 Redis key 统一为 <namespace>:<key_family>:...
     namespace: str = "verity"
+
+    @field_validator("namespace")
+    @classmethod
+    def _normalize_namespace(cls, value: object) -> str:
+        """命名空间不能为空、不能带首尾冒号，避免生成 `::cache` 这类 key。"""
+        text = str(value or "").strip().strip(":")
+        if not text:
+            raise ValueError("redis namespace 不能为空")
+        return text
 
     @field_validator("url", mode="before")
     @classmethod

@@ -107,7 +107,9 @@ class EmbeddingService:
         self.batch_size = max(1, int(batch_size))
         self.semantic_embedding_enabled = semantic_embedding_enabled
         self.cache = cache
-        self.cache_enabled = bool(cache_enabled and cache is not None)
+        self.cache_enabled = bool(
+            cache_enabled and cache is not None and int(cache_ttl_s) > 0
+        )
         self.cache_ttl_s = int(cache_ttl_s)
         self.cache_version = cache_version
         self._caps = getattr(spec, "embedding_capabilities", None)

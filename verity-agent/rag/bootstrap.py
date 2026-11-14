@@ -262,7 +262,7 @@ def build_default_retrieval_pipeline(
         batch_size=1,
         cache=cache,
         cache_enabled=cfg.cache_enabled,
-        cache_ttl_s=2_592_000,
+        cache_ttl_s=cfg.query_embedding_cache_ttl_s,
         cache_version=embedding_version,
         configured_dimensions=embedding_dimensions,
     )
