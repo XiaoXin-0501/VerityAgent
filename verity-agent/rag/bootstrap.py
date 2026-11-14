@@ -17,6 +17,7 @@ from store.weaviate import WeaviateStore
 from .facade import Indexer, RagDependencies, Retriever, create_indexer, create_retriever
 from .indexer import (
     ChatCodeDescriber,
+    ChatDescriptionRefiner,
     ChatTableDescriber,
     ChunkCache,
     DefaultIndexingPipeline,
@@ -97,6 +98,7 @@ def build_default_indexing_pipeline(
     indexer_policy: IndexerPolicy | None = None,
     table_summary_chat_model: Any | None = None,
     code_summary_chat_model: Any | None = None,
+    description_chat_model: Any | None = None,
     table_describer: Any | None = None,
     code_describer: Any | None = None,
     description_refiner: Any | None = None,
@@ -121,6 +123,10 @@ def build_default_indexing_pipeline(
     否则在对应 LLM 开关打开且注入 chat model 时构造 ChatDescriber，用于
     “heading + 描述”的向量化文本。``cache`` 为空时默认使用带熔断的 Redis
     缓存，用于复用 chunk 向量与 LLM 描述；测试可注入 InMemoryChunkCache。
+
+    文档级描述：``description_refiner`` 显式注入优先；否则在
+    ``description_llm_enabled`` 且注入 ``description_chat_model`` 时构造
+    ``ChatDescriptionRefiner``，用于压缩“标题+长摘要/前言”或精炼弱候选。
     """
     cfg = config or IndexerConfig()
     policy = indexer_policy or get_indexer_policy(
@@ -138,6 +144,9 @@ def build_default_indexing_pipeline(
     )
     code_describer = code_describer or _build_code_describer(
         cfg, prompts, code_summary_chat_model, rag_cache
+    )
+    description_refiner = description_refiner or _build_description_refiner(
+        cfg, prompts, description_chat_model, rag_cache
     )
     return DefaultIndexingPipeline(
         cfg,
@@ -333,6 +342,40 @@ def build_table_describer_from_registry(
         return None
     chat_model = registry.get_model_by_id(config.table_summary_model_id)
     return _build_table_describer(config, prompts, chat_model, cache)
+
+
+def _build_description_refiner(
+    config: IndexerConfig,
+    prompts: PromptRegistry | None,
+    chat_model: Any | None,
+    cache: ChunkCache | None = None,
+):
+    """按配置构造文档描述精炼器；未启用或未注入模型返回 None。"""
+    if not config.description_llm_enabled:
+        return None
+    if chat_model is None:
+        if config.description_model_id:
+            logger.warning(
+                "description_llm_enabled=true 但未注入 description chat model，"
+                "长摘要/前言将按句截断兜底"
+            )
+        return None
+    model_id = (
+        config.description_model_id
+        or getattr(getattr(chat_model, "spec", None), "id", None)
+        or "description"
+    )
+    return ChatDescriptionRefiner(
+        chat_model,
+        model_id=model_id,
+        temperature=0.1,
+        # 500 字中文描述约需 500+ token，256 会截断；512 留出余量。
+        max_output_tokens=512,
+        prompts=prompts,
+        cache=cache,
+        cache_enabled=config.description_cache_enabled,
+        cache_ttl_s=config.description_cache_ttl_s,
+    )
 
 
 def _build_table_describer(

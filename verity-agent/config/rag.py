@@ -165,15 +165,16 @@ class IndexerConfig(ConfigModel):
     description_model_id: str | None = None
     # 是否启用文档描述提取
     description_enabled: bool = True
-    # 非可靠“内容提取”候选是否交给 LLM；文件名/强规则/空提取不调用
-    description_llm_enabled: bool = False
-    # 描述最小/最大字符数；可靠规则命中必须落在此范围
+    # 非可靠“内容提取”候选或“标题+摘要/前言”过长时交给 LLM；
+    # 需要同时注入 description chat model（bootstrap 按 description_model_id 装配）。
+    description_llm_enabled: bool = True
+    # 描述最小/最大字符数；标题+摘要/前言超过上限时优先 LLM 压缩
     description_min_chars: int = Field(default=40, ge=0)
     description_max_chars: int = Field(default=500, ge=1)
     # 无可信描述时是否允许使用可读文件名作为描述
     description_use_filename: bool = True
-    # 扫描描述规则时只看前 N 个内容块
-    description_max_early_blocks: int = Field(default=20, ge=1)
+    # 扫描描述规则的早期文本块数；目录/作者信息可能占几十块，需覆盖摘要页
+    description_max_early_blocks: int = Field(default=80, ge=1)
     # 是否缓存 LLM 生成的 chunk/文档描述，避免重试重复消耗 token
     description_cache_enabled: bool = True
     # 描述缓存 TTL（秒）；模型/Prompt 版本变化通过 key 失效

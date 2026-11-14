@@ -9,6 +9,7 @@ from .caching import (
     embedding_cache_key,
 )
 from .chunkers import ChatCodeDescriber, ChatTableDescriber
+from .description import ChatDescriptionRefiner
 from .embedding import EmbeddingResult, EmbeddingService
 from .enrichment import (
     DomainGraphExtractor,
@@ -67,6 +68,7 @@ __all__ = [
     "EmbeddingResult",
     "ChatTableDescriber",
     "ChatCodeDescriber",
+    "ChatDescriptionRefiner",
     "IndexerPolicy",
     "QualityPenaltyPolicy",
     "DescriptionPolicy",

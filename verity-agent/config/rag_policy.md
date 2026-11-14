@@ -41,7 +41,11 @@ quality_score = clamp(1.0 - Σ penalty(flag), 0.0, 1.0)
 
 ## description.reliable_headings
 
-- 只有这些“文档级”标题才允许直接取后续正文作为文档描述；
+- 这些“文档级”标题用于识别摘要/前言类章节，并允许直接取后续正文；
+- 描述章节内部优先级：摘要/执行摘要/ABSTRACT/SUMMARY > 前言/序言/引言 >
+  Introduction > 候选标题；同一优先级取最早出现；
+- 文档大标题（level 1~3，排除栏目/作者/目录/章节编号）会替代文件名，
+  并与摘要/前言正文组合；超过 `description_max_chars` 时交给 LLM 压缩；
 - 加载时统一归一化（去空白/常见标点、英文小写），因此写 `Introduction`
   或 `introduction` 等价；
 - “企业简介/课程简介”等仍走候选逻辑，不直接采信；
