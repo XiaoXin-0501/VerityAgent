@@ -125,13 +125,13 @@ class TextIngestionPipeline:
         if not parsed.blocks:
             raise RagError(
                 RagErrorCode.INVALID_REQUEST,
-                "文档没有可索引文本（图片/扫描件暂不处理）",
+                "文档没有可索引文本（扫描件请检查 OCR/版式解析配置）",
                 details={"doc_type": parsed.profile.doc_type.value},
             )
         if parsed.profile.text_coverage < self.config.quality.min_text_coverage:
             raise RagError(
                 RagErrorCode.INVALID_REQUEST,
-                "文档文本覆盖率过低（图片/扫描件暂不处理）",
+                "文档文本覆盖率过低（扫描件请检查 OCR/版式解析配置）",
                 details={
                     "doc_type": parsed.profile.doc_type.value,
                     "text_coverage": parsed.profile.text_coverage,

@@ -1963,6 +1963,558 @@
         "多只饲养",
         "群养"
       ]
+    },
+    {
+      "name": "猫特发性膀胱炎",
+      "type": "disease",
+      "aliases": [
+        "特发性膀胱炎"
+      ]
+    },
+    {
+      "name": "猫脂肪肝",
+      "type": "disease",
+      "aliases": [
+        "脂肪肝"
+      ]
+    },
+    {
+      "name": "犬骨肉瘤",
+      "type": "disease",
+      "aliases": [
+        "骨肉瘤"
+      ]
+    },
+    {
+      "name": "猫角膜腐骨",
+      "type": "disease",
+      "aliases": [
+        "角膜腐骨"
+      ]
+    },
+    {
+      "name": "犬耳血肿",
+      "type": "disease",
+      "aliases": [
+        "耳血肿"
+      ]
+    },
+    {
+      "name": "犬湿疹",
+      "type": "disease",
+      "aliases": [
+        "湿疹"
+      ]
+    },
+    {
+      "name": "腹水",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "水肿",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "淋巴结肿大",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "共济失调",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "瘫痪",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "黏膜苍白",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "口腔异味",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "耳痒",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "眼红",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "流泪",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "腹胀",
+      "type": "symptom",
+      "aliases": []
+    },
+    {
+      "name": "阿莫西林",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "头孢曲松",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "头孢噻肟",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "克拉霉素",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "泼尼松龙",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "曲马多",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "布托啡诺",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "右美托咪定",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "多潘立酮",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "西沙必利",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "乳果糖",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "水飞蓟素",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "SAMe",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "熊去氧胆酸",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "米氮平",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "赛庚啶",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "氯雷他定",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "环孢素",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "硫唑嘌呤",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "来氟米特",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "霉酚酸酯",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "他克莫司",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "四环素",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "烟酰胺",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "奥拉替尼",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "伊曲康唑",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "特比萘芬",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "氟康唑",
+      "type": "drug",
+      "aliases": []
+    },
+    {
+      "name": "皮肤细胞学",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "真菌镜检",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "细菌培养",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "尿培养",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "胆汁酸",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "胰脂肪酶",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "fPLI",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "fSAA",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "NT-proBNP",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "心肌肌钙蛋白",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "甲状腺功能检测",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "皮质醇检测",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "ACTH刺激试验",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "地塞米松抑制试验",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "关节液分析",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "骨髓穿刺",
+      "type": "exam",
+      "aliases": []
+    },
+    {
+      "name": "激光治疗",
+      "type": "treatment",
+      "aliases": []
+    },
+    {
+      "name": "药浴",
+      "type": "treatment",
+      "aliases": []
+    },
+    {
+      "name": "耳道清洗",
+      "type": "treatment",
+      "aliases": []
+    },
+    {
+      "name": "口腔护理",
+      "type": "treatment",
+      "aliases": []
+    },
+    {
+      "name": "营养支持",
+      "type": "treatment",
+      "aliases": []
+    },
+    {
+      "name": "冷敷",
+      "type": "treatment",
+      "aliases": []
+    },
+    {
+      "name": "热敷",
+      "type": "treatment",
+      "aliases": []
+    },
+    {
+      "name": "百合花",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "绿萝",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "杜鹃花",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "夹竹桃",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "防冻液",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "乙二醇",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "杀虫剂",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "灭鼠药",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "烟草",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "茶叶",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "大葱",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "韭菜",
+      "type": "food",
+      "aliases": []
+    },
+    {
+      "name": "妊娠",
+      "type": "risk_factor",
+      "aliases": []
+    },
+    {
+      "name": "哺乳",
+      "type": "risk_factor",
+      "aliases": []
+    },
+    {
+      "name": "免疫抑制",
+      "type": "risk_factor",
+      "aliases": []
+    },
+    {
+      "name": "营养不良",
+      "type": "risk_factor",
+      "aliases": []
+    },
+    {
+      "name": "饮水不足",
+      "type": "risk_factor",
+      "aliases": []
+    },
+    {
+      "name": "环境拥挤",
+      "type": "risk_factor",
+      "aliases": []
+    },
+    {
+      "name": "长途运输",
+      "type": "risk_factor",
+      "aliases": []
+    },
+    {
+      "name": "德国牧羊犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "苏格兰牧羊犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "柯利牧羊犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "西高地白梗",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "法国斗牛犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "巴哥犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "雪纳瑞",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "杜宾犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "罗威纳犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "阿拉斯加雪橇犬",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "曼基康猫",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "挪威森林猫",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "俄罗斯蓝猫",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "孟买猫",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "无毛猫",
+      "type": "breed",
+      "aliases": []
+    },
+    {
+      "name": "眼线虫",
+      "type": "parasite",
+      "aliases": []
+    },
+    {
+      "name": "肺丝虫",
+      "type": "parasite",
+      "aliases": []
+    },
+    {
+      "name": "利什曼原虫",
+      "type": "parasite",
+      "aliases": []
+    },
+    {
+      "name": "巴贝斯虫",
+      "type": "parasite",
+      "aliases": []
+    },
+    {
+      "name": "无形体",
+      "type": "parasite",
+      "aliases": []
+    },
+    {
+      "name": "立克次体",
+      "type": "parasite",
+      "aliases": []
     }
   ],
   "relations": [
@@ -2045,5 +2597,226 @@
       "同义实体会被归一为标准名，可以放心输出文本中出现的缩写和俗称。",
       "只从标题与正文抽取；表格、代码、图片等低语义内容不参与图构建。"
     ]
-  }
+  },
+  "relation_rules": [
+    {
+      "name": "has_symptom",
+      "keywords": [],
+      "subject_types": [
+        "disease"
+      ],
+      "object_types": [
+        "symptom"
+      ],
+      "confidence": 0.82
+    },
+    {
+      "name": "treated_by",
+      "keywords": [
+        "治疗",
+        "使用",
+        "口服",
+        "注射",
+        "给予",
+        "用药",
+        "服用",
+        "应用",
+        "联合",
+        "可用",
+        "首选",
+        "推荐"
+      ],
+      "subject_types": [
+        "disease"
+      ],
+      "object_types": [
+        "drug",
+        "treatment"
+      ],
+      "confidence": 0.8
+    },
+    {
+      "name": "diagnosed_by",
+      "keywords": [
+        "检查",
+        "检测",
+        "诊断",
+        "化验",
+        "影像",
+        "超声",
+        "X线",
+        "X光",
+        "PCR",
+        "细胞学",
+        "培养",
+        "做",
+        "查",
+        "测"
+      ],
+      "subject_types": [
+        "disease"
+      ],
+      "object_types": [
+        "exam"
+      ],
+      "confidence": 0.8
+    },
+    {
+      "name": "prevents",
+      "keywords": [
+        "预防",
+        "免疫",
+        "接种",
+        "保护"
+      ],
+      "subject_types": [
+        "vaccine"
+      ],
+      "object_types": [
+        "disease"
+      ],
+      "confidence": 0.82
+    },
+    {
+      "name": "toxic_to",
+      "keywords": [
+        "中毒",
+        "毒性",
+        "有毒",
+        "有害",
+        "禁忌"
+      ],
+      "subject_types": [
+        "food"
+      ],
+      "object_types": [
+        "species"
+      ],
+      "confidence": 0.8
+    },
+    {
+      "name": "risk_factor_for",
+      "keywords": [
+        "风险",
+        "易患",
+        "增加",
+        "诱发",
+        "导致",
+        "高发"
+      ],
+      "subject_types": [
+        "risk_factor"
+      ],
+      "object_types": [
+        "disease"
+      ],
+      "confidence": 0.8
+    },
+    {
+      "name": "predisposes",
+      "keywords": [
+        "易患",
+        "高发",
+        "常见",
+        "好发",
+        "遗传",
+        "品种"
+      ],
+      "subject_types": [
+        "breed",
+        "species"
+      ],
+      "object_types": [
+        "disease"
+      ],
+      "confidence": 0.78
+    },
+    {
+      "name": "affects",
+      "keywords": [
+        "累及",
+        "影响",
+        "病变",
+        "部位",
+        "侵犯"
+      ],
+      "subject_types": [
+        "disease"
+      ],
+      "object_types": [
+        "anatomy"
+      ],
+      "confidence": 0.78
+    },
+    {
+      "name": "complication_of",
+      "keywords": [
+        "并发",
+        "继发",
+        "并发症"
+      ],
+      "subject_types": [
+        "disease"
+      ],
+      "object_types": [
+        "disease"
+      ],
+      "confidence": 0.78
+    },
+    {
+      "name": "interacts_with",
+      "keywords": [
+        "联合",
+        "合用",
+        "相互作用",
+        "配伍"
+      ],
+      "subject_types": [
+        "drug"
+      ],
+      "object_types": [
+        "drug"
+      ],
+      "confidence": 0.78
+    },
+    {
+      "name": "contraindicated_with",
+      "keywords": [
+        "禁忌",
+        "禁用",
+        "慎用"
+      ],
+      "subject_types": [
+        "drug"
+      ],
+      "object_types": [
+        "disease",
+        "drug"
+      ],
+      "confidence": 0.78
+    },
+    {
+      "name": "causes",
+      "keywords": [
+        "导致",
+        "引起",
+        "引发",
+        "造成",
+        "诱发",
+        "由于",
+        "因为"
+      ],
+      "subject_types": [
+        "disease",
+        "parasite",
+        "food",
+        "risk_factor"
+      ],
+      "object_types": [
+        "disease",
+        "symptom"
+      ],
+      "confidence": 0.82
+    }
+  ]
 }

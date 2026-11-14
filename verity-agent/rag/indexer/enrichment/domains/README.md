@@ -38,6 +38,18 @@
     {"name": "treated_by", "label": "疾病→治疗", "description": "疾病使用某药物/治疗"}
   ],
 
+  // 词典模式关系规则：同一句命中 subject/object 类型且包含触发词时生成关系
+  // keywords 为空表示“只看类型组合”；confidence 需 >= graph_min_confidence
+  "relation_rules": [
+    {
+      "name": "treated_by",
+      "keywords": ["治疗", "使用", "口服", "注射", "给予"],
+      "subject_types": ["disease"],
+      "object_types": ["drug", "treatment"],
+      "confidence": 0.8
+    }
+  ],
+
   // LLM 提示词片段；实体/关系类型清单由程序自动追加
   "prompt": {
     "role": "你是宠物医疗知识图谱的实体与关系抽取器。",
@@ -59,7 +71,10 @@
 - `entities[].name` 不可重复，`type` 必须是已声明类型；
 - 同一别名（大小写不敏感、空白归一）不能属于两个实体；
 - 别名不能为空，且长度至少 2（单字中文会高频命中子串，噪声大于收益）；
-- 标准名与别名都会参与匹配。
+- 标准名与别名都会参与匹配；
+- `relation_rules[].name` 必须已在 `relations` 声明；
+- `relation_rules[].subject_types/object_types` 必须引用已声明的实体类型；
+- 同一实体对只保留规则顺序靠前的一条关系，避免重复边。
 
 ## 匹配行为
 

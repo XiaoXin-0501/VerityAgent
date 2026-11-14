@@ -3,6 +3,8 @@
 from .bootstrap import (
     build_default_indexer,
     build_default_indexing_pipeline,
+    build_default_retrieval_pipeline,
+    build_default_retriever,
     build_dependencies,
     ensure_default_vector_schema,
 )
@@ -49,6 +51,8 @@ __all__ = [
     "build_dependencies",
     "build_default_indexing_pipeline",
     "build_default_indexer",
+    "build_default_retrieval_pipeline",
+    "build_default_retriever",
     "ensure_default_vector_schema",
     "Indexer",
     "Retriever",

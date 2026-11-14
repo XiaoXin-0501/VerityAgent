@@ -193,6 +193,16 @@ class Chunker(Protocol):
         ...
 
 
+def _is_grouped_chunk(chunk: ChunkDraft) -> bool:
+    """问答/视觉组 chunk 不参与跨块合并，避免组边界被重新拼掉。"""
+    return bool(
+        chunk.metadata.get("qa")
+        or chunk.metadata.get("qa_prefix")
+        or chunk.metadata.get("qa_long")
+        or chunk.metadata.get("visual_group")
+    )
+
+
 def _merge_two(
     previous: ChunkDraft,
     current: ChunkDraft,
@@ -263,6 +273,8 @@ def merge_adjacent_chunks(
                 and previous.block_type == chunk.block_type
                 and previous.heading == chunk.heading
                 and previous.section_type in _MERGEABLE_SECTION_TYPES
+                and not _is_grouped_chunk(previous)
+                and not _is_grouped_chunk(chunk)
             )
             should_merge = same_context and (
                 (
@@ -316,6 +328,11 @@ def coalesce_text_chunks(
         if chunk.section_type not in _MERGEABLE_SECTION_TYPES:
             # 表格/代码不参与正文合并，但也不打断同标题正文的累计。
             result.append(chunk)
+            continue
+        if _is_grouped_chunk(chunk):
+            # 问答 chunk 的边界由 QA 分组决定，不能再被同标题正文合并。
+            result.append(chunk)
+            pending.clear()
             continue
         # 段落/列表属于连续正文，同一标题下允许互相合并。
         key = (chunk.doc_id, chunk.kb_id, tuple(chunk.heading_path))

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -45,6 +46,130 @@ _TEXT_BLOCK_TYPES = frozenset(
 )
 # 独立切片、不与其他正文合并的块类型。
 _SPECIAL_BLOCK_TYPES = frozenset({BlockType.TABLE, BlockType.CODE})
+
+# Q&A 识别：优先显式 “问/答”“Q/A”“Question/Answer” 标记；
+# 没有标记时只在 FAQ 类章节标题下用“问句结尾”兜底。
+_QA_QUESTION_RE = re.compile(
+    r"(?:^|(?<=[。！？!?；;\n]))\s*(?:问|问题|Q|Question)\s*\d*\s*[：:]",
+    re.IGNORECASE | re.MULTILINE,
+)
+_QA_ANSWER_RE = re.compile(
+    r"(?:^|(?<=[。！？!?；;\n]))\s*(?:答|回答|A|Answer)\s*\d*\s*[：:]",
+    re.IGNORECASE | re.MULTILINE,
+)
+_QA_SECTION_HINTS = (
+    "问题",
+    "问答",
+    "常见问题",
+    "faq",
+    "q&a",
+    "frequently asked",
+)
+
+
+@dataclass(slots=True)
+class _QaPair:
+    """一组问答：问句、答案与原文片段。"""
+
+    question: str
+    answer: str
+    text: str
+
+    @property
+    def token_count(self) -> int:
+        """估算整组问答 token 数，用于决定是否拆分。"""
+        return estimate_tokens(self.text)
+
+
+def _is_qa_section(path: list[str]) -> bool:
+    """章节标题是否明确是 FAQ/问答；无显式标记时只在这种情况下兜底。"""
+    title = (path[-1] if path else "").lower()
+    return any(hint in title for hint in _QA_SECTION_HINTS)
+
+
+def _clean_question(value: str) -> str:
+    """去掉问句前的“问：/Q:”标记，保留问题正文。"""
+    match = _QA_QUESTION_RE.search(value)
+    if match:
+        return value[match.end() :].strip()
+    return value.strip()
+
+
+def _extract_qa_pairs(
+    text: str,
+    *,
+    path: list[str],
+) -> tuple[str, list[_QaPair]]:
+    """从正文中抽取问答组，返回 ``(前缀, pairs)``。
+
+    - 有显式问/答标记：按问句起始切分，问句到答句标记之间为问题；
+    - 没有显式标记且章节是 FAQ：按“以问号结尾的句子”开新问答组；
+    - 其他情况返回空 pairs，调用方继续走普通切片，避免影响正常正文。
+    """
+    explicit = list(_QA_QUESTION_RE.finditer(text or ""))
+    if explicit and _QA_ANSWER_RE.search(text or ""):
+        prefix = text[: explicit[0].start()].strip()
+        pairs: list[_QaPair] = []
+        for index, marker in enumerate(explicit):
+            end = (
+                explicit[index + 1].start()
+                if index + 1 < len(explicit)
+                else len(text)
+            )
+            raw = text[marker.start() : end].strip()
+            answer_match = _QA_ANSWER_RE.search(raw)
+            if answer_match:
+                question = _clean_question(raw[: answer_match.start()])
+                answer = _QA_ANSWER_RE.sub("", raw[answer_match.start() :], count=1)
+                answer = answer.strip()
+            else:
+                question = _clean_question(raw)
+                answer = ""
+            if question:
+                pairs.append(
+                    _QaPair(
+                        question=question,
+                        answer=answer,
+                        text=raw,
+                    )
+                )
+        if pairs:
+            return prefix, pairs
+
+    if not _is_qa_section(path):
+        return "", []
+
+    # 无显式标记：FAQ 章节中，以问号结尾的句子视为新问题；后续句子为答案。
+    sentences = split_sentences(text or "")
+    pairs = []
+    question = ""
+    answer: list[str] = []
+    for sentence in sentences:
+        value = sentence.strip()
+        if not value:
+            continue
+        if value.endswith(("？", "?")):
+            if question:
+                pairs.append(
+                    _QaPair(
+                        question=question,
+                        answer=smart_join(answer).strip(),
+                        text=f"{question}{smart_join(answer)}".strip(),
+                    )
+                )
+            question = value
+            answer = []
+        elif question:
+            answer.append(value)
+    if question:
+        pairs.append(
+            _QaPair(
+                question=question,
+                answer="".join(answer).strip(),
+                text=f"{question}{''.join(answer)}".strip(),
+            )
+        )
+    return "", pairs
 
 
 @dataclass(slots=True)
@@ -78,6 +203,81 @@ def build_section_tree(blocks: list[ContentBlock]) -> SectionNode:
             continue
         stack[-1].items.append(block)
     return root
+
+
+def _bbox_tuple(block: ContentBlock) -> tuple[float, float, float, float] | None:
+    """返回块的 PDF 版面坐标；缺失/非法时返回 None。"""
+    bbox = block.bbox
+    if not bbox or len(bbox) != 4:
+        return None
+    try:
+        return tuple(float(value) for value in bbox)  # type: ignore[return-value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _vertical_gap(
+    previous: ContentBlock,
+    current: ContentBlock,
+) -> float | None:
+    """计算同页、同栏相邻块的纵向间距；跨页/跨栏返回 None。"""
+    if previous.page_no != current.page_no:
+        return None
+    prev_box = _bbox_tuple(previous)
+    curr_box = _bbox_tuple(current)
+    if prev_box is None or curr_box is None:
+        return None
+    overlap = min(prev_box[2], curr_box[2]) - max(prev_box[0], curr_box[0])
+    if overlap <= 0:
+        return None
+    return curr_box[1] - prev_box[3]
+
+
+def _visual_groups(
+    blocks: list[ContentBlock],
+) -> list[list[ContentBlock]] | None:
+    """按“组内间距小、组间间距大”把块分成视觉组。
+
+    这是问答之外更通用的分组兜底：术语/定义、步骤/说明、问答等都可能是
+    “短起始块 + 紧跟内容 + 与下一组拉开间距”的结构。
+
+    为避免影响普通正文，只有同时满足以下条件才启用：
+
+    - 所有块都有 PDF bbox；
+    - 至少 3 组、2 个明显的大间距；
+    - 大多数组的首块是短块（≤80 token），普通段落通常不满足。
+    """
+    if len(blocks) < 4:
+        return None
+    gaps: list[float] = []
+    for previous, current in zip(blocks, blocks[1:]):
+        gap = _vertical_gap(previous, current)
+        if gap is not None and gap >= 0:
+            gaps.append(gap)
+    if len(gaps) < 3:
+        return None
+    ordered = sorted(gaps)
+    median = ordered[len(ordered) // 2]
+    threshold = max(8.0, median * 1.8)
+    large_gaps = [gap for gap in gaps if gap >= threshold]
+    if len(large_gaps) < 2:
+        return None
+
+    groups: list[list[ContentBlock]] = [[blocks[0]]]
+    for previous, current in zip(blocks, blocks[1:]):
+        gap = _vertical_gap(previous, current)
+        if gap is None or gap >= threshold:
+            groups.append([current])
+        else:
+            groups[-1].append(current)
+    if len(groups) < 3:
+        return None
+    short_starts = sum(
+        1 for group in groups if estimate_tokens(group[0].text) <= 80
+    )
+    if short_starts / len(groups) < 0.7:
+        return None
+    return groups
 
 
 def _is_chunkable(block: ContentBlock) -> bool:
@@ -215,6 +415,394 @@ class SectionAwareChunker:
                 if section_type is SectionType.LIST
                 else smart_join
             )
+            block_ids = [block.block_id for block in buffer]
+            page_no = next(
+                (block.page_no or None for block in buffer if block.page_no),
+                None,
+            )
+            language = next(
+                (block.language for block in buffer if block.language),
+                None,
+            )
+            heading_text = " > ".join(path) if path else None
+
+            # FAQ/问答章节：按“一组问答”为原子单位打包，避免 Q/A 被 token
+            # 边界拆开；普通正文没有显式问答标记，不会进入这个分支。
+            joined_text = joiner(
+                [block.text for block in buffer if block.text]
+            )
+            qa_prefix, qa_pairs = _extract_qa_pairs(joined_text, path=path)
+            if qa_pairs:
+                buffer.clear()
+
+                def emit_qa_chunk(
+                    pair_list: list[_QaPair],
+                    *,
+                    heading: str | None,
+                    heading_path: list[str],
+                    metadata: dict,
+                ) -> None:
+                    """输出一个不拆分的问答组 chunk。"""
+                    nonlocal index
+                    text = "\n\n".join(pair.text for pair in pair_list).strip()
+                    if not text:
+                        return
+                    embedding = (
+                        f"{heading}\n{text}" if heading else text
+                    )
+                    chunks.append(
+                        self.packer.build_chunk_from_text(
+                            doc_id=doc_id,
+                            kb_id=kb_id,
+                            block_type=block_type,
+                            section_type=section_type,
+                            index=index,
+                            text=text,
+                            embedding_text=embedding,
+                            block_ids=block_ids,
+                            page_no=page_no,
+                            heading=heading,
+                            heading_path=heading_path,
+                            language=language,
+                            quality_flags=set(unit_flags),
+                            metadata=metadata,
+                        )
+                    )
+                    index += 1
+
+                # FAQ 章节开头的非问答正文（如导语）按普通文本输出。
+                if qa_prefix:
+                    prefix_units = [
+                        Unit(text=piece)
+                        for piece in (split_sentences(qa_prefix) or [qa_prefix])
+                        if piece.strip()
+                    ]
+                    prefix_groups = pack_units(
+                        prefix_units,
+                        target_tokens=self.target_tokens,
+                        max_tokens=self.max_tokens,
+                        overlap_tokens=self.config.chunk_overlap_tokens,
+                    )
+                    for group in prefix_groups:
+                        text = smart_join([unit.text for unit in group])
+                        chunks.append(
+                            self.packer.build_chunk_from_text(
+                                doc_id=doc_id,
+                                kb_id=kb_id,
+                                block_type=block_type,
+                                section_type=section_type,
+                                index=index,
+                                text=text,
+                                embedding_text=(
+                                    f"{heading_text}\n{text}"
+                                    if heading_text
+                                    else text
+                                ),
+                                block_ids=block_ids,
+                                page_no=page_no,
+                                heading=heading_text,
+                                heading_path=path,
+                                language=language,
+                                quality_flags=set(unit_flags),
+                                metadata={"qa_prefix": True},
+                            )
+                        )
+                        index += 1
+
+                bucket: list[_QaPair] = []
+                bucket_tokens = 0
+
+                def flush_bucket() -> None:
+                    """输出当前短问答组；多个短 QA 共用一个 chunk。"""
+                    nonlocal bucket, bucket_tokens
+                    if not bucket:
+                        return
+                    emit_qa_chunk(
+                        bucket,
+                        heading=heading_text,
+                        heading_path=path,
+                        metadata={"qa": True, "qa_pairs": len(bucket)},
+                    )
+                    bucket = []
+                    bucket_tokens = 0
+
+                for pair in qa_pairs:
+                    tokens = pair.token_count
+                    if tokens > self.max_tokens:
+                        # 单个问答超过硬上限：不拆问答对，但把问题放进 heading，
+                        # 答案按句子/token 切分，所有子 chunk 共享同一问题。
+                        flush_bucket()
+                        units = [
+                            Unit(text=piece)
+                            for piece in (split_sentences(pair.text) or [pair.text])
+                            if piece.strip()
+                        ]
+                        groups = pack_units(
+                            units,
+                            target_tokens=self.target_tokens,
+                            max_tokens=self.max_tokens,
+                            overlap_tokens=0,
+                        )
+                        for group in groups:
+                            text = smart_join([unit.text for unit in group])
+                            question_heading = " > ".join(
+                                [*path, pair.question]
+                            )
+                            chunks.append(
+                                self.packer.build_chunk_from_text(
+                                    doc_id=doc_id,
+                                    kb_id=kb_id,
+                                    block_type=block_type,
+                                    section_type=section_type,
+                                    index=index,
+                                    text=text,
+                                    embedding_text=(
+                                        f"{question_heading}\n{text}"
+                                        if question_heading
+                                        else text
+                                    ),
+                                    block_ids=block_ids,
+                                    page_no=page_no,
+                                    heading=question_heading,
+                                    heading_path=[*path, pair.question],
+                                    language=language,
+                                    quality_flags=set(unit_flags),
+                                    metadata={"qa": True, "qa_long": True},
+                                )
+                            )
+                            index += 1
+                        continue
+
+                    if (
+                        bucket
+                        and bucket_tokens + tokens > self.target_tokens
+                    ):
+                        flush_bucket()
+                    if tokens > self.target_tokens:
+                        # 较长但不能拆：单独成 chunk。问题追加到原章节标题后，
+                        # 保留完整层级（标题 > 问题），不覆盖原 heading。
+                        flush_bucket()
+                        emit_qa_chunk(
+                            [pair],
+                            heading=" > ".join([*path, pair.question]),
+                            heading_path=[*path, pair.question],
+                            metadata={"qa": True, "qa_long": True},
+                        )
+                        continue
+                    bucket.append(pair)
+                    bucket_tokens += tokens
+                    if bucket_tokens >= self.target_tokens:
+                        flush_bucket()
+                flush_bucket()
+                return
+
+            # 通用“视觉分组”兜底：即使没有“问/答”等关键词，只要同标题下
+            # 呈现“组内紧、组间松”的重复结构（术语/定义、步骤/说明等），
+            # 也以组为单位打包，避免一组内容被 token 边界拆开。
+            visual_groups = _visual_groups(buffer)
+            if visual_groups:
+                buffer.clear()
+
+                def emit_visual_group(
+                    group: list[ContentBlock],
+                ) -> None:
+                    """输出单个视觉组；组内不拆，问题/标题沿用章节标题。"""
+                    nonlocal index
+                    if not group:
+                        return
+                    text = smart_join(
+                        [block.text for block in group if block.text]
+                    ).strip()
+                    if not text:
+                        return
+                    group_ids = [block.block_id for block in group]
+                    group_page = next(
+                        (block.page_no or None for block in group if block.page_no),
+                        None,
+                    )
+                    group_language = next(
+                        (block.language for block in group if block.language),
+                        None,
+                    )
+                    chunks.append(
+                        self.packer.build_chunk_from_text(
+                            doc_id=doc_id,
+                            kb_id=kb_id,
+                            block_type=block_type,
+                            section_type=section_type,
+                            index=index,
+                            text=text,
+                            embedding_text=(
+                                f"{heading_text}\n{text}"
+                                if heading_text
+                                else text
+                            ),
+                            block_ids=group_ids,
+                            page_no=group_page,
+                            heading=heading_text,
+                            heading_path=path,
+                            language=group_language,
+                            quality_flags=set(unit_flags),
+                            metadata={"visual_group": True},
+                        )
+                    )
+                    index += 1
+
+                visual_bucket: list[list[ContentBlock]] = []
+                visual_tokens = 0
+
+                def flush_visual_bucket() -> None:
+                    """输出若干短视觉组；多组共用一个 chunk。"""
+                    nonlocal visual_bucket, visual_tokens, index
+                    if not visual_bucket:
+                        return
+                    text = "\n\n".join(
+                        smart_join(
+                            [block.text for block in group if block.text]
+                        ).strip()
+                        for group in visual_bucket
+                    ).strip()
+                    if not text:
+                        visual_bucket = []
+                        visual_tokens = 0
+                        return
+                    group_ids = [
+                        block.block_id
+                        for group in visual_bucket
+                        for block in group
+                    ]
+                    group_page = next(
+                        (
+                            block.page_no or None
+                            for group in visual_bucket
+                            for block in group
+                            if block.page_no
+                        ),
+                        None,
+                    )
+                    group_language = next(
+                        (
+                            block.language
+                            for group in visual_bucket
+                            for block in group
+                            if block.language
+                        ),
+                        None,
+                    )
+                    chunks.append(
+                        self.packer.build_chunk_from_text(
+                            doc_id=doc_id,
+                            kb_id=kb_id,
+                            block_type=block_type,
+                            section_type=section_type,
+                            index=index,
+                            text=text,
+                            embedding_text=(
+                                f"{heading_text}\n{text}"
+                                if heading_text
+                                else text
+                            ),
+                            block_ids=group_ids,
+                            page_no=group_page,
+                            heading=heading_text,
+                            heading_path=path,
+                            language=group_language,
+                            quality_flags=set(unit_flags),
+                            metadata={
+                                "visual_group": True,
+                                "visual_groups": len(visual_bucket),
+                            },
+                        )
+                    )
+                    index += 1
+                    visual_bucket = []
+                    visual_tokens = 0
+
+                for group in visual_groups:
+                    group_text = smart_join(
+                        [block.text for block in group if block.text]
+                    ).strip()
+                    if not group_text:
+                        continue
+                    tokens = estimate_tokens(group_text)
+                    if tokens > self.max_tokens:
+                        flush_visual_bucket()
+                        units = [
+                            Unit(text=piece)
+                            for piece in (split_sentences(group_text) or [group_text])
+                            if piece.strip()
+                        ]
+                        groups = pack_units(
+                            units,
+                            target_tokens=self.target_tokens,
+                            max_tokens=self.max_tokens,
+                            overlap_tokens=0,
+                        )
+                        group_page = next(
+                            (
+                                block.page_no or None
+                                for block in group
+                                if block.page_no
+                            ),
+                            page_no,
+                        )
+                        group_language = next(
+                            (
+                                block.language
+                                for block in group
+                                if block.language
+                            ),
+                            language,
+                        )
+                        for packed in groups:
+                            piece_text = smart_join(
+                                [unit.text for unit in packed]
+                            )
+                            chunks.append(
+                                self.packer.build_chunk_from_text(
+                                    doc_id=doc_id,
+                                    kb_id=kb_id,
+                                    block_type=block_type,
+                                    section_type=section_type,
+                                    index=index,
+                                    text=piece_text,
+                                    embedding_text=(
+                                        f"{heading_text}\n{piece_text}"
+                                        if heading_text
+                                        else piece_text
+                                    ),
+                                    block_ids=[
+                                        block.block_id for block in group
+                                    ],
+                                    page_no=group_page,
+                                    heading=heading_text,
+                                    heading_path=path,
+                                    language=group_language,
+                                    quality_flags=set(unit_flags),
+                                    metadata={
+                                        "visual_group": True,
+                                        "visual_group_split": True,
+                                    },
+                                )
+                            )
+                            index += 1
+                        continue
+                    if (
+                        visual_bucket
+                        and visual_tokens + tokens > self.target_tokens
+                    ):
+                        flush_visual_bucket()
+                    if tokens > self.target_tokens:
+                        flush_visual_bucket()
+                        emit_visual_group(group)
+                        continue
+                    visual_bucket.append(group)
+                    visual_tokens += tokens
+                    if visual_tokens >= self.target_tokens:
+                        flush_visual_bucket()
+                flush_visual_bucket()
+                return
+
             units: list[Unit] = []
             for block in buffer:
                 text = (block.text or "").strip()
@@ -239,7 +827,6 @@ class SectionAwareChunker:
             buffer.clear()
             if not units:
                 return
-            heading_text = " > ".join(path) if path else None
             groups = pack_units(
                 units,
                 target_tokens=self.target_tokens,

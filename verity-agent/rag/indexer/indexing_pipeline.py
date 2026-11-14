@@ -34,7 +34,6 @@ from rag.shared.enums import (
     IndexMode,
 )
 from rag.shared.models import (
-    Chunk,
     DocumentSource,
     IndexingError,
     IndexingJob,

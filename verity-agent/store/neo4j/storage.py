@@ -162,8 +162,13 @@ class GraphStore:
         allowed_relations: Iterable[str],
         min_evidence: int = 2,
         limit: int = 20,
+        hub_as_intermediate: bool = False,
     ) -> list[dict[str, Any]]:
-        """1 跳强关系扩展；返回下一跳实体，不返回 chunk。"""
+        """1 跳强关系扩展；返回下一跳实体，不返回 chunk。
+
+        ``hub_as_intermediate=False``（默认）时排除 ``is_hub=true`` 的实体，
+        避免“犬/猫/药物”这类高频 hub 把图扩展变成泛化召回。
+        """
         return await self._read(
             """
             MATCH (k:Keyword {kb_id: $kb_id, name: $seed})
@@ -174,7 +179,7 @@ class GraphStore:
             MATCH (rel)-[:SUBJECT_OF|OBJECT_OF]-(n:Keyword)
             WHERE n.kb_id = $kb_id
               AND n <> k
-              AND coalesce(n.is_hub, false) = false
+              AND ($hub_as_intermediate OR coalesce(n.is_hub, false) = false)
             RETURN k.name AS seed_name,
                    rel.relation AS relation,
                    n.name AS next_hop_name,
@@ -188,5 +193,6 @@ class GraphStore:
                 "allowed_relations": list(allowed_relations),
                 "min_evidence": min_evidence,
                 "limit": limit,
+                "hub_as_intermediate": bool(hub_as_intermediate),
             },
         )

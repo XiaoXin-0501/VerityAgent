@@ -29,6 +29,7 @@ __all__ = [
     "DomainEntityType",
     "DomainEntity",
     "DomainRelationType",
+    "DomainRelationRule",
     "DomainPrompt",
     "DomainProfile",
     "DomainMatch",
@@ -99,6 +100,25 @@ class DomainRelationType(_Model):
     description: str = ""
 
 
+class DomainRelationRule(_Model):
+    """词典模式的关系抽取规则。
+
+    同一句中出现 ``subject_types`` 与 ``object_types`` 的实体，且命中
+    ``keywords``（为空表示只看类型组合）时，生成一条 ``name`` 关系。
+    规则数据放在领域画像 JSON，不在代码里写死医学词表。
+    """
+
+    # 关系名必须在 relations 中声明
+    name: str = Field(min_length=1)
+    # 触发词；为空表示“类型组合即关系”
+    keywords: list[str] = Field(default_factory=list)
+    # 主语/宾语实体类型
+    subject_types: list[str] = Field(default_factory=list)
+    object_types: list[str] = Field(default_factory=list)
+    # 规则置信度，需 >= graph_min_confidence 才会入图
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+
 class DomainPrompt(_Model):
     """领域提示词片段；具体 Prompt 骨架与输出格式由 PromptRegistry 模板追加。"""
 
@@ -124,6 +144,8 @@ class DomainProfile(_Model):
     entities: list[DomainEntity] = Field(default_factory=list)
     stopwords: list[str] = Field(default_factory=list)
     relations: list[DomainRelationType] = Field(default_factory=list)
+    # 词典模式关系规则；未配置时 lexicon 模式只抽关键词
+    relation_rules: list[DomainRelationRule] = Field(default_factory=list)
     prompt: DomainPrompt = Field(default_factory=DomainPrompt)
 
     # 领域词命中不足时是否补充通用名词关键词（由配置再叠加开关）
@@ -160,6 +182,31 @@ class DomainProfile(_Model):
             if item.name in relation_names:
                 raise ValueError(f"关系类型重复: {item.name}")
             relation_names.add(item.name)
+
+        rule_names: set[str] = set()
+        for rule in self.relation_rules:
+            if rule.name not in relation_names:
+                raise ValueError(
+                    f"关系规则 {rule.name} 未在 relations 中声明"
+                )
+            if not rule.subject_types or not rule.object_types:
+                raise ValueError(
+                    f"关系规则 {rule.name} 必须声明 subject_types/object_types"
+                )
+            unknown = sorted(
+                {
+                    *rule.subject_types,
+                    *rule.object_types,
+                }
+                - set(type_weights)
+            )
+            if unknown:
+                raise ValueError(
+                    f"关系规则 {rule.name} 引用了未声明实体类型: {unknown}"
+                )
+            if rule.name in rule_names:
+                raise ValueError(f"关系规则重复: {rule.name}")
+            rule_names.add(rule.name)
 
         entity_names: set[str] = set()
         alias_owner: dict[str, str] = {}

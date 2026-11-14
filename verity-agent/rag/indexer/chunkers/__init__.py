@@ -1,10 +1,10 @@
-"""默认 chunker 注册表（v1：纯文本、列表、表格均输出文本 chunk）。
+"""默认 chunker 注册表（v1：文本、列表、表格、代码均输出文本 chunk）。
 
 - 标题不作为独立 chunk，只作为后续块的完整 `heading_path` 上下文；
 - 实际入库由 `SectionAwareChunker` 按标题层级组织：默认从二级标题开始，
   内容超限才下钻三级/四级，避免一开始就切得过碎；
 - 紧贴表格/代码的短描述会吸附到特殊块，避免代码/表格脱离语义；
-- Markdown 代码围栏按普通文本切分，不启用代码 AST 切片；
+- Markdown 代码围栏交 `CodeChunker` 按行/逻辑块切分，不启用代码 AST；
 - 表格（Markdown/Excel/DOCX 表格）用 `TableChunker` 输出带表头的文本行；
 - 图片、图注、公式、OCR、幻灯片等策略暂不注册。
 """

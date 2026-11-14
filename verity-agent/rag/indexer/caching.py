@@ -69,7 +69,13 @@ def embedding_cache_key(
     input_type 任一变化都会得到新 key，旧向量自然失效。
     """
     return CacheKey(
-        scope=CacheScope.CHUNK_EMBEDDING,
+        # query 向量与 chunk 向量分开 scope，便于按不同 TTL/容量策略管理；
+        # key 仍按“模型 + 维度 + input_type + 文本摘要”内容寻址。
+        scope=(
+            CacheScope.QUERY_EMBEDDING
+            if input_type == "query"
+            else CacheScope.CHUNK_EMBEDDING
+        ),
         model_id=model_id,
         query_digest=sha256_text(text),
         version=f"{input_type}:{dimensions or 0}:{version}",

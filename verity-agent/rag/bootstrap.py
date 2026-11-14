@@ -9,10 +9,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from config.rag import IndexerConfig
+from config.rag import IndexerConfig, RetrieverConfig
 from prompt import PromptRegistry
+from store.neo4j import GraphStore
+from store.weaviate import WeaviateStore
 
-from .facade import Indexer, RagDependencies, create_indexer
+from .facade import Indexer, RagDependencies, Retriever, create_indexer, create_retriever
 from .indexer import (
     ChatCodeDescriber,
     ChatTableDescriber,
@@ -33,12 +35,21 @@ from .indexer import (
     build_default_chunk_cache,
     build_graph_extractor,
     get_indexer_policy,
+    load_domain_profile,
 )
+from .retriever.cache import RetrievalCache
+from .retriever.default import DefaultRetrievalPipeline
+from .retriever.graph_neo4j import Neo4jGraphExpander
+from .retriever.metadata import PgRetrievalMetadataStore, RetrievalMetadataStore
+from .retriever.rerank_provider import ProviderReranker
+from .retriever.weaviate import WeaviateHybridRecaller, WeaviateNeighborExpander
 
 __all__ = [
     "build_dependencies",
     "build_default_indexing_pipeline",
     "build_default_indexer",
+    "build_default_retrieval_pipeline",
+    "build_default_retriever",
     "build_table_describer_from_registry",
     "ensure_default_vector_schema",
 ]
@@ -203,6 +214,106 @@ async def ensure_default_vector_schema(
     store = vector_store or WeaviateChunkStore()
     return await store.ensure_schema(
         expected_dimensions=cfg.embedding_dimensions,
+    )
+
+
+def build_default_retrieval_pipeline(
+    config: RetrieverConfig | None = None,
+    *,
+    embedding_model: Any,
+    rerank_model: Any | None = None,
+    weaviate_store: WeaviateStore | None = None,
+    graph_store: GraphStore | None = None,
+    metadata_store: RetrievalMetadataStore | None = None,
+    cache: RetrievalCache | None = None,
+    domain_profile: Any | None = None,
+    domain_profile_name: str | None = None,
+    embedding_dimensions: int | None = None,
+    embedding_version: str = "v1",
+    max_query_chars: int = 2000,
+) -> DefaultRetrievalPipeline:
+    """装配默认检索流水线。
+
+    只构造对象，不建立连接。``embedding_model`` 必填；``rerank_model`` 为空
+    时流水线自动降级为融合分，并写 ``RERANK_DISABLED`` 告警。
+
+    - ``weaviate_store`` / ``graph_store`` 不传时使用进程默认连接管理器；
+    - ``metadata_store`` 默认走 PG，批量查文档状态/描述与 KB 索引版本；
+    - ``cache`` 默认使用带熔断的 Redis 缓存；Redis 不可用时降级为 miss；
+    - ``embedding_version`` 应传入库时 ``IndexerConfig.embedding_version``，
+      用于 query embedding 缓存失效；
+    - ``domain_profile`` 为空且 ``domain_profile_name`` 非空时加载对应领域
+      画像，用于 query → 图 seed 实体链接；图扩展默认关闭，不额外查询图。
+    """
+    cfg = config or RetrieverConfig()
+    if cache is None and cfg.cache_enabled:
+        cache = build_default_chunk_cache()
+    embedding = EmbeddingService(
+        embedding_model,
+        batch_size=1,
+        cache=cache,
+        cache_enabled=cfg.cache_enabled,
+        cache_ttl_s=2_592_000,
+        cache_version=embedding_version,
+        configured_dimensions=embedding_dimensions,
+    )
+    recaller = WeaviateHybridRecaller(
+        embedding_service=embedding,
+        vector_store=weaviate_store or WeaviateStore(),
+        dimensions=embedding_dimensions,
+        embedding_version=embedding_version,
+    )
+    reranker = None
+    if cfg.rerank_enabled and rerank_model is not None:
+        reranker = ProviderReranker(
+            rerank_model,
+            model_id=cfg.rerank_model_id,
+        )
+    profile = domain_profile
+    if profile is None and domain_profile_name:
+        profile = load_domain_profile(domain_profile_name)
+    return DefaultRetrievalPipeline(
+        cfg,
+        recaller=recaller,
+        reranker=reranker,
+        graph_expander=Neo4jGraphExpander(
+            graph_store=graph_store or GraphStore()
+        ),
+        neighbor_expander=WeaviateNeighborExpander(
+            vector_store=weaviate_store or WeaviateStore()
+        ),
+        metadata_store=metadata_store or PgRetrievalMetadataStore(),
+        cache=cache,
+        domain_profile=profile,
+        max_query_chars=max_query_chars,
+    )
+
+
+async def build_default_retriever(
+    config: RetrieverConfig | None = None,
+    *,
+    embedding_model: Any,
+    rerank_model: Any | None = None,
+    pipeline: DefaultRetrievalPipeline | None = None,
+    **kwargs: Any,
+) -> Retriever:
+    """创建使用默认检索流水线的 ``Retriever``；调用方负责 ``close()``。"""
+    cfg = config or RetrieverConfig()
+    default_pipeline = pipeline or build_default_retrieval_pipeline(
+        cfg,
+        embedding_model=embedding_model,
+        rerank_model=rerank_model,
+        **kwargs,
+    )
+    return await create_retriever(
+        cfg,
+        dependencies=build_dependencies(
+            retrieval_pipeline=default_pipeline,
+            embedding_model=embedding_model,
+            rerank_model=rerank_model,
+            vector_store=kwargs.get("weaviate_store"),
+            graph_store=kwargs.get("graph_store"),
+        ),
     )
 
 

@@ -5,6 +5,7 @@
 
 from .extractor import (
     DomainGraphExtractor,
+    DomainRelationExtractor,
     canonicalize_relations,
     merge_keywords,
     merged_allowed_relations,
@@ -20,6 +21,7 @@ from .models import (
     DomainMatch,
     DomainProfile,
     DomainPrompt,
+    DomainRelationRule,
     DomainRelationType,
 )
 
@@ -29,6 +31,8 @@ __all__ = [
     "DomainEntityType",
     "DomainGraphExtractor",
     "DomainMatch",
+    "DomainRelationExtractor",
+    "DomainRelationRule",
     "DomainProfile",
     "DomainPrompt",
     "DomainRelationType",

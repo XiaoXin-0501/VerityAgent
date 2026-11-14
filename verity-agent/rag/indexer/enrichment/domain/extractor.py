@@ -22,6 +22,7 @@ import logging
 
 from config.rag import IndexerConfig
 from rag.shared.models import Chunk, ChunkGraphExtraction, GraphRelation
+from utils.text import split_sentences
 
 from ..graph import (
     RelationExtractor,
@@ -37,12 +38,84 @@ from .models import DomainMatch, DomainProfile
 
 __all__ = [
     "DomainGraphExtractor",
+    "DomainRelationExtractor",
     "canonicalize_relations",
     "merge_keywords",
     "merged_allowed_relations",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class DomainRelationExtractor:
+    """基于领域画像 ``relation_rules`` 的句子级关系抽取器。
+
+    词典模式的关系不再依赖外部注入：同一句里同时出现规则声明的
+    subject/object 类型，且命中规则触发词（规则未配触发词时只看类型组合），
+    就生成一条关系。置信度 / 白名单 / 上限仍由 ``filter_relations`` 统一过滤。
+    """
+
+    def __init__(
+        self,
+        profile: DomainProfile,
+        *,
+        max_relations: int = 20,
+    ) -> None:
+        """保存画像与单 chunk 关系上限。"""
+        self.profile = profile
+        self.max_relations = max(1, int(max_relations))
+
+    async def __call__(self, chunk: Chunk) -> list[GraphRelation]:
+        """从标题 + 正文的每个句子推导关系三元组。"""
+        text = graph_source_text(chunk)
+        if not text:
+            return []
+
+        relations: list[GraphRelation] = []
+        # 同一实体对只保留优先级最高（rules 顺序靠前）的一条关系，避免
+        # “has_symptom + causes”这类重复边把图撑大。
+        seen_pairs: set[tuple[str, str]] = set()
+        for sentence in split_sentences(text) or [text]:
+            if len(relations) >= self.max_relations:
+                break
+            matches = self.profile.match(sentence)
+            if len(matches) < 2:
+                continue
+            lowered = sentence.lower()
+            for rule in self.profile.relation_rules:
+                if rule.keywords and not any(
+                    keyword.lower() in lowered for keyword in rule.keywords
+                ):
+                    continue
+                subjects = [
+                    match
+                    for match in matches
+                    if match.entity_type in rule.subject_types
+                ]
+                objects = [
+                    match
+                    for match in matches
+                    if match.entity_type in rule.object_types
+                ]
+                for subject in subjects:
+                    for obj in objects:
+                        if subject.name == obj.name:
+                            continue
+                        pair = (subject.name, obj.name)
+                        if pair in seen_pairs:
+                            continue
+                        seen_pairs.add(pair)
+                        relations.append(
+                            GraphRelation(
+                                subject=subject.name,
+                                relation=rule.name,
+                                object=obj.name,
+                                confidence=rule.confidence,
+                            )
+                        )
+                        if len(relations) >= self.max_relations:
+                            return relations
+        return relations
 
 
 class DomainGraphExtractor:
@@ -64,6 +137,12 @@ class DomainGraphExtractor:
         self.config = config
         self.profile = profile
         self.relation_extractor = relation_extractor
+        if self.relation_extractor is None and profile.relation_rules:
+            # 画像声明了关系规则时，lexicon 模式也能产出关系，而不是 0 关系。
+            self.relation_extractor = DomainRelationExtractor(
+                profile,
+                max_relations=config.graph_max_relations_per_chunk,
+            )
         self.policy = policy or get_indexer_policy()
         # 通用停用词与领域停用词合并，避免通用词表只在一处生效。
         self._stopwords = frozenset(self.policy.graph.generic_stopwords) | (

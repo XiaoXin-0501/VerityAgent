@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from provider.embedding.types import EmbeddingUsage
 from utils.time import utcnow

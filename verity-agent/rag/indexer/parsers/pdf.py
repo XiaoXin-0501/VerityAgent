@@ -68,11 +68,56 @@ _NUMBERED_COMPOUND_HEADING = re.compile(
 _NUMBERED_SINGLE_HEADING = re.compile(
     r"^\s*\d{1,2}\.(?=[一-鿿A-Za-z])\s*"
 )
+# 期刊常见 “1 | Introduction”“2.1 | Histopathology” 编号格式。
+_NUMBERED_PIPE_HEADING = re.compile(
+    r"^\s*\d{1,2}(?:\.\d{1,2})*\s*\|\s*[A-Za-z一-鿿]"
+)
+# 摘要标签常与正文同在一个文本块：ABSTRACT Feline megaesophagus...
+# 英文标签要求词边界，避免把 “ABSTRACTION...” 误判成摘要。
+_INLINE_ABSTRACT_EN = re.compile(
+    r"^\s*(?P<label>ABSTRACT|SUMMARY)\b\s*[:：]?\s*(?P<body>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_INLINE_ABSTRACT_CN = re.compile(
+    r"^\s*(?P<label>摘要|概要)\s*[:：]?\s*(?P<body>.+)$",
+    re.DOTALL,
+)
+
+# 学术 PDF 常见的独立小节标题；这些标题经常比正文小、但加粗，
+# 字号规则识别不到，用白名单兜底（只接受短行，避免正文误判）。
+_SECTION_LABEL_HEADINGS = frozenset(
+    {
+        "abstract", "summary", "introduction", "background", "objectives",
+        "objective", "methods", "materials and methods", "results",
+        "case presentation", "case description", "discussion", "conclusion",
+        "conclusions", "references", "acknowledgment", "acknowledgments",
+        "acknowledgement", "acknowledgements", "funding", "ethics statement",
+        "consent", "data availability statement", "conflict of interest",
+        "author contributions", "supplementary materials", "abbreviations",
+        "摘要", "引言", "前言", "方法", "材料与方法", "结果", "病例介绍",
+        "病例报告", "讨论", "结论", "参考文献", "致谢", "基金项目",
+        "伦理声明", "知情同意", "利益冲突", "作者贡献", "数据可用性声明",
+    }
+)
 
 # 版面阅读顺序：宽度超过页面 60% 的块视为“跨栏块”，作为上下分区的锚点；
 # 左右栏之间的最小空白用于判定双栏。
 _WIDE_BLOCK_RATIO = 0.6
-_COLUMN_SPLIT_MIN_GAP = 15.0
+_COLUMN_SPLIT_MIN_GAP = 10.0
+
+# 页面边角的出版社页脚/版权/下载水印；只在页边区域命中，不影响正文里
+# 偶尔出现的 “copyright” 等词。
+_PAGE_FURNITURE = re.compile(
+    r"(this is an open access article|creative commons attribution license|"
+    r"copyright\s*©|downloaded from|wiley online library|terms and conditions|"
+    r"oa articles are governed|for personal use only|"
+    r"provided the original work is properly cited|"
+    r"^case reports in veterinary medicine,?\s*\d{4}|"
+    r"^case reports in veterinary medicine$|"
+    r"^https?://doi\.org/|"
+    r"^\d+\s+of\s+\d+$)",
+    re.IGNORECASE,
+)
 
 # PyMuPDF find_tables 在“线条极多”的复杂页面上可能崩溃（进程级 segfault），
 # 超过该绘制对象数时改用 pdfplumber 抽表，避免整篇文档解析失败。
@@ -152,6 +197,39 @@ def _normalize_line(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _section_label_level(text: str) -> int | None:
+    """识别 ``References / Funding / Ethics Statement`` 等独立小节标题。
+
+    这些标题经常是 8pt 加粗（比 9pt 正文还小），字号规则不命中。
+    只接受白名单短行，正文中出现同样的词不会被当成标题。
+    """
+    value = re.sub(r"\s+", " ", (text or "").strip()).rstrip(":：").lower()
+    if not value or len(value) > 60:
+        return None
+    if value in _SECTION_LABEL_HEADINGS:
+        return 3
+    return None
+
+
+def _split_inline_abstract(text: str) -> tuple[str, str] | None:
+    """拆分 ``ABSTRACT 正文...`` 这类“标签 + 正文同块”的摘要。
+
+    期刊 PDF 常把 ``ABSTRACT`` 和摘要正文放在同一个文本块里；如果整块按
+    普通段落处理，摘要标题就丢了，正文也无法作为独立章节切片。
+    只识别摘要类标签，避免把普通段落开头的词误当标题。
+    """
+    match = _INLINE_ABSTRACT_EN.match(text or "") or _INLINE_ABSTRACT_CN.match(
+        text or ""
+    )
+    if not match:
+        return None
+    label = match.group("label").strip()
+    body = match.group("body").strip()
+    if not body:
+        return None
+    return label, body
+
+
 def _numbered_heading_level(text: str) -> int | None:
     """识别 ``1.诊断`` / ``1.1 病例信息`` / ``1.3.1 血常规`` 这类编号标题。
 
@@ -161,6 +239,11 @@ def _numbered_heading_level(text: str) -> int | None:
     value = (text or "").strip()
     if not value or len(value) > 80:
         return None
+    if _NUMBERED_PIPE_HEADING.match(value):
+        # 期刊格式 “1 | Introduction” 放在文档标题下一级（level 3），
+        # “2.1 | Histopathology” 再下一级（level 4）。
+        number = value.split("|", 1)[0].strip().rstrip(".")
+        return min(6, number.count(".") + 3)
     match = _NUMBERED_COMPOUND_HEADING.match(value)
     if match:
         number = value.split()[0].rstrip(".")
@@ -168,6 +251,20 @@ def _numbered_heading_level(text: str) -> int | None:
     if _NUMBERED_SINGLE_HEADING.match(value):
         return 2
     return None
+
+
+def _is_page_furniture(line: "_PdfLine", page_height: float) -> bool:
+    """判断页边出版社页脚/版权/下载水印，避免混入正文 chunk。"""
+    if line.ocr:
+        return False
+    text = (line.text or "").strip()
+    if not text:
+        return False
+    in_margin = (
+        line.bbox[1] < page_height * 0.06
+        or line.bbox[3] > page_height * 0.88
+    )
+    return in_margin and bool(_PAGE_FURNITURE.search(text))
 
 
 def _bbox_width(bbox: tuple[float, float, float, float]) -> float:
@@ -194,7 +291,9 @@ def _detect_column_split(
             left.append(bbox)
         elif bbox[0] >= mid:
             right.append(bbox)
-    if len(left) < 3 or len(right) < 3:
+    # 期刊首页常只有 2 个窄块/栏（如 Introduction 标题 + 首段），
+    # 3 块阈值会把这种页误判为单栏。
+    if len(left) < 2 or len(right) < 2:
         return None
     gap_left = max(bbox[2] for bbox in left)
     gap_right = min(bbox[0] for bbox in right)
@@ -506,7 +605,7 @@ class PdfParser:
                         "provider": self._ocr_config.provider,
                     },
                 )
-            warnings.append("PDF 未检测到文本层，图片/扫描件暂不处理")
+            warnings.append("PDF 未检测到可提取文本层（OCR/版式解析不可用或失败）")
 
         return make_parsed_document(
             source=source,
@@ -867,6 +966,7 @@ class PdfParser:
                         text=structured.markdown or "",
                         parser_id=self.parser_id,
                         table=structured,
+                        bbox=list(_bbox),
                         heading_text=current_heading,
                         heading_path=current_path,
                     )
@@ -889,6 +989,9 @@ class PdfParser:
                 if self._is_margin_page_number(line, payload.height):
                     dropped += 1
                     continue
+                if _is_page_furniture(line, payload.height):
+                    dropped += 1
+                    continue
                 kept_lines.append(line)
             if not kept_lines:
                 continue
@@ -896,13 +999,53 @@ class PdfParser:
             text = join_wrapped_lines([line.text for line in kept_lines])
             if not text:
                 continue
+            is_ocr = any(line.ocr for line in kept_lines)
+            # “ABSTRACT 正文...” 同块：拆出摘要标题，正文作为独立段落，
+            # 后续切片才能形成“文档标题 > ABSTRACT > 摘要正文”的结构。
+            inline_abstract = _split_inline_abstract(text)
+            if inline_abstract is not None:
+                label, body = inline_abstract
+                path_text, path = headings.apply(3, label)
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.HEADING,
+                        text=label,
+                        parser_id=self.parser_id,
+                        heading_level=3,
+                        heading_text=path_text,
+                        heading_path=path,
+                        bbox=list(_bbox),
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata={"ocr": True} if is_ocr else {},
+                    )
+                )
+                order += 1
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.PARAGRAPH,
+                        text=body,
+                        parser_id=self.parser_id,
+                        heading_text=path_text,
+                        heading_path=path,
+                        bbox=list(_bbox),
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata={"ocr": True} if is_ocr else {},
+                    )
+                )
+                order += 1
+                continue
             level = self._heading_level(
                 text,
                 max_size=max(line.size for line in kept_lines),
                 body_size=body_size,
                 all_bold=all(line.bold for line in kept_lines),
             )
-            is_ocr = any(line.ocr for line in kept_lines)
             if level is not None:
                 path_text, path = headings.apply(level, text)
                 blocks.append(
@@ -916,6 +1059,7 @@ class PdfParser:
                         heading_level=level,
                         heading_text=path_text,
                         heading_path=path,
+                        bbox=list(_bbox),
                         confidence=payload.ocr_confidence if is_ocr else None,
                         metadata={"ocr": True} if is_ocr else {},
                     )
@@ -932,6 +1076,7 @@ class PdfParser:
                         parser_id=self.parser_id,
                         heading_text=current_heading,
                         heading_path=current_path,
+                        bbox=list(_bbox),
                         confidence=payload.ocr_confidence if is_ocr else None,
                         metadata={"ocr": True} if is_ocr else {},
                     )
@@ -955,6 +1100,10 @@ class PdfParser:
         """
         if len(text) > 160:
             return None
+        # 学术小节标题（References/Funding/…）经常比正文小，优先用白名单兜底。
+        label_level = _section_label_level(text)
+        if label_level is not None:
+            return label_level
         ratio = max_size / body_size if body_size > 0 else 1.0
         font_level: int | None = None
         if ratio >= 2.2:
@@ -1122,5 +1271,5 @@ class PdfParser:
             ),
             blocks=blocks,
             pages=pages,
-            warnings=[] if pages_with_text else ["PDF 未检测到文本层，图片/扫描件暂不处理"],
+            warnings=[] if pages_with_text else ["PDF 未检测到可提取文本层（OCR/版式解析不可用或失败）"],
         )
