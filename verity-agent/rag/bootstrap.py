@@ -242,6 +242,7 @@ def build_default_retrieval_pipeline(
     embedding_version: str = "v1",
     query_rewrite_model: Any | None = None,
     intent_model: Any | None = None,
+    prompt_registry: PromptRegistry | None = None,
     max_query_chars: int = 2000,
 ) -> DefaultRetrievalPipeline:
     """装配默认检索流水线。
@@ -255,7 +256,8 @@ def build_default_retrieval_pipeline(
     - ``embedding_version`` 应传入库时 ``IndexerConfig.embedding_version``，
       用于 query embedding 缓存失效；
     - ``domain_profile`` 为空且 ``domain_profile_name`` 非空时加载对应领域
-      画像，用于 query → 图 seed 实体链接；图扩展默认关闭，不额外查询图。
+      画像，用于 query → 图 seed 实体链接；图扩展默认关闭，不额外查询图；
+    - ``prompt_registry`` 用于 query 改写/意图分类模板的外部覆盖。
     """
     cfg = config or RetrieverConfig()
     if cache is None and cfg.cache_enabled:
@@ -295,6 +297,7 @@ def build_default_retrieval_pipeline(
             max_variants=cfg.query_rewrite_max_variants,
             timeout_s=cfg.query_rewrite_timeout_s,
             cache=cache,
+            prompts=prompt_registry,
         )
     intent_classifier = None
     if cfg.intent_llm_enabled and intent_model is not None:
@@ -306,6 +309,7 @@ def build_default_retrieval_pipeline(
             ),
             timeout_s=cfg.intent_timeout_s,
             cache=cache,
+            prompts=prompt_registry,
         )
     return DefaultRetrievalPipeline(
         cfg,

@@ -1,7 +1,9 @@
 # Prompt 模板目录
 
 - `manifest.json`：prompt id → 文件/版本/变量声明；**模板正文不写进 manifest**。
-- `rag/*.md`：当前已使用的 Prompt 正文。
+- `agent/`：Agent 主循环基础 system prompt。
+- `memory/`：长期画像/事实抽取、会话压缩、事实冲突判定。
+- `rag/`：文档/表格/代码描述、查询改写、意图分类、图抽取。
 - 业务代码只引用 `prompt/ids.py` 中的 `PromptId`，不直接写字符串 id。
 
 ## 新增 Prompt

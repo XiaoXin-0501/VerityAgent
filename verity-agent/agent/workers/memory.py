@@ -2,8 +2,7 @@
 
 消费 ``user_messages`` 队列：同一用户的一批消息 + 当前 7 段画像交给小模型，
 模型输出画像更新 JSON，代码用乐观锁写回 ``user_memory``，成功后删除暂存行。
-本版只更新画像（profile），不写 Weaviate UserFact；事实 worker 仍可复用同一
-队列协议后续接入。
+开启事实写入时，同一批抽取结果还会经过冲突判定写入 Weaviate UserFact。
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from uuid import UUID
 from agent.hooks.enum import HookEvent, HookSource
 from agent.hooks.scope import HookScope
 from config.memory import MemoryConfig
+from prompt import PromptId, PromptRegistry, get_default_prompt_registry
 from provider.enums import ModelRole
 from provider.llm.helpers import response_text as _response_text
 from provider.llm.types import (
@@ -41,17 +41,6 @@ __all__ = ["MemoryProfileWorker"]
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """你负责维护用户的长期画像和原子事实。只输出 JSON 对象：
-{
-  "work_context": "...", "personal_context": "...", "top_of_mind": "...",
-  "cognitive_style": "...", "recent_months": "...", "earlier_context": "...",
-  "long_term_background": "...",
-  "facts": [{"content": "...", "category": "work|personal|preference|constraint|goal|history",
-             "confidence": 0.5}]
-}
-画像字段是简短中文摘要；没有新信息时保留旧值。facts 只写用户明确表达、
-可长期复用的原子事实，不要编造；不要输出 Markdown。"""
-
 
 class MemoryProfileWorker:
     """单进程长期记忆画像抽取器。"""
@@ -67,8 +56,9 @@ class MemoryProfileWorker:
         hook_dispatcher: Any | None = None,
         facts_store: Any | None = None,
         conflict_service: Any | None = None,
+        prompts: PromptRegistry | None = None,
     ) -> None:
-        """保存模型、仓库与可选 Hook dispatcher；不建立连接。"""
+        """保存模型、仓库、Prompt 注册表与可选 Hook dispatcher；不建立连接。"""
         self.config = config
         self.model = model
         self.model_id = model_id
@@ -77,6 +67,10 @@ class MemoryProfileWorker:
         self.hook_dispatcher = hook_dispatcher
         self.facts_store = facts_store
         self.conflict_service = conflict_service
+        self.prompts = prompts or get_default_prompt_registry()
+        self.system_prompt = self.prompts.render_text(
+            PromptId.MEMORY_EXTRACTION_SYSTEM
+        )
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -248,7 +242,7 @@ class MemoryProfileWorker:
             messages=[
                 ModelMessage(
                     role=ModelRole.SYSTEM,
-                    content=[ModelTextPart(text=_SYSTEM_PROMPT)],
+                    content=[ModelTextPart(text=self.system_prompt)],
                 ),
                 ModelMessage(
                     role=ModelRole.USER,

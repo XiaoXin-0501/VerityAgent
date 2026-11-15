@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+from prompt import PromptId, PromptRegistry, get_default_prompt_registry
 from provider.enums import ModelRole
 from provider.llm.helpers import response_text as _response_text
 from provider.llm.types import (
@@ -21,12 +22,6 @@ from utils.text import normalize_whitespace
 __all__ = ["FactConflictDecision", "FactConflictService"]
 
 logger = logging.getLogger(__name__)
-
-_PROMPT = """判断新事实与候选事实的关系。只输出 JSON：
-{"decision":"compatible|duplicate|supersede|unresolved",
- "target_id":"候选 id 或空字符串","reason":"简短理由"}
-规则：内容相同/同义为 duplicate；新事实明确取代旧事实为 supersede；
-适用背景不同、可以共存为 compatible；无法判断为 unresolved。"""
 
 
 class FactConflictDecision(BaseModel):
@@ -51,14 +46,19 @@ class FactConflictService:
         enabled: bool = True,
         timeout_s: float = 20.0,
         max_output_tokens: int = 128,
+        prompts: PromptRegistry | None = None,
     ) -> None:
-        """保存判定模型与策略。"""
+        """保存判定模型、Prompt 注册表与策略。"""
         self.model = model
         self.model_id = model_id
         self.max_candidates = max(1, int(max_candidates))
         self.enabled = enabled
         self.timeout_s = max(1.0, float(timeout_s))
         self.max_output_tokens = max(16, int(max_output_tokens))
+        self.prompts = prompts or get_default_prompt_registry()
+        self.system_prompt = self.prompts.render_text(
+            PromptId.MEMORY_FACT_CONFLICT_SYSTEM
+        )
 
     async def decide(
         self,
@@ -88,7 +88,7 @@ class FactConflictService:
             messages=[
                 ModelMessage(
                     role=ModelRole.SYSTEM,
-                    content=[ModelTextPart(text=_PROMPT)],
+                    content=[ModelTextPart(text=self.system_prompt)],
                 ),
                 ModelMessage(
                     role=ModelRole.USER,

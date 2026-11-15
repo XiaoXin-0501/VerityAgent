@@ -11,6 +11,8 @@ from typing import Any
 
 from config import settings
 from config.agent import AgentConfig
+from prompt import PromptId, get_default_prompt_registry
+from utils.time import utcnow
 
 from .adapters.facts import WeaviateFactStore
 from .adapters.llm import RoutingChatAdapter
@@ -92,6 +94,13 @@ def build_default_agent_dependencies(
         model_ids=settings.llm.model_ids,
         fallback_model_ids=settings.llm.fallback_model_ids,
     )
+    # 未显式注入时使用内置基础 system prompt；lifespan 会注入带领域信息的版本。
+    if system_prompt is None:
+        system_prompt = get_default_prompt_registry().render_text(
+            PromptId.AGENT_SYSTEM,
+            assistant_name=settings.app.name,
+            current_date=utcnow().date().isoformat(),
+        )
     return AgentDependencies(
         llm=ChatService(
             RoutingChatAdapter(

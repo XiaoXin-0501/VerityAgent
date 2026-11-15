@@ -18,6 +18,8 @@ import json
 import logging
 from typing import Any
 
+from prompt import PromptId, PromptRegistry, get_default_prompt_registry
+from provider.enums import ModelRole
 from provider.llm.helpers import response_text as _response_text
 from provider.llm.types import (
     ChatModelRequest,
@@ -25,7 +27,6 @@ from provider.llm.types import (
     ModelMessage,
     ModelTextPart,
 )
-from provider.enums import ModelRole
 from rag.retriever.cache import RetrievalCache
 from rag.shared.enums import QueryIntent
 from store.redis.cache import CacheKey, CacheScope
@@ -34,21 +35,6 @@ from utils.hashing import sha256_text
 __all__ = ["ChatQueryRewriter", "ChatIntentClassifier"]
 
 logger = logging.getLogger(__name__)
-
-# Prompt 版本变化会让缓存自然失效；改 prompt 时同步递增。
-_REWRITE_PROMPT_VERSION = "v1"
-_INTENT_PROMPT_VERSION = "v1"
-
-_REWRITE_SYSTEM = """你是检索查询改写器。把用户问题改写成适合知识库检索的简短查询。
-要求：
-1. 保留原始实体、数字、否定和语言；
-2. 最多输出 {max_variants} 条，每条一行，不要编号、不要解释；
-3. 不要引入原问题没有的事实；
-4. 如果原问题已经足够清晰，可以只输出原问题。"""
-
-_INTENT_SYSTEM = """你是查询意图分类器。只能从以下枚举中选择一个：
-LOOKUP（查定义/事实）、COMPARE（比较/区别）、SUMMARIZE（总结/概括）、HOWTO（步骤/方法）。
-只输出枚举名，不要解释；无法判断输出 UNKNOWN。"""
 
 
 def _parse_variants(text: str, *, max_variants: int) -> list[str]:
@@ -104,8 +90,9 @@ class ChatQueryRewriter:
         max_output_tokens: int = 256,
         cache: RetrievalCache | None = None,
         cache_ttl_s: int = 86_400,
+        prompts: PromptRegistry | None = None,
     ) -> None:
-        """保存模型、超时与可选缓存；不发起网络请求。"""
+        """保存模型、超时、Prompt 注册表与可选缓存；不发起网络请求。"""
         self.model = model
         self.model_id = model_id
         self.max_variants = max(1, int(max_variants))
@@ -113,6 +100,16 @@ class ChatQueryRewriter:
         self.max_output_tokens = max(32, int(max_output_tokens))
         self.cache = cache
         self.cache_ttl_s = max(1, int(cache_ttl_s))
+        self.prompts = prompts or get_default_prompt_registry()
+        template = self.prompts.get(PromptId.RAG_QUERY_REWRITE_SYSTEM)
+        self.system_prompt = self.prompts.render_text(
+            PromptId.RAG_QUERY_REWRITE_SYSTEM,
+            max_variants=self.max_variants,
+        )
+        # checksum 进入缓存 key：覆盖模板后旧的改写结果自然失效。
+        self._prompt_version = (
+            f"{template.version}:{template.checksum[:12]}:{self.max_variants}"
+        )
 
     async def rewrite(self, query: str) -> list[str]:
         """返回改写变体（不含原 query）；失败/超时返回空列表。"""
@@ -124,13 +121,7 @@ class ChatQueryRewriter:
             messages=[
                 ModelMessage(
                     role=ModelRole.SYSTEM,
-                    content=[
-                        ModelTextPart(
-                            text=_REWRITE_SYSTEM.format(
-                                max_variants=self.max_variants
-                            )
-                        )
-                    ],
+                    content=[ModelTextPart(text=self.system_prompt)],
                 ),
                 ModelMessage(
                     role=ModelRole.USER,
@@ -165,7 +156,7 @@ class ChatQueryRewriter:
             scope=CacheScope.QUERY_REWRITE,
             query_digest=sha256_text(query),
             model_id=self.model_id,
-            version=f"{_REWRITE_PROMPT_VERSION}:{self.max_variants}",
+            version=self._prompt_version,
         )
 
     async def _read_cache(self, query: str) -> list[str] | None:
@@ -208,14 +199,20 @@ class ChatIntentClassifier:
         max_output_tokens: int = 16,
         cache: RetrievalCache | None = None,
         cache_ttl_s: int = 86_400,
+        prompts: PromptRegistry | None = None,
     ) -> None:
-        """保存模型、超时与可选缓存。"""
+        """保存模型、超时、Prompt 注册表与可选缓存。"""
         self.model = model
         self.model_id = model_id
         self.timeout_s = max(0.1, float(timeout_s))
         self.max_output_tokens = max(4, int(max_output_tokens))
         self.cache = cache
         self.cache_ttl_s = max(1, int(cache_ttl_s))
+        self.prompts = prompts or get_default_prompt_registry()
+        template = self.prompts.get(PromptId.RAG_INTENT_SYSTEM)
+        self.system_prompt = self.prompts.render_text(PromptId.RAG_INTENT_SYSTEM)
+        # Prompt 正文变化时让意图缓存自然失效。
+        self._prompt_version = f"{template.version}:{template.checksum[:12]}"
 
     async def classify(self, query: str) -> QueryIntent | None:
         """规则未命中时调用 LLM；失败/超时返回 None。"""
@@ -227,7 +224,7 @@ class ChatIntentClassifier:
             messages=[
                 ModelMessage(
                     role=ModelRole.SYSTEM,
-                    content=[ModelTextPart(text=_INTENT_SYSTEM)],
+                    content=[ModelTextPart(text=self.system_prompt)],
                 ),
                 ModelMessage(
                     role=ModelRole.USER,
@@ -261,7 +258,7 @@ class ChatIntentClassifier:
             scope=CacheScope.QUERY_INTENT,
             query_digest=sha256_text(query),
             model_id=self.model_id,
-            version=_INTENT_PROMPT_VERSION,
+            version=self._prompt_version,
         )
 
     async def _read_cache(self, query: str) -> QueryIntent | None:

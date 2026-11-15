@@ -186,6 +186,91 @@
         {"name": "context", "required": false, "default": ""},
         {"name": "code", "required": false, "default": ""}
       ]
+    },
+    "agent.system": {
+      "file": "agent/system.md",
+      "version": 1,
+      "description": "Agent 主循环的基础 system prompt（角色、工具、引用、安全与表达规则）",
+      "purpose": "agent.chat",
+      "static": false,
+      "cacheable": true,
+      "variables": [
+        {
+          "name": "assistant_name",
+          "description": "助手名称",
+          "required": false,
+          "default": "Verity"
+        },
+        {
+          "name": "domain_name",
+          "description": "知识库领域名称；由 DomainProfile.display_name 注入",
+          "required": false,
+          "default": "通用"
+        },
+        {
+          "name": "domain_description",
+          "description": "领域说明；由 DomainProfile.description 注入",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "current_date",
+          "description": "当前日期（UTC，YYYY-MM-DD）",
+          "required": false,
+          "default": "未知"
+        }
+      ]
+    },
+    "rag.query_rewrite.system": {
+      "file": "rag/query_rewrite.system.md",
+      "version": 1,
+      "description": "查询改写 system prompt",
+      "purpose": "rag.query_rewrite",
+      "static": false,
+      "cacheable": true,
+      "variables": [
+        {
+          "name": "max_variants",
+          "description": "最多输出的改写条数",
+          "required": true
+        }
+      ]
+    },
+    "rag.intent.system": {
+      "file": "rag/intent.system.md",
+      "version": 1,
+      "description": "规则未命中时的 LLM 意图分类 system prompt",
+      "purpose": "rag.intent",
+      "static": true,
+      "cacheable": true,
+      "variables": []
+    },
+    "memory.extraction.system": {
+      "file": "memory/extraction.system.md",
+      "version": 1,
+      "description": "长期画像与原子事实抽取 system prompt",
+      "purpose": "memory.extraction",
+      "static": true,
+      "cacheable": true,
+      "variables": []
+    },
+    "memory.compression.system": {
+      "file": "memory/compression.system.md",
+      "version": 1,
+      "description": "会话摘要压缩 system prompt",
+      "purpose": "memory.compression",
+      "static": true,
+      "cacheable": true,
+      "variables": []
+    },
+    "memory.fact_conflict.system": {
+      "file": "memory/fact_conflict.system.md",
+      "version": 1,
+      "description": "UserFact 冲突判定 system prompt",
+      "purpose": "memory.fact_conflict",
+      "static": true,
+      "cacheable": true,
+      "variables": []
     }
   }
 }

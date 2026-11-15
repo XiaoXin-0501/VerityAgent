@@ -34,9 +34,10 @@ from agent.workers import (
     MemoryProfileWorker,
     UserDeletionWorker,
 )
+from prompt import PromptId, build_prompt_registry
 from provider.factory import build_registry
-from prompt import build_prompt_registry
 from rag.bootstrap import build_default_retriever
+from rag.indexer.enrichment.domain import load_domain_profile
 from store.minio import close_minio, init_minio
 from store.neo4j import (
     check_schema as check_graph_schema,
@@ -54,6 +55,7 @@ from store.weaviate import (
     get_weaviate,
     init_weaviate,
 )
+from utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +112,7 @@ def _default_chat_model_id() -> str | None:
     )
 
 
-async def _build_rag_retriever(registry):
+async def _build_rag_retriever(registry, prompt_registry):
     """按 Settings 构造 RAG Retriever；缺少 embedding/向量库时返回 None。"""
     cfg = settings.rag
     if not settings.weaviate.enabled:
@@ -157,6 +159,7 @@ async def _build_rag_retriever(registry):
         rerank_model=rerank_model,
         query_rewrite_model=query_rewrite_model,
         intent_model=intent_model,
+        prompt_registry=prompt_registry,
         domain_profile_name=cfg.indexer.domain_profile,
         embedding_dimensions=cfg.indexer.embedding_dimensions,
         embedding_version=cfg.indexer.embedding_version,
@@ -172,7 +175,7 @@ async def _build_rag_retriever(registry):
     return retriever
 
 
-def _build_memory_worker(registry, hook_dispatcher):
+def _build_memory_worker(registry, hook_dispatcher, prompt_registry):
     """按配置构造记忆抽取 worker；未启用/无模型时返回 None。"""
     cfg = settings.memory
     if not cfg.worker_enabled:
@@ -204,6 +207,7 @@ def _build_memory_worker(registry, hook_dispatcher):
                 max_candidates=cfg.fact_conflict_max_candidates,
                 timeout_s=cfg.fact_conflict_timeout_s,
                 max_output_tokens=cfg.fact_conflict_max_output_tokens,
+                prompts=prompt_registry,
             )
     return MemoryProfileWorker(
         cfg,
@@ -216,10 +220,11 @@ def _build_memory_worker(registry, hook_dispatcher):
             else None
         ),
         conflict_service=conflict_service,
+        prompts=prompt_registry,
     )
 
 
-def _build_compressor(registry, hook_dispatcher):
+def _build_compressor(registry, hook_dispatcher, prompt_registry):
     """按配置构造回合后摘要压缩服务；未启用/无模型时返回 None。"""
     cfg = settings.memory
     if not cfg.compression_enabled:
@@ -240,6 +245,7 @@ def _build_compressor(registry, hook_dispatcher):
         model=model,
         model_id=str(model_id),
         hook_dispatcher=hook_dispatcher,
+        prompts=prompt_registry,
     )
 
 
@@ -277,6 +283,32 @@ def _build_penalty_worker(config, queue):
         batch_size=config.penalty_batch_size,
         interval_s=config.penalty_interval_s,
         max_attempts=config.penalty_max_attempts,
+    )
+
+
+def _build_agent_system_prompt(prompt_registry) -> str:
+    """渲染 Agent 基础 system prompt；领域画像不可用时退回通用描述。"""
+    domain_name = "通用"
+    domain_description = ""
+    try:
+        profile = load_domain_profile(
+            settings.rag.indexer.domain_profile,
+            path=settings.rag.indexer.domain_profile_path,
+            directory=settings.rag.indexer.domain_profile_dir,
+        )
+        domain_name = profile.display_name or profile.name
+        domain_description = profile.description or ""
+    except Exception:  # noqa: BLE001 - 画像缺失不应阻断普通对话
+        logger.warning(
+            "加载领域画像失败，Agent system prompt 使用通用领域描述",
+            exc_info=True,
+        )
+    return prompt_registry.render_text(
+        PromptId.AGENT_SYSTEM,
+        assistant_name=settings.app.name,
+        domain_name=domain_name,
+        domain_description=domain_description,
+        current_date=utcnow().date().isoformat(),
     )
 
 
@@ -368,12 +400,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         registry = build_registry(settings.models)
         # Prompt 模板是启动期资产：目录/manifest/变量不一致直接 fail-fast，
         # 不允许带病启动；运行期注册表只读。
-        app.state.prompt_registry = build_prompt_registry(settings.prompts)
+        prompts = build_prompt_registry(settings.prompts)
+        app.state.prompt_registry = prompts
+        system_prompt = _build_agent_system_prompt(prompts)
         await registry.init_all()
         app.state.provider_registry = registry
         rag_retriever = None
         try:
-            rag_retriever = await _build_rag_retriever(registry)
+            rag_retriever = await _build_rag_retriever(registry, prompts)
         except Exception as exc:  # noqa: BLE001 - RAG 装配失败不阻断普通对话
             logger.warning("RAG Retriever 装配失败，降级为无知识库工具: %s", exc)
         app.state.rag_retriever = rag_retriever
@@ -382,14 +416,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             conversation_repository=ConversationRepository(),
         )
         app.state.hook_dispatcher = hook_dispatcher
-        memory_worker = _build_memory_worker(registry, hook_dispatcher)
+        memory_worker = _build_memory_worker(registry, hook_dispatcher, prompts)
         if memory_worker is not None:
             memory_worker_task = asyncio.create_task(
                 memory_worker.run_forever(),
                 name="verity-memory-worker",
             )
             app.state.memory_worker = memory_worker
-        compressor = _build_compressor(registry, hook_dispatcher)
+        compressor = _build_compressor(registry, hook_dispatcher, prompts)
         deletion_worker = _build_deletion_worker(settings.memory)
         if deletion_worker is not None:
             deletion_worker_task = asyncio.create_task(
@@ -438,6 +472,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             hooks=DispatcherHookAdapter(hook_dispatcher),
             rag_retriever=rag_retriever,
             compressor=compressor,
+            system_prompt=system_prompt,
         )
         app.state.agent = agent
         app.state.redis_ready = redis_ready

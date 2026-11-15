@@ -17,6 +17,7 @@ from agent.hooks.enum import HookEvent, HookSource
 from agent.hooks.scope import HookScope
 from agent.workers.text import extract_content_text, parse_json_object
 from config.memory import MemoryConfig
+from prompt import PromptId, PromptRegistry, get_default_prompt_registry
 from provider.enums import ModelRole
 from provider.llm.helpers import response_text as _response_text
 from provider.llm.types import (
@@ -36,14 +37,6 @@ __all__ = ["CompressionService"]
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """你负责把旧会话摘要和新消息合并成新的会话摘要。
-只输出 JSON 对象，结构：
-{"version":1,
- "topics":[{"name":"...","summary":"..."}],
- "facts":[{"content":"...","source_msg_ids":["<uuid>"],"confidence":0.0}],
- "constraints":[{"content":"...","source_msg_ids":["<uuid>"],"confidence":0.0}]}
-不要编造；没有内容时数组为空；不要输出 Markdown。"""
-
 
 class CompressionService:
     """回合后异步压缩会话摘要。"""
@@ -57,14 +50,19 @@ class CompressionService:
         messages: ConversationMessageRepository | None = None,
         summaries: ConversationSummaryRepository | None = None,
         hook_dispatcher: Any | None = None,
+        prompts: PromptRegistry | None = None,
     ) -> None:
-        """保存模型与仓储；不建立连接。"""
+        """保存模型、仓储与 Prompt 注册表；不建立连接。"""
         self.config = config
         self.model = model
         self.model_id = model_id
         self.messages = messages or ConversationMessageRepository()
         self.summaries = summaries or ConversationSummaryRepository()
         self.hook_dispatcher = hook_dispatcher
+        self.prompts = prompts or get_default_prompt_registry()
+        self.system_prompt = self.prompts.render_text(
+            PromptId.MEMORY_COMPRESSION_SYSTEM
+        )
 
     async def maybe_compress(
         self,
@@ -141,7 +139,7 @@ class CompressionService:
             messages=[
                 ModelMessage(
                     role=ModelRole.SYSTEM,
-                    content=[ModelTextPart(text=_SYSTEM_PROMPT)],
+                    content=[ModelTextPart(text=self.system_prompt)],
                 ),
                 ModelMessage(
                     role=ModelRole.USER,
