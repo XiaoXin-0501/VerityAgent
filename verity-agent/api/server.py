@@ -26,6 +26,7 @@ if sys.platform == "win32":
 
 
 def main() -> None:
+    """启动 uvicorn；Windows 使用 Selector 事件循环且不启用 reload。"""
     uvicorn.run(
         "api.app:app",
         host=settings.server.host,

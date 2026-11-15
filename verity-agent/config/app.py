@@ -39,6 +39,7 @@ class AppConfig(ConfigModel):
 
     @property
     def is_prod(self) -> bool:
+        """是否为生产环境。"""
         return self.env is Environment.PROD
 
 
@@ -80,6 +81,7 @@ class AuthConfig(ConfigModel):
     @field_validator("algorithm")
     @classmethod
     def _validate_algorithm(cls, value: str) -> str:
+        """只允许 HMAC 系列 JWT 算法。"""
         if value not in {"HS256", "HS384", "HS512"}:
             raise ValueError("仅支持 HMAC JWT 算法")
         return value
@@ -87,6 +89,7 @@ class AuthConfig(ConfigModel):
     @field_validator("secret_key")
     @classmethod
     def _validate_secret(cls, value: SecretStr) -> SecretStr:
+        """JWT 密钥不能为空。"""
         if not value.get_secret_value().strip():
             raise ValueError("auth.secret_key 不能为空")
         return value

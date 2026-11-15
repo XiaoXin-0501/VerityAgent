@@ -61,6 +61,7 @@ class RedisConnectionManager:
         health_check_interval: int | None = None,
         max_connections: int | None = None,
     ) -> None:
+        """保存配置与连接参数，构建客户端占位。"""
         self._config = config or settings.redis
         self._decode_responses = (
             self._config.decode_responses
@@ -102,6 +103,7 @@ class RedisConnectionManager:
 
     @property
     def url(self) -> str:
+        """返回 Redis 连接 URL。"""
         return self._config.url
 
     @property
@@ -198,6 +200,7 @@ class RedisConnectionManager:
     # ——————————————————— 基础命令 ———————————————————
 
     async def get(self, key: str) -> Any:
+        """GET：读取字符串/序列化值。"""
         return await self._call("get", key)
 
     async def set(
@@ -210,26 +213,33 @@ class RedisConnectionManager:
         nx: bool = False,
         xx: bool = False,
     ) -> bool | None:
+        """SET：设置值，支持过期与 NX/XX 条件。"""
         return await self._call("set", key, value, ex=ex, px=px, nx=nx, xx=xx)
 
     async def delete(self, *keys: str) -> int:
+        """DEL：删除一个或多个 key，返回删除数量。"""
         return await self._call("delete", *keys)
 
     async def exists(self, *keys: str) -> int:
+        """EXISTS：返回存在的 key 数量。"""
         return await self._call("exists", *keys)
 
     async def expire(self, key: str, seconds: int) -> bool:
+        """EXPIRE：设置 key 过期秒数。"""
         return await self._call("expire", key, seconds)
 
     async def ttl(self, key: str) -> int:
+        """TTL：返回剩余过期秒数。"""
         return await self._call("ttl", key)
 
     async def incr(self, key: str, amount: int = 1) -> int:
+        """INCRBY：原子递增并返回新值。"""
         return await self._call("incr", key, amount)
 
     # ——————————————————— Hash ———————————————————
 
     async def hget(self, name: str, key: str) -> Any:
+        """HGET：读取 hash 单个字段。"""
         return await self._call("hget", name, key)
 
     async def hset(
@@ -239,6 +249,7 @@ class RedisConnectionManager:
         value: Any | None = None,
         mapping: Mapping[str, Any] | None = None,
     ) -> int:
+        """HSET：写入 hash 字段或批量 mapping。"""
         return await self._call(
             "hset",
             name,
@@ -248,31 +259,39 @@ class RedisConnectionManager:
         )
 
     async def hgetall(self, name: str) -> dict[str, Any]:
+        """HGETALL：读取整个 hash。"""
         return await self._call("hgetall", name)
 
     async def hincrby(self, name: str, key: str, amount: int = 1) -> int:
+        """HINCRBY：原子递增 hash 字段。"""
         return await self._call("hincrby", name, key, amount)
 
     async def hincrbyfloat(self, name: str, key: str, amount: float) -> float:
+        """HINCRBYFLOAT：原子递增浮点 hash 字段。"""
         return await self._call("hincrbyfloat", name, key, amount)
 
     # ——————————————————— List / Set ———————————————————
 
     async def lpush(self, name: str, *values: Any) -> int:
+        """LPUSH：向列表左侧插入元素。"""
         return await self._call("lpush", name, *values)
 
     async def lrange(self, name: str, start: int = 0, end: int = -1) -> list[Any]:
+        """LRANGE：按区间读取列表。"""
         return await self._call("lrange", name, start, end)
 
     async def sadd(self, name: str, *values: Any) -> int:
+        """SADD：向集合添加成员。"""
         return await self._call("sadd", name, *values)
 
     async def smembers(self, name: str) -> set[Any]:
+        """SMEMBERS：读取集合全部成员。"""
         return await self._call("smembers", name)
 
     # ——————————————————— Pub/Sub 与原始命令 ———————————————————
 
     async def publish(self, channel: str, message: Any) -> int:
+        """PUBLISH：向频道发布消息。"""
         return await self._call("publish", channel, message)
 
     async def execute_command(self, *args: Any) -> Any:
@@ -282,10 +301,12 @@ class RedisConnectionManager:
     # ——————————————————— 内部实现 ———————————————————
 
     async def _ensure_open(self) -> None:
+        """确保客户端已连接；未初始化时惰性打开。"""
         if self._client is None:
             await self.open()
 
     async def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """统一调用 Redis 命令并把异常翻译为 RedisError。"""
         await self._ensure_open()
         try:
             return await getattr(self.client, method)(*args, **kwargs)
@@ -300,6 +321,7 @@ class RedisConnectionManager:
         command: str,
         key: object | None = None,
     ) -> RedisConnectionError | RedisCommandError:
+        """把 redis-py 异常翻译为连接错误或命令错误。"""
         details: dict[str, Any] = {"command": command}
         if key is not None:
             details["key"] = str(key)

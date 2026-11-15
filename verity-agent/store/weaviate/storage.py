@@ -18,18 +18,22 @@ __all__ = ["WeaviateStore"]
 
 class WeaviateStore:
     def __init__(self, manager: WeaviateConnectionManager | None = None) -> None:
+        """保存可选的管理器；默认使用全局实例。"""
         self._manager = manager
 
     @property
     def manager(self) -> WeaviateConnectionManager:
+        """返回注入的管理器或全局 Weaviate 管理器。"""
         return self._manager or get_weaviate()
 
     @property
     def config(self):
+        """返回当前 Weaviate 配置。"""
         return self.manager.config
 
     @property
     def client(self):
+        """返回 Weaviate 客户端。"""
         return self.manager.client
 
     def collection(self, name: str):
@@ -38,13 +42,16 @@ class WeaviateStore:
 
     @property
     def doc_chunks(self):
+        """DocChunk collection 句柄。"""
         return self.collection(self.config.doc_chunk_collection)
 
     @property
     def user_facts(self):
+        """UserFact collection 句柄。"""
         return self.collection(self.config.user_fact_collection)
 
     async def maybe_to_thread(self, func, *args, **kwargs):
+        """在线程池执行同步 SDK 调用，并统一翻译异常。"""
         try:
             return await asyncio.to_thread(func, *args, **kwargs)
         except Exception as exc:
@@ -88,4 +95,5 @@ class WeaviateStore:
         }
 
     async def health_check(self) -> dict[str, Any]:
+        """返回 Weaviate 健康状态。"""
         return await self.manager.health_check()

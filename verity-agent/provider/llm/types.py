@@ -63,6 +63,7 @@ class ModelImagePart(WireModel):
 
     @model_validator(mode="after")
     def _has_source(self) -> "ModelImagePart":
+        """图片 part 必须提供 url 或 data 之一。"""
         if not self.url and not self.data:
             raise ValueError("图片 part 必须提供 url 或 data")
         return self
@@ -77,6 +78,7 @@ class ModelFilePart(WireModel):
 
     @model_validator(mode="after")
     def _has_source(self) -> "ModelFilePart":
+        """文件 part 必须提供 url 或 text 之一。"""
         if not self.url and not self.text:
             raise ValueError("文件 part 必须提供 url 或 text")
         return self
@@ -126,6 +128,7 @@ class ModelToolChoice(WireModel):
 
     @model_validator(mode="after")
     def _tool_name_required(self) -> "ModelToolChoice":
+        """指定 TOOL 策略时必须给出 tool_name。"""
         if self.mode is ToolChoiceMode.TOOL and not self.tool_name:
             raise ValueError("tool_choice=TOOL 时必须提供 tool_name")
         return self
@@ -152,6 +155,7 @@ class ModelResponseFormat(WireModel):
 
     @model_validator(mode="after")
     def _schema_required(self) -> "ModelResponseFormat":
+        """JSON_SCHEMA 格式必须提供 schema。"""
         if self.type is ResponseFormatType.JSON_SCHEMA and not self.schema_:
             raise ValueError("JSON_SCHEMA 格式必须提供 schema")
         return self
@@ -167,6 +171,7 @@ class ChatUsage(WireModel):
 
     @model_validator(mode="after")
     def _fill_total(self) -> "ChatUsage":
+        """未提供 total_tokens 时用输入 + 输出补齐。"""
         if self.total_tokens == 0 and (self.input_tokens or self.output_tokens):
             object.__setattr__(
                 self, "total_tokens", self.input_tokens + self.output_tokens

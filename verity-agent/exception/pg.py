@@ -102,6 +102,7 @@ class MemoryFactLimitExceeded(ConflictError):
     default_message = "用户长期事实已达上限，需要先淘汰旧事实"
 
     def __init__(self, fact_count: int, limit: int = 150) -> None:
+        """构造长期事实超限错误并记录当前数量与上限。"""
         super().__init__(
             f"用户长期事实已达上限 {limit} 条（当前 {fact_count}），需先淘汰部分事实",
             details={"fact_count": fact_count, "limit": limit},

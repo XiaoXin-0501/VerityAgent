@@ -37,6 +37,7 @@ class WeaviateConnectionManager:
     """Weaviate client 封装；构造不发起网络请求。"""
 
     def __init__(self, config: WeaviateConfig | None = None) -> None:
+        """保存配置并初始化客户端占位。"""
         self._config = config or settings.weaviate
         if not self._config.url.strip():
             raise ConfigurationError("Weaviate url 不能为空")
@@ -45,15 +46,18 @@ class WeaviateConnectionManager:
 
     @property
     def config(self) -> WeaviateConfig:
+        """返回 Weaviate 配置。"""
         return self._config
 
     @property
     def client(self) -> weaviate.WeaviateClient:
+        """返回已打开的客户端；未 open 时抛错。"""
         if self._client is None:
             raise WeaviateConnectionError("Weaviate 客户端尚未初始化，请先调用 open()")
         return self._client
 
     async def open(self) -> None:
+        """建立 Weaviate 客户端连接。"""
         async with self._lock:
             if self._client is not None:
                 return
@@ -91,6 +95,7 @@ class WeaviateConnectionManager:
                 ) from exc
 
     async def close(self) -> None:
+        """关闭客户端并重置状态。"""
         async with self._lock:
             client, self._client = self._client, None
             if client is not None:
@@ -100,6 +105,7 @@ class WeaviateConnectionManager:
                     logger.warning("关闭 Weaviate 客户端失败", exc_info=True)
 
     async def ping(self) -> bool:
+        """探活：连接可用时返回 True。"""
         try:
             return bool(await asyncio.to_thread(self.client.is_ready))
         except WeaviateError:
@@ -110,6 +116,7 @@ class WeaviateConnectionManager:
             ) from exc
 
     async def health_check(self) -> dict[str, Any]:
+        """返回包含连接状态与版本的健康信息。"""
         try:
             return {"ready": await self.ping(), "url": self._config.url}
         except Exception as exc:
@@ -131,6 +138,7 @@ _default_weaviate: WeaviateConnectionManager | None = None
 
 
 def get_weaviate() -> WeaviateConnectionManager:
+    """返回全局 Weaviate 管理器，不存在时惰性创建。"""
     global _default_weaviate
     if _default_weaviate is None:
         _default_weaviate = WeaviateConnectionManager()
@@ -138,17 +146,20 @@ def get_weaviate() -> WeaviateConnectionManager:
 
 
 def set_weaviate(manager: WeaviateConnectionManager | None) -> None:
+    """替换或清空全局 Weaviate 管理器。"""
     global _default_weaviate
     _default_weaviate = manager
 
 
 async def init_weaviate() -> WeaviateConnectionManager:
+    """打开全局 Weaviate 管理器并返回。"""
     manager = get_weaviate()
     await manager.open()
     return manager
 
 
 async def close_weaviate() -> None:
+    """关闭并清空全局 Weaviate 管理器。"""
     global _default_weaviate
     if _default_weaviate is not None:
         await _default_weaviate.close()

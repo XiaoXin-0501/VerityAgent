@@ -51,6 +51,7 @@ class UserMemoryRepository(BaseRepository):
     async def get(
         self, user_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> UserMemory | None:
+        """按用户取长期记忆；不存在返回 None。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c, "SELECT * FROM user_memory WHERE user_id = %s", (as_uuid(user_id),)
@@ -81,6 +82,27 @@ class UserMemoryRepository(BaseRepository):
                 )
         assert row is not None
         return UserMemory.model_validate(row)
+
+    async def list_user_ids(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[UUID]:
+        """列出有画像的用户 id；事实对账 worker 用。"""
+        limit, offset = pagination(limit, offset)
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT user_id FROM user_memory
+                ORDER BY updated_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+        return [as_uuid(row["user_id"]) for row in rows]
 
     async def update(
         self,
@@ -200,6 +222,7 @@ class UserMemoryRepository(BaseRepository):
     async def delete(
         self, user_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> bool:
+        """删除用户长期记忆，返回是否实际删除。"""
         async with self._transaction(conn) as c:
             affected = await self._execute(
                 c, "DELETE FROM user_memory WHERE user_id = %s", (as_uuid(user_id),)
@@ -428,6 +451,7 @@ class UserMessageRepository(BaseRepository):
         user_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> int:
+        """统计待抽取的用户消息数量，可按用户过滤。"""
         conditions = [
             "ready_at IS NOT NULL",
             "(status IN ('pending', 'failed')"

@@ -155,6 +155,7 @@ def normalize_sha256(sha256: str | None) -> str | None:
 
 
 def require_text(value: str, field: str) -> str:
+    """去除首尾空白并校验非空，返回规范化文本。"""
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{field} 不能为空")
     return value
@@ -170,6 +171,7 @@ def validate_title(title: str, *, max_length: int = 300) -> str:
 
 
 def pagination(limit: int, offset: int = 0) -> tuple[int, int]:
+    """规范化分页参数，返回 (limit, offset)。"""
     if not isinstance(limit, int) or limit <= 0:
         raise ValidationError("limit 必须是正整数")
     if not isinstance(offset, int) or offset < 0:
@@ -178,6 +180,7 @@ def pagination(limit: int, offset: int = 0) -> tuple[int, int]:
 
 
 def as_uuid(value: UUID | str) -> UUID:
+    """把 UUID 或字符串规范化为 UUID；非法值抛 ValidationError。"""
     if isinstance(value, UUID):
         return value
     try:
@@ -225,10 +228,12 @@ class BaseRepository:
     """
 
     def __init__(self, db: Any | None = None) -> None:
+        """保存可选的外部数据库句柄/事务管理器。"""
         self._db = db
 
     @property
     def db(self):
+        """返回注入的数据库句柄。"""
         if self._db is None:
             self._db = get_pg()
         return self._db
@@ -250,6 +255,7 @@ class BaseRepository:
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> Row | None:
+        """执行查询并返回首行；无结果返回 None。"""
         try:
             cursor = await conn.execute(cast(Any, sql), params)
             return await cursor.fetchone()
@@ -262,6 +268,7 @@ class BaseRepository:
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> list[Row]:
+        """执行查询并返回全部行。"""
         try:
             cursor = await conn.execute(cast(Any, sql), params)
             return list(await cursor.fetchall())
@@ -274,6 +281,7 @@ class BaseRepository:
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> Any:
+        """执行查询并返回首行首列。"""
         row = await self._fetch_one(conn, sql, params)
         if not row:
             return None
@@ -285,6 +293,7 @@ class BaseRepository:
         sql: str,
         params: Sequence[Any] | Mapping[str, Any] | None = None,
     ) -> int:
+        """执行写语句并返回受影响行数。"""
         try:
             cursor = await conn.execute(cast(Any, sql), params)
             return cursor.rowcount
@@ -293,8 +302,10 @@ class BaseRepository:
 
     @staticmethod
     def _model(model_cls: type[_ModelT], row: Row | None) -> _ModelT | None:
+        """把单行转换为模型；空行返回 None。"""
         return None if row is None else model_cls.model_validate(row)
 
     @staticmethod
     def _models(model_cls: type[_ModelT], rows: Sequence[Row]) -> list[_ModelT]:
+        """把多行批量转换为模型列表。"""
         return [model_cls.model_validate(row) for row in rows]

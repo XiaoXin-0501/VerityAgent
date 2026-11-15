@@ -18,6 +18,7 @@ from agent.hooks.enum import HookEvent, HookSource
 from agent.hooks.scope import HookScope
 from config.memory import MemoryConfig
 from provider.enums import ModelRole
+from provider.llm.helpers import response_text as _response_text
 from provider.llm.types import (
     ChatModelRequest,
     ModelGenerationOptions,
@@ -65,6 +66,7 @@ class MemoryProfileWorker:
         memory_repository: UserMemoryRepository | None = None,
         hook_dispatcher: Any | None = None,
         facts_store: Any | None = None,
+        conflict_service: Any | None = None,
     ) -> None:
         """保存模型、仓库与可选 Hook dispatcher；不建立连接。"""
         self.config = config
@@ -74,6 +76,7 @@ class MemoryProfileWorker:
         self.memories = memory_repository or UserMemoryRepository()
         self.hook_dispatcher = hook_dispatcher
         self.facts_store = facts_store
+        self.conflict_service = conflict_service
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -139,7 +142,7 @@ class MemoryProfileWorker:
                     if isinstance(item, dict)
                 ]
                 if facts:
-                    await self.facts_store.upsert_facts(
+                    await self._apply_facts(
                         user_id=user_id,
                         facts=facts,
                         source_msg_ids=[str(item.message_id) for item in items],
@@ -151,7 +154,11 @@ class MemoryProfileWorker:
             await self.memories.update_with_retry(
                 user_id,
                 lambda latest: MemoryChange(
-                    value=_apply_profile(latest.value, data),
+                    value=_apply_profile(
+                        latest.value,
+                        data,
+                        step=self.config.profile_confidence_step,
+                    ),
                     fact_count=fact_count,
                 ),
             )
@@ -174,6 +181,61 @@ class MemoryProfileWorker:
                 "message_count": len(items),
                 "status": "failed",
             })
+
+    async def _apply_facts(
+        self,
+        *,
+        user_id: UUID,
+        facts: list[dict[str, Any]],
+        source_msg_ids: list[str],
+    ) -> None:
+        """写入事实；启用冲突判定时按 duplicate/supersede 决策处理。"""
+        assert self.facts_store is not None
+        if self.conflict_service is None:
+            await self.facts_store.upsert_facts(
+                user_id=user_id,
+                facts=facts,
+                source_msg_ids=source_msg_ids,
+            )
+            return
+        for fact in facts:
+            content = str(fact.get("content") or "").strip()
+            if not content:
+                continue
+            candidates = await self.facts_store.find_similar(
+                user_id=user_id,
+                content=content,
+                limit=self.conflict_service.max_candidates,
+            )
+            decision = await self.conflict_service.decide(
+                new_fact=fact,
+                candidates=candidates,
+            )
+            if decision.decision == "duplicate" and decision.target_id:
+                target = next(
+                    (
+                        item for item in candidates
+                        if str(item.get("id")) == decision.target_id
+                    ),
+                    None,
+                )
+                if target is not None:
+                    fact = {**fact, "content": target.get("content") or content}
+            await self.facts_store.upsert_facts(
+                user_id=user_id,
+                facts=[fact],
+                source_msg_ids=source_msg_ids,
+            )
+            if decision.decision == "supersede" and decision.target_id:
+                new_id = self.facts_store.fact_id_for(
+                    user_id,
+                    str(fact.get("content") or content),
+                )
+                await self.facts_store.supersede(
+                    user_id=user_id,
+                    old_fact_id=decision.target_id,
+                    new_fact_id=new_id,
+                )
 
     async def _extract(self, current: MemoryValue, content_text: str) -> dict[str, Any]:
         """调用小模型生成画像更新字段（只返回解析后的 JSON）。"""
@@ -199,19 +261,14 @@ class MemoryProfileWorker:
             ],
             options=ModelGenerationOptions(
                 temperature=0.1,
-                max_output_tokens=1024,
+                max_output_tokens=self.config.extraction_max_output_tokens,
             ),
         )
         response = await asyncio.wait_for(
             self.model.complete(request),
             timeout=max(30.0, float(self.config.worker_lease_seconds)),
         )
-        text = "".join(
-            part.text
-            for part in getattr(response.message, "content", [])
-            if isinstance(part, ModelTextPart)
-        )
-        data = parse_json_object(text)
+        data = parse_json_object(_response_text(response))
         return data
 
     def _hook_scope(self, user_id: UUID) -> HookScope | None:
@@ -239,7 +296,12 @@ class MemoryProfileWorker:
             logger.warning("记忆 worker Hook 发送失败: %s", event.value, exc_info=True)
 
 
-def _apply_profile(current: MemoryValue, data: Mapping[str, Any]) -> MemoryValue:
+def _apply_profile(
+    current: MemoryValue,
+    data: Mapping[str, Any],
+    *,
+    step: float = 0.05,
+) -> MemoryValue:
     """只接受已知 7 段字段；未知字段忽略，缺失字段保留旧值。"""
     now = utcnow()
 
@@ -251,7 +313,7 @@ def _apply_profile(current: MemoryValue, data: Mapping[str, Any]) -> MemoryValue
         return MemorySection(
             summary=value.strip(),
             updated_at=now,
-            confidence=min(0.95, max(0.5, old.confidence + 0.05)),
+            confidence=min(0.95, max(0.5, old.confidence + step)),
         )
 
     user = MemoryUserSections(

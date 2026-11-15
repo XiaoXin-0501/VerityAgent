@@ -129,6 +129,7 @@ class ToolException(VerityError):
         retry_after_s: float | None = None,
         cause: str | None = None,
     ) -> None:
+        """归一工具错误码、类别、HTTP 状态与可重试标记。"""
         if code is not None:
             self.error_code = code
         self.category = TOOL_ERROR_CATEGORIES.get(
@@ -183,6 +184,7 @@ class ToolNotFoundError(ToolException):
         *,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        """构造工具不存在错误并带上工具名。"""
         super().__init__(
             message or f"工具不存在: {tool_name}",
             tool_name=tool_name,

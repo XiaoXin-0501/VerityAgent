@@ -122,6 +122,7 @@ class RateLimitPolicy(_Policy):
 
     @model_validator(mode="after")
     def _max_calls_required(self) -> "RateLimitPolicy":
+        """启用限流时必须配置 max_calls。"""
         if self.enabled and self.max_calls is None:
             raise ValueError("启用 rate_limit 时 max_calls 必填")
         return self
@@ -210,6 +211,7 @@ class ToolRoutingPolicy(_Policy):
 
     @classmethod
     def from_config(cls, config: ToolRoutingConfig) -> "ToolRoutingPolicy":
+        """从顶层路由配置构造路由策略。"""
         return cls(
             mode=config.mode,
             flat_threshold=config.flat_threshold,

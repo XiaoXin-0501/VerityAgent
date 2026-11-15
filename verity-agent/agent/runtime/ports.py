@@ -31,6 +31,7 @@ __all__ = [
     "MemoryQueuePort",
     "MemoryPort",
     "RagPort",
+    "FactPort",
     "AgentDependencies",
 ]
 
@@ -218,6 +219,21 @@ class RagPort(Protocol):
         ...
 
 
+class FactPort(Protocol):
+    """长期事实 BM25 召回端口；事实写入由 memory worker 负责。"""
+
+    async def recall(
+        self,
+        *,
+        user_id: UUID,
+        query: str,
+        top_k: int = 5,
+        min_confidence: float | None = None,
+    ) -> list[Any]:
+        """按 query 召回当前用户 active 事实。"""
+        ...
+
+
 @dataclass(slots=True)
 class AgentDependencies:
     """Agent 运行依赖；只放端口和稳定配置，不放全局单例。"""
@@ -244,6 +260,15 @@ class AgentDependencies:
     context: Any = None
     # INJECTED RAG；为空表示只走工具模式
     rag: RagPort | None = None
+    # 长期事实 BM25 召回；为空表示不注入 facts section
+    facts: FactPort | None = None
+    # 事实召回数量/最低置信度
+    fact_top_k: int = 5
+    fact_min_confidence: float | None = None
+    # 回合后会话摘要压缩；为空表示不压缩
+    compressor: Any = None
+    # Redis 事件/快照存储；为空表示只使用内存 ring buffer
+    event_store: Any = None
     # 后台任务运行器；为空时 Agent 自己创建一个进程内 runner
     background_tasks: Any = None
     # 可选系统提示词；ContextAssembler 尚未接入时的最小替代

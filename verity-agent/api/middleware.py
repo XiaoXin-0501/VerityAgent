@@ -21,6 +21,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
+        """生成或透传请求 id，写入 request.state 与响应头。"""
         request_id = request.headers.get("X-Request-ID") or new_request_id()
         request.state.request_id = request_id
         response = await call_next(request)

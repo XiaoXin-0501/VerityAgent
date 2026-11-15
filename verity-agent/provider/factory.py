@@ -38,6 +38,18 @@ from utils.serialization import canonical_json
 
 __all__ = ["build_provider", "build_registry"]
 
+# 走 OpenAI Chat Completions 兼容协议的厂商；差异由模型子类处理。
+_OPENAI_CHAT_VENDORS = frozenset({"deepseek", "vllm", "llama.cpp", "llamacpp"})
+# 兼容协议厂商 -> 具体模型子类；未列出的兼容网关回落到 OpenAIChatProvider。
+_CHAT_VENDOR_IMPL = {
+    "deepseek": DeepSeekChatProvider,
+    "vllm": VLLMChatProvider,
+    "llama.cpp": VLLMChatProvider,
+    "llamacpp": VLLMChatProvider,
+}
+_EMBEDDING_VENDORS = frozenset({"openai", "bge"})
+_RERANK_VENDORS = frozenset({"cohere", "bge", "dashscope", "qwen"})
+
 
 def _provider_name(model: ModelConfig) -> str:
     """直接构建单个 provider 时使用的兼容名字。"""
@@ -71,6 +83,7 @@ def _base_kwargs(
     name: str | None = None,
     enabled: bool | None = None,
 ) -> dict[str, Any]:
+    """把模型配置中与厂商无关的连接字段整理成 provider 构造参数。"""
     return {
         "name": name or _provider_name(model),
         "base_url": model.base_url,
@@ -101,7 +114,7 @@ def build_provider(
                     details={"api_style": str(model.api_style)},
                 )
             api_style = ChatApiStyle.ANTHROPIC_MESSAGES
-        elif provider in {"deepseek", "vllm", "llama.cpp", "llamacpp"}:
+        elif provider in _OPENAI_CHAT_VENDORS:
             # 这些厂商走 OpenAI Chat Completions 兼容协议，差异在 Model 子类。
             if model.api_style not in (None, ChatApiStyle.OPENAI_CHAT):
                 raise ConfigurationError(
@@ -135,25 +148,11 @@ def build_provider(
             return AnthropicChatProvider(config)
         if api_style is ChatApiStyle.OPENAI_RESPONSES:
             return OpenAIResponsesChatProvider(config)
-        if (
-            variant in {"deepseek", "vllm", "llama.cpp", "llamacpp"}
-            and api_style is not ChatApiStyle.OPENAI_CHAT
-        ):
-            raise ConfigurationError(
-                f"模型 {model.id} 的 variant={variant} 只支持 openai_chat",
-                details={"api_style": str(api_style)},
-            )
-        if provider == "deepseek":
-            return DeepSeekChatProvider(config)
-        if provider in {"vllm", "llama.cpp", "llamacpp"}:
-            return VLLMChatProvider(config)
-        if variant == "deepseek":
-            return DeepSeekChatProvider(config)
-        if variant in {"vllm", "llama.cpp", "llamacpp"}:
-            return VLLMChatProvider(config)
-        return OpenAIChatProvider(config)
+        # 先按 provider 选择方言；OpenAI 兼容网关可用 metadata.variant 指定。
+        impl = _CHAT_VENDOR_IMPL.get(provider) or _CHAT_VENDOR_IMPL.get(variant)
+        return (impl or OpenAIChatProvider)(config)
     if model.kind is ProviderKind.EMBEDDING:
-        if provider not in {"openai", "bge"}:
+        if provider not in _EMBEDDING_VENDORS:
             raise ConfigurationError(
                 f"不支持的 embedding provider: {model.provider}",
                 details={"model_id": model.id},
@@ -166,7 +165,7 @@ def build_provider(
             return BgeEmbeddingProvider(config)
         return OpenAIEmbeddingProvider(config)
     if model.kind is ProviderKind.RERANK:
-        if provider not in {"cohere", "bge", "dashscope", "qwen"}:
+        if provider not in _RERANK_VENDORS:
             raise ConfigurationError(
                 f"不支持的 rerank provider: {model.provider}",
                 details={"model_id": model.id},

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agent.llm import FinishReason, LLMUsage, ToolChoice
 from agent.message.enum import MessageStatus
@@ -89,8 +89,17 @@ class AgentRequest(_Model):
     # 客户端/实验信息；不进 Prompt
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("rag_mode", mode="before")
+    @classmethod
+    def _normalize_rag_mode(cls, value: object):
+        """兼容 API 文档中 ``TOOL / INJECTED / OFF`` 的大写写法。"""
+        if isinstance(value, str):
+            return value.lower()
+        return value
+
     @model_validator(mode="after")
     def _has_payload(self) -> "AgentRequest":
+        """请求必须提供文本、图片或文件之一。"""
         if not self.content.strip() and not self.images and not self.files:
             raise ValueError("content/images/files 至少有一个非空")
         return self

@@ -40,6 +40,7 @@ _EVENTS = frozenset(
 
 
 def _add_usage(left: LLMUsage, right: LLMUsage) -> LLMUsage:
+    """逐字段累加两次 LLM 用量。"""
     return LLMUsage(
         input_tokens=left.input_tokens + right.input_tokens,
         output_tokens=left.output_tokens + right.output_tokens,
@@ -51,6 +52,7 @@ def _add_usage(left: LLMUsage, right: LLMUsage) -> LLMUsage:
 
 
 def _add_cost(left: CostRecord | None, right: CostRecord | None) -> CostRecord | None:
+    """累加两次成本记录；None 视为 0。"""
     if right is None:
         return left
     if left is None:
@@ -75,6 +77,7 @@ class TokenUsageHook:
         conversation_repository: Any | None = None,
         logger_: logging.Logger | None = None,
     ) -> None:
+        """保存定价/计数器/仓储依赖，并合并配置中的价格表。"""
         self.config = config
         self.pricing = dict(pricing or {})
         self.counters = counters
@@ -105,6 +108,7 @@ class TokenUsageHook:
         )
 
     async def __call__(self, context: HookContext) -> None:
+        """按事件类型分派用量累加或回合/运行结束刷新。"""
         if context.event in (
             HookEvent.LLM_USAGE,
             HookEvent.EMBEDDING_USAGE,
@@ -119,6 +123,7 @@ class TokenUsageHook:
                 await self._flush_key(context, key)
 
     async def _on_usage(self, context: HookContext) -> None:
+        """累加单次用量、计算成本，并按配置写 Redis 计数。"""
         payload = context.payload
         usage = getattr(payload, "usage", None)
         if usage is None:
@@ -191,6 +196,7 @@ class TokenUsageHook:
         )
 
     async def _flush_key(self, context: HookContext, key: str) -> None:
+        """把累计用量落盘为快照并清理内存状态。"""
         if key in self._flushed:
             return
         self._flushed.add(key)

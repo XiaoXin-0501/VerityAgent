@@ -50,6 +50,7 @@ class ConversationRepository(BaseRepository):
         title: str = "",
         conn: AsyncConnection[Row] | None = None,
     ) -> Conversation:
+        """创建会话；标题为空时使用模型默认值。"""
         title = validate_title(title)
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
@@ -71,6 +72,7 @@ class ConversationRepository(BaseRepository):
         include_deleted: bool = False,
         conn: AsyncConnection[Row] | None = None,
     ) -> Conversation | None:
+        """按 id 取会话；默认过滤软删除记录。"""
         sql = "SELECT * FROM conversations WHERE id = %s"
         if not include_deleted:
             sql += " AND deleted_at IS NULL"
@@ -136,6 +138,7 @@ class ConversationRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> Conversation:
+        """更新会话标题并返回最新记录。"""
         title = validate_title(title)
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
@@ -158,6 +161,7 @@ class ConversationRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> Conversation:
+        """更新会话生命周期状态并返回最新记录。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -237,6 +241,7 @@ class ConversationRepository(BaseRepository):
         lease_seconds: int,
         conn: AsyncConnection[Row] | None = None,
     ) -> Conversation:
+        """抢占会话 run 租约；已被占用时抛 ConflictError。"""
         conversation = await self.try_acquire_run(
             conversation_id, run_id, lease_seconds=lease_seconds, conn=conn
         )
@@ -322,6 +327,30 @@ class ConversationRepository(BaseRepository):
             )
         return self._model(Conversation, row)
 
+    async def list_expired_leases(
+        self,
+        *,
+        limit: int = 100,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[Conversation]:
+        """列出租约已过期的活跃 run；启动恢复任务用。"""
+        limit, _ = pagination(limit, 0)
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT * FROM conversations
+                WHERE deleted_at IS NULL
+                  AND current_run_id IS NOT NULL
+                  AND lock_expires_at IS NOT NULL
+                  AND lock_expires_at < now()
+                ORDER BY lock_expires_at
+                LIMIT %s
+                """,
+                (limit,),
+            )
+        return self._models(Conversation, rows)
+
     async def record_turn(
         self,
         conversation_id: UUID | str,
@@ -364,6 +393,7 @@ class ConversationRepository(BaseRepository):
     async def archive(
         self, conversation_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> Conversation:
+        """归档会话；不满足状态迁移条件时抛错。"""
         return await self.set_status(
             conversation_id, ConversationStatus.ARCHIVED, conn=conn
         )
@@ -399,6 +429,7 @@ class ConversationRepository(BaseRepository):
         retry_at: Any | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> Conversation:
+        """记录跨存储删除失败，并写入下次重试时间。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -450,6 +481,7 @@ class ConversationMessageRepository(BaseRepository):
     """
 
     def __init__(self, db: Any | None = None) -> None:
+        """初始化消息仓库。"""
         super().__init__(db)
         self._user_messages = UserMessageRepository(db)
 
@@ -464,6 +496,7 @@ class ConversationMessageRepository(BaseRepository):
         client_message_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> ConversationMessage:
+        """追加消息并分配序号；client_message_id 用于幂等去重。"""
         async with self._transaction(conn) as c:
             return await self._append(
                 c,
@@ -486,6 +519,7 @@ class ConversationMessageRepository(BaseRepository):
         seq_no: int | None,
         client_message_id: UUID | str | None = None,
     ) -> ConversationMessage:
+        """在指定事务内插入消息，承担序号分配与幂等查重。"""
         conversation_uuid = as_uuid(conversation_id)
         payload = normalize_message_content(content)
 
@@ -542,6 +576,7 @@ class ConversationMessageRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> ConversationMessage | None:
+        """按客户端消息 id 查找已写入的消息。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -593,6 +628,7 @@ class ConversationMessageRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> ConversationMessage | None:
+        """按消息 id 取消息。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -666,6 +702,7 @@ class ConversationMessageRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> int:
+        """返回会话当前最大消息序号；无消息时为 0。"""
         async with self._transaction(conn) as c:
             value = await self._fetch_val(
                 c,
@@ -683,6 +720,7 @@ class ConversationMessageRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> int:
+        """返回会话消息总数。"""
         async with self._transaction(conn) as c:
             value = await self._fetch_val(
                 c,
@@ -690,6 +728,74 @@ class ConversationMessageRepository(BaseRepository):
                 (as_uuid(conversation_id),),
             )
         return int(value or 0)
+
+    async def list_streaming(
+        self,
+        *,
+        limit: int = 100,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[ConversationMessage]:
+        """列出进程崩溃后残留的 streaming 消息；启动恢复用。"""
+        limit, _ = pagination(limit, 0)
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT * FROM conversation_messages
+                WHERE status = 'streaming'
+                ORDER BY created_at
+                LIMIT %s
+                """,
+                (limit,),
+            )
+        return self._models(ConversationMessage, rows)
+
+    async def list_tool_call_assistants(
+        self,
+        *,
+        limit: int = 100,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[ConversationMessage]:
+        """列出含 tool_calls 的 assistant 消息；启动期工具链恢复用。"""
+        limit, _ = pagination(limit, 0)
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT * FROM conversation_messages
+                WHERE role = 'assistant'
+                  AND jsonb_array_length(
+                        COALESCE(content->'tool_calls', '[]'::jsonb)
+                      ) > 0
+                  AND status <> 'failed'
+                ORDER BY created_at
+                LIMIT %s
+                """,
+                (limit,),
+            )
+        return self._models(ConversationMessage, rows)
+
+    async def list_tool_messages(
+        self,
+        conversation_id: UUID | str,
+        *,
+        limit: int = 1000,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[ConversationMessage]:
+        """列出会话内 tool 消息；恢复时按 tool_call_id 查找闭合。"""
+        limit, _ = pagination(limit, 0)
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT * FROM conversation_messages
+                WHERE conversation_id = %s AND role = 'tool'
+                ORDER BY seq_no
+                LIMIT %s
+                """,
+                (as_uuid(conversation_id), limit),
+            )
+        return self._models(ConversationMessage, rows)
 
     async def update_status(
         self,
@@ -753,6 +859,7 @@ class ConversationSummaryRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> ConversationSummary | None:
+        """按会话 id 取会话摘要。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -891,6 +998,7 @@ class ConversationSummaryRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> bool:
+        """删除会话摘要，返回是否实际删除。"""
         async with self._transaction(conn) as c:
             affected = await self._execute(
                 c,

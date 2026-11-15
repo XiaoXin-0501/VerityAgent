@@ -18,6 +18,7 @@ from agent.hooks.scope import HookScope
 from agent.workers.text import extract_content_text, parse_json_object
 from config.memory import MemoryConfig
 from provider.enums import ModelRole
+from provider.llm.helpers import response_text as _response_text
 from provider.llm.types import (
     ChatModelRequest,
     ModelGenerationOptions,
@@ -153,19 +154,16 @@ class CompressionService:
             ],
             options=ModelGenerationOptions(
                 temperature=0.1,
-                max_output_tokens=2048,
+                max_output_tokens=self.config.compression_max_output_tokens,
             ),
         )
         response = await asyncio.wait_for(
             self.model.complete(request),
             timeout=self.config.compression_timeout_s,
         )
-        text = "".join(
-            part.text
-            for part in getattr(response.message, "content", [])
-            if isinstance(part, ModelTextPart)
+        return SessionSummary.model_validate(
+            parse_json_object(_response_text(response))
         )
-        return SessionSummary.model_validate(parse_json_object(text))
 
     def _messages_text(self, rows: list[Any]) -> str:
         """把待压缩消息渲染成角色 + 文本，并按输入预算截断。"""

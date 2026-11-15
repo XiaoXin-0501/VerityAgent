@@ -47,6 +47,7 @@ class SessionFileRepository(BaseRepository):
         status: SessionFileStatus = SessionFileStatus.UPLOADING,
         conn: AsyncConnection[Row] | None = None,
     ) -> SessionFile:
+        """登记会话文件元数据，初始状态为 uploading。"""
         original_filename = require_text(original_filename, "original_filename")
         source_object_key = require_text(source_object_key, "source_object_key")
         if size_bytes < 0:
@@ -84,6 +85,7 @@ class SessionFileRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> SessionFile | None:
+        """按 id 取会话文件。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c, "SELECT * FROM session_files WHERE id = %s", (as_uuid(file_id),)
@@ -99,9 +101,40 @@ class SessionFileRepository(BaseRepository):
         offset: int = 0,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[SessionFile]:
+        """分页列出会话内文件，可按状态过滤。"""
         limit, offset = pagination(limit, offset)
         conditions = ["conversation_id = %s"]
         params: list[Any] = [as_uuid(conversation_id)]
+        if status is not None:
+            conditions.append("status = %s")
+            params.append(_param(status))
+        params.extend([limit, offset])
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                f"""
+                SELECT * FROM session_files
+                WHERE {' AND '.join(conditions)}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                params,
+            )
+        return self._models(SessionFile, rows)
+
+    async def list_by_uploader(
+        self,
+        user_id: UUID | str,
+        *,
+        status: SessionFileStatus | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[SessionFile]:
+        """按上传者列出会话文件；用户删除 worker 清理对象存储用。"""
+        limit, offset = pagination(limit, offset)
+        conditions = ["uploaded_by = %s"]
+        params: list[Any] = [as_uuid(user_id)]
         if status is not None:
             conditions.append("status = %s")
             params.append(_param(status))
@@ -172,6 +205,7 @@ class SessionFileRepository(BaseRepository):
     async def mark_processing(
         self, file_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> SessionFile:
+        """把会话文件置为处理中。"""
         return await self.set_status(file_id, SessionFileStatus.PROCESSING, conn=conn)
 
     async def mark_available(
@@ -182,6 +216,7 @@ class SessionFileRepository(BaseRepository):
         parse_manifest_key: str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> SessionFile:
+        """把会话文件置为可用并记录 token 统计。"""
         kwargs: dict[str, Any] = {}
         if token_count is not None:
             kwargs["token_count"] = token_count
@@ -194,16 +229,19 @@ class SessionFileRepository(BaseRepository):
     async def mark_failed(
         self, file_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> SessionFile:
+        """把会话文件置为失败。"""
         return await self.set_status(file_id, SessionFileStatus.FAILED, conn=conn)
 
     async def mark_deleting(
         self, file_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> SessionFile:
+        """把会话文件置为删除中（跨存储删除补偿）。"""
         return await self.set_status(file_id, SessionFileStatus.DELETING, conn=conn)
 
     async def mark_deleted(
         self, file_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> SessionFile:
+        """把会话文件置为已删除。"""
         return await self.set_status(file_id, SessionFileStatus.DELETED, conn=conn)
 
     async def record_delete_failure(
@@ -214,6 +252,7 @@ class SessionFileRepository(BaseRepository):
         retry_at: Any | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> SessionFile:
+        """记录会话文件删除失败并安排重试。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,

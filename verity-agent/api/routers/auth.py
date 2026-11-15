@@ -67,10 +67,12 @@ class MeResponse(BaseModel):
 # ——————————————————— 密码哈希 ———————————————————
 
 def hash_password(password: str) -> str:
+    """对明文密码做哈希。"""
     return _hasher.hash(password)
 
 
 def verify_password(password: str, password_hash: str | None) -> bool:
+    """校验密码；空哈希或非法哈希一律返回 False。"""
     if not password_hash:
         return False
     try:
@@ -82,10 +84,12 @@ def verify_password(password: str, password_hash: str | None) -> bool:
 # ——————————————————— JWT ———————————————————
 
 def _auth_secret() -> str:
+    """返回 JWT 签名密钥。"""
     return settings.auth.secret_key.get_secret_value()
 
 
 def create_access_token(user: User) -> tuple[str, int]:
+    """签发 access token，返回 token 与有效期秒数。"""
     now = utcnow()
     expires_in = settings.auth.access_token_expire_minutes * 60
     payload: dict[str, Any] = {
@@ -104,6 +108,7 @@ def create_access_token(user: User) -> tuple[str, int]:
 
 
 def decode_access_token(token: str) -> dict[str, Any]:
+    """解码并校验 JWT；过期或非法时抛 AuthenticationError。"""
     try:
         return jwt.decode(
             token,
@@ -124,6 +129,7 @@ def decode_access_token(token: str) -> dict[str, Any]:
 
 
 def _user_info(user: User) -> UserInfo:
+    """把用户模型投影为响应 DTO。"""
     return UserInfo(
         id=user.id,
         username=user.username,
@@ -137,6 +143,7 @@ def _user_info(user: User) -> UserInfo:
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> User:
+    """鉴权依赖：解析 Bearer token 并加载有效用户。"""
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AuthenticationError("缺少 Bearer token")
 
@@ -161,7 +168,9 @@ async def get_current_user(
 
 
 def require_permission(permission_code: str):
+    """生成要求指定权限的依赖检查器。"""
     async def checker(user: User = Depends(get_current_user)) -> User:
+        """校验当前用户是否拥有目标权限。"""
         if not await PermissionRepository().has_permission(user.id, permission_code):
             raise PermissionDeniedError(
                 f"缺少权限: {permission_code}",
@@ -176,6 +185,7 @@ def require_permission(permission_code: str):
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest) -> TokenResponse:
+    """用户名密码登录；失败时不区分账号是否存在。"""
     users = UserRepository()
     user = await users.get_by_username(payload.username)
 
@@ -200,6 +210,7 @@ async def login(payload: LoginRequest) -> TokenResponse:
 
 @router.get("/me", response_model=MeResponse)
 async def me(user: User = Depends(get_current_user)) -> MeResponse:
+    """返回当前用户信息与权限码列表。"""
     codes = await PermissionRepository().list_codes_for_user(user.id)
     return MeResponse(user=_user_info(user), permissions=sorted(codes))
 

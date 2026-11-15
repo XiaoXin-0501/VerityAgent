@@ -12,8 +12,47 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agent.llm import LLMRequest, LLMResponse, LLMStreamEvent
+from exception import ConfigurationError
 
-__all__ = ["ChatService"]
+__all__ = ["ChatService", "ModelRegistry"]
+
+
+class ModelRegistry:
+    """应用模型 id -> Provider 句柄的轻量注册表。
+
+    不做能力选型/评分；只负责 allowed/fallback 集合与禁用模型校验，
+    真正的路由由 ``RoutingChatAdapter`` 完成。
+    """
+
+    def __init__(
+        self,
+        provider_registry: Any,
+        *,
+        default_model_id: str,
+        model_ids: list[str] | None = None,
+        fallback_model_ids: list[str] | None = None,
+    ) -> None:
+        """保存 ProviderRegistry 与模型白名单。"""
+        self.provider_registry = provider_registry
+        self.default_model_id = default_model_id
+        self.model_ids = list(model_ids or [])
+        self.fallback_model_ids = list(fallback_model_ids or [])
+
+    def get_model_by_id(self, model_id: str, *, include_disabled: bool = False):
+        """按应用模型 id 取句柄；白名单非空时拒绝白名单外模型。"""
+        if self.model_ids and model_id not in self.model_ids:
+            raise ConfigurationError(
+                f"模型不在 LLM model_ids 白名单: {model_id}",
+                details={"model_id": model_id},
+            )
+        return self.provider_registry.get_model_by_id(
+            model_id,
+            include_disabled=include_disabled,
+        )
+
+    def resolve(self, model_id: str | None = None):
+        """解析请求模型；为空时返回默认模型句柄。"""
+        return self.get_model_by_id(model_id or self.default_model_id)
 
 
 class ChatService:

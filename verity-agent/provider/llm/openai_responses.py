@@ -66,6 +66,7 @@ _RESPONSES_KWARGS = frozenset(
 
 
 def _usage(payload: Mapping[str, Any] | None) -> ChatUsage:
+    """从 Responses usage 构造统一 token 用量。"""
     data = payload or {}
     input_details = data.get("input_tokens_details") or {}
     output_details = data.get("output_tokens_details") or {}
@@ -79,6 +80,7 @@ def _usage(payload: Mapping[str, Any] | None) -> ChatUsage:
 
 
 def _image_url(part: ModelImagePart) -> str:
+    """把图片 part 转成 URL 或 data URI。"""
     if part.url:
         return part.url
     if part.data:
@@ -88,6 +90,7 @@ def _image_url(part: ModelImagePart) -> str:
 
 
 def _content(parts: list[ModelContentPart], *, assistant: bool) -> list[dict[str, Any]]:
+    """把统一 content part 转为 Responses content；assistant 用 output_text。"""
     text_type = "output_text" if assistant else "input_text"
     result: list[dict[str, Any]] = []
     for part in parts:
@@ -113,10 +116,12 @@ def _content(parts: list[ModelContentPart], *, assistant: bool) -> list[dict[str
 
 class OpenAIResponsesChatModel(ChatModel):
     def __init__(self, spec, provider: "OpenAIResponsesChatProvider") -> None:
+        """绑定模型规格与所属 Provider。"""
         super().__init__(spec)
         self.provider = provider
 
     def _input(self, messages: list[ModelMessage]) -> list[dict[str, Any]]:
+        """把统一消息转换为 Responses item 列表（function_call/output 独立成项）。"""
         items: list[dict[str, Any]] = []
         for message in messages:
             if message.role is ModelRole.TOOL:
@@ -166,6 +171,7 @@ class OpenAIResponsesChatModel(ChatModel):
         return items
 
     def _tool_choice(self, request: ChatModelRequest) -> Any:
+        """把统一工具选择策略转换为 Responses tool_choice。"""
         choice = request.tool_choice
         if choice.mode is ToolChoiceMode.AUTO:
             return "auto"
@@ -176,6 +182,7 @@ class OpenAIResponsesChatModel(ChatModel):
         return {"type": "function", "name": choice.tool_name}
 
     def _payload(self, request: ChatModelRequest, *, stream: bool) -> dict[str, Any]:
+        """构造 Responses 请求体；不支持 prefix completion。"""
         if request.prefix:
             raise ProviderError(
                 ProviderErrorCode.UNSUPPORTED_CAPABILITY,
@@ -239,6 +246,7 @@ class OpenAIResponsesChatModel(ChatModel):
         return payload
 
     def _finish(self, data: Mapping[str, Any], has_tools: bool) -> ChatFinishReason:
+        """根据 status/tool 输出推导统一结束原因。"""
         if has_tools:
             return ChatFinishReason.TOOL_CALLS
         status = data.get("status")
@@ -253,6 +261,7 @@ class OpenAIResponsesChatModel(ChatModel):
         return ChatFinishReason.STOP
 
     def _response(self, data: Mapping[str, Any]) -> ChatModelResponse:
+        """把 Responses 输出项解析为统一 ChatModelResponse。"""
         parts: list[ModelContentPart] = []
         calls: list[ModelToolCall] = []
         for item in data.get("output") or []:
@@ -298,6 +307,7 @@ class OpenAIResponsesChatModel(ChatModel):
         )
 
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
+        """非流式调用 Responses API，并归一化 SDK 异常。"""
         payload = self._payload(request, stream=False)
         try:
             response = await self.provider.client.responses.create(
@@ -312,6 +322,7 @@ class OpenAIResponsesChatModel(ChatModel):
         return self._response(sdk_dump(response))
 
     async def stream(self, request: ChatModelRequest) -> AsyncIterator[ChatStreamEvent]:
+        """流式消费 Responses 事件，累积函数调用参数并产出统一事件。"""
         payload = self._payload(request, stream=True)
         yield ChatStreamStart(model=self.spec.model)
         calls: dict[str, ModelToolCall] = {}
@@ -422,12 +433,14 @@ class OpenAIResponsesChatProvider(ChatProvider):
     }
 
     def __init__(self, config: ChatProviderConfig) -> None:
+        """初始化 SDK 客户端占位与模型句柄缓存。"""
         super().__init__(config)
         self._client: openai.AsyncOpenAI | None = None
         self._handles: dict[str, ChatModel] = {}
 
     @property
     def client(self) -> openai.AsyncOpenAI:
+        """返回已初始化的 SDK 客户端；未 open 时抛 UNAVAILABLE。"""
         if self._client is None:
             raise ProviderError(
                 ProviderErrorCode.UNAVAILABLE,
@@ -437,17 +450,20 @@ class OpenAIResponsesChatProvider(ChatProvider):
         return self._client
 
     async def open(self) -> None:
+        """构建并保存 AsyncOpenAI 客户端。"""
         client = build_openai_client(self.config)
         await super().open()
         self._client = client
 
     async def close(self) -> None:
+        """关闭 SDK 客户端并清理模型句柄。"""
         if self._client is not None:
             await self._client.close()
             self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> ChatModel:
+        """按 model_id 复用或创建模型句柄。"""
         model = self._handles.get(model_id)
         if model is None:
             model = self.model_class(self.get_spec(model_id), self)

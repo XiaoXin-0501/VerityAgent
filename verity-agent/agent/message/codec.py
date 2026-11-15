@@ -62,6 +62,7 @@ _COMMON_KEYS = {"id", "conversation_id", "role", "status", "created_at", "conten
 
 
 def content_version(payload: Mapping[str, Any]) -> int:
+    """读取并校验 content 版本号；非法版本抛 MessageDecodeError。"""
     value = payload.get("v", MessageContentVersion.V1)
     if not isinstance(value, int) or isinstance(value, bool):
         raise MessageDecodeError(
@@ -277,6 +278,7 @@ def decode_row(
 
 
 def decode_stored_row(row: Mapping[str, Any]) -> StoredMessage:
+    """解码数据库行并附带 seq_no，供消息窗口使用。"""
     message = decode_row(row)
     seq_no = int(row["seq_no"])
     return StoredMessage(seq_no=seq_no, message=message)
@@ -287,6 +289,7 @@ def decode_stored_row(row: Mapping[str, Any]) -> StoredMessage:
 def _normalize_payload(
     role: MessageRole, payload: Mapping[str, Any], version: int
 ) -> dict[str, Any]:
+    """按版本归一 payload；读取时兼容 v1 与半升级 v2。"""
     data = dict(payload)
     if version is MessageContentVersion.V1:
         data = _upgrade_v1(role, data)
@@ -329,6 +332,7 @@ def _upgrade_v1(role: MessageRole, data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _system_origin(value: Any) -> SystemOrigin:
+    """归一 system 消息来源；废弃值降级为 configured。"""
     if value is None:
         return SystemOrigin.BASE
     # 旧值 tool_policy 已废弃；读取时归到 configured，保证旧消息可展示
@@ -341,6 +345,7 @@ def _system_origin(value: Any) -> SystemOrigin:
 
 
 def _image_ref(item: Any) -> ImageRef:
+    """把存储中的图片项转换为 ImageRef。"""
     if isinstance(item, ImageRef):
         return item
     if isinstance(item, Mapping):
@@ -354,6 +359,7 @@ def _image_ref(item: Any) -> ImageRef:
 
 
 def _file_ref(item: Any) -> FileRef:
+    """把存储中的文件项转换为 FileRef。"""
     if isinstance(item, FileRef):
         return item
     if isinstance(item, Mapping):
@@ -365,6 +371,7 @@ def _file_ref(item: Any) -> FileRef:
 
 
 def _thinking(item: Any) -> Thinking:
+    """把存储中的 thinking 项转换为 Thinking。"""
     if isinstance(item, Thinking):
         return item
     if isinstance(item, Mapping):
@@ -377,6 +384,7 @@ def _thinking(item: Any) -> Thinking:
 
 
 def _tool_call(item: Any) -> ToolCall:
+    """把存储中的工具调用项转换为 ToolCall，非法状态降级为 PENDING。"""
     if isinstance(item, ToolCall):
         return item
     if isinstance(item, Mapping):
@@ -396,6 +404,7 @@ def _tool_call(item: Any) -> ToolCall:
 
 
 def _artifact(item: Any) -> Artifact:
+    """把存储中的产物项转换为 Artifact，非法类型降级为 OTHER。"""
     if isinstance(item, Artifact):
         return item
     if isinstance(item, Mapping):
@@ -419,6 +428,7 @@ def _raw(
     v: int | None = None,
     parse_error: str,
 ) -> RawMessage:
+    """构造解析失败的只读 RawMessage，保留原始 content 便于排查。"""
     status_raw = row.get("status", MessageStatus.FAILED)
     try:
         status = MessageStatus(status_raw)
@@ -443,6 +453,7 @@ def _raw(
 
 
 def _uuid_or_zero(value: object) -> UUID:
+    """安全解析 UUID；空值或非法值返回全零 UUID。"""
     if value is None:
         return UUID(int=0)
     try:

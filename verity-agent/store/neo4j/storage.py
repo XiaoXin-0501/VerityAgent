@@ -24,27 +24,34 @@ def relation_key(subject: str, relation: str, obj: str, kb_id: Any) -> str:
 
 class GraphStore:
     def __init__(self, manager: Neo4jConnectionManager | None = None) -> None:
+        """保存可选的管理器；默认使用全局实例。"""
         self._manager = manager
 
     @property
     def manager(self) -> Neo4jConnectionManager:
+        """返回注入的管理器或全局 Neo4j 管理器。"""
         return self._manager or get_neo4j()
 
     async def _write(self, query: str, parameters: Mapping[str, Any]) -> None:
+        """在写事务中执行 Cypher 并消费结果。"""
         async def work(tx):
+            """事务回调：执行 Cypher 后消费结果。"""
             result = await tx.run(query, **dict(parameters))
             await result.consume()
 
         await self.manager.execute_write(work)
 
     async def _read(self, query: str, parameters: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """在读事务中执行 Cypher 并返回记录列表。"""
         async def work(tx):
+            """事务回调：把结果流转换为 dict 列表。"""
             result = await tx.run(query, **dict(parameters))
             return [record.data() async for record in result]
 
         return await self.manager.execute_read(work)
 
     async def upsert_chunk_ref(self, chunk_id: str, doc_id: str) -> None:
+        """写入/更新 ChunkRef 节点及其所属文档。"""
         await self._write(
             "MERGE (c:ChunkRef {chunk_id: $chunk_id}) SET c.doc_id = $doc_id",
             {"chunk_id": chunk_id, "doc_id": doc_id},
@@ -58,6 +65,7 @@ class GraphStore:
         kb_id: str,
         keywords: Iterable[str],
     ) -> None:
+        """为 chunk 关联关键词节点（去重后批量 MERGE）。"""
         values = [item for item in dict.fromkeys(keywords) if item]
         if not values:
             return
@@ -86,6 +94,7 @@ class GraphStore:
         kb_id: str,
         relations: Iterable[Mapping[str, Any]],
     ) -> None:
+        """写入关系三元组并关联证据 chunk，按 key 幂等。"""
         values: list[dict[str, Any]] = []
         for item in relations:
             subject = str(item["subject"])

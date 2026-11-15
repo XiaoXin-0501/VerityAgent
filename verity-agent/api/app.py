@@ -16,6 +16,7 @@ __all__ = ["create_app", "app"]
 
 
 def create_app() -> FastAPI:
+    """构建 FastAPI 应用：中间件、异常处理器与路由前缀。"""
     app = FastAPI(
         title=settings.app.name,
         version=settings.app.version,

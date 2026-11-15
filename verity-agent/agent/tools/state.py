@@ -76,13 +76,17 @@ class CircuitBreakerBackend(Protocol):
         self,
         tool_name: str,
         policy: CircuitBreakerPolicy,
-    ) -> None: ...
+    ) -> None:
+        """记录一次成功调用，用于熔断窗口统计。"""
+        ...
 
     async def record_failure(
         self,
         tool_name: str,
         policy: CircuitBreakerPolicy,
-    ) -> None: ...
+    ) -> None:
+        """记录一次失败调用，用于熔断窗口统计。"""
+        ...
 
 
 class RateLimitBackend(Protocol):

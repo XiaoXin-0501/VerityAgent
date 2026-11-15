@@ -22,6 +22,7 @@ __all__ = ["model_spec_from_config"]
 
 
 def _pricing(value: Any) -> ProviderPricing | None:
+    """把可选定价配置规范化为 ProviderPricing。"""
     if value is None:
         return None
     if isinstance(value, ProviderPricing):
@@ -32,6 +33,7 @@ def _pricing(value: Any) -> ProviderPricing | None:
 
 
 def _capabilities(model: ModelConfig, defaults: Mapping[str, Any] | None = None):
+    """按模型 kind 合并默认能力与模型覆盖，生成对应能力模型。"""
     kind = ProviderModelKind(model.kind.value)
     caps = dict(defaults or {})
     caps.update(model.capabilities)
@@ -67,6 +69,7 @@ def model_spec_from_config(
     provider_name: str,
     defaults: Mapping[str, Any] | None = None,
 ) -> ProviderModelSpec:
+    """把顶层 ModelConfig 转换为 ProviderModelSpec（含默认能力与定价）。"""
     metadata = dict(model.metadata)
     metadata.setdefault("vendor", model.provider)
     if model.defaults:

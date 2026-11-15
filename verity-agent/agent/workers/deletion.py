@@ -8,7 +8,7 @@ from datetime import timedelta
 
 from config.memory import MemoryConfig
 from store.minio import MinioStorage
-from store.pg.models.enums import SessionFileStatus, UserStatus
+from store.pg.models.enums import SessionFileStatus
 from store.pg.repositories import SessionFileRepository, UserRepository
 from store.weaviate import WeaviateStore
 from utils.time import utcnow
@@ -57,24 +57,20 @@ class UserDeletionWorker:
             if worked:
                 continue
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=60.0)
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=self.config.deletion_scan_interval_s,
+                )
             except asyncio.TimeoutError:
                 continue
 
     async def run_once(self) -> bool:
-        """扫描一批待删除用户；返回是否处理了任务。"""
-        users = await self.repository.list(
-            status=UserStatus.DELETING,
+        """扫描一批到期用户；返回是否处理了任务。"""
+        # 在 SQL 层过滤重试时间，避免队首失败用户长期占用批次导致饥饿。
+        users = await self.repository.list_deletion_ready(
             limit=self.config.deletion_batch_size,
         )
-        now = utcnow()
-        pending = [
-            item
-            for item in users
-            if item.delete_next_retry_at is None
-            or item.delete_next_retry_at <= now
-        ]
-        for user in pending:
+        for user in users:
             try:
                 await self.vector_store.delete_user_facts(user.id)
                 await self._delete_session_files(user.id)
@@ -87,7 +83,7 @@ class UserDeletionWorker:
                     retry_at=utcnow()
                     + timedelta(seconds=self.config.deletion_retry_backoff_s),
                 )
-        return bool(pending)
+        return bool(users)
 
     async def _delete_session_files(self, user_id) -> None:
         """删除用户上传的会话文件原件/解析产物；按对象前缀幂等。"""

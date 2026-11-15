@@ -325,6 +325,7 @@ class HookSpec(_Model):
     @field_validator("events")
     @classmethod
     def _events_required(cls, value: frozenset[HookEvent]) -> frozenset[HookEvent]:
+        """HookSpec 至少订阅一个事件。"""
         if not value:
             raise ValueError("HookSpec.events 至少订阅一个事件")
         return value

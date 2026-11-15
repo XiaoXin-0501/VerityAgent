@@ -60,6 +60,7 @@ class PGConnectionManager:
     """
 
     def __init__(self, config: PGConfig | None = None) -> None:
+        """保存配置并初始化连接池占位。"""
         cfg = config or settings.pg
         self._config = cfg
         self._min_size = cfg.pool_min_size
@@ -87,6 +88,7 @@ class PGConnectionManager:
 
     @property
     def conninfo(self) -> str:
+        """返回 psycopg 连接串（由配置字段拼装）。"""
         return make_conninfo(
             host=str(self._config.server),
             port=str(self._config.port),
@@ -104,6 +106,7 @@ class PGConnectionManager:
         return self._pool
 
     def _build_pool(self) -> AsyncConnectionPool[psycopg.AsyncConnection[Row]]:
+        """按配置构建异步连接池。"""
         return AsyncConnectionPool(
             conninfo=self.conninfo,
             min_size=self._min_size,
@@ -208,6 +211,7 @@ class PGConnectionManager:
     # ——————————————————— 内部实现 ———————————————————
 
     async def _ensure_open(self) -> None:
+        """确保连接池已打开；未初始化时惰性启动。"""
         if self._pool is None or self._pool.closed:
             await self.open()
 

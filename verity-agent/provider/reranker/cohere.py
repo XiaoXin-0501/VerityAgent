@@ -32,10 +32,12 @@ __all__ = ["CohereRerankModel", "CohereRerankProvider", "BgeRerankProvider"]
 
 class CohereRerankModel(RerankModel):
     def __init__(self, spec, provider: "CohereRerankProvider") -> None:
+        """绑定模型规格与所属 Provider。"""
         super().__init__(spec)
         self.provider = provider
 
     async def rerank(self, request: RerankRequest) -> RerankResponse:
+        """调用 Cohere rerank 接口并转换为统一响应。"""
         object_format = self.provider.config.metadata.get("documents_format") == "object"
         documents = (
             [{"text": doc.text} for doc in request.documents]
@@ -120,12 +122,14 @@ class CohereRerankProvider(RerankProvider):
     }
 
     def __init__(self, config: RerankProviderConfig) -> None:
+        """初始化 SDK 客户端占位与模型句柄缓存。"""
         super().__init__(config)
         self._client: cohere.AsyncClient | None = None
         self._handles: dict[str, RerankModel] = {}
 
     @property
     def client(self) -> cohere.AsyncClient:
+        """返回已初始化的 SDK 客户端；未 open 时抛 UNAVAILABLE。"""
         if self._client is None:
             raise ProviderError(
                 ProviderErrorCode.UNAVAILABLE,
@@ -135,17 +139,20 @@ class CohereRerankProvider(RerankProvider):
         return self._client
 
     async def open(self) -> None:
+        """构建并保存 Cohere 客户端。"""
         client = build_cohere_client(self.config)
         await super().open()
         self._client = client
 
     async def close(self) -> None:
+        """关闭 Cohere 客户端并清理状态。"""
         if self._client is not None:
             await close_cohere_client(self._client)
             self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> RerankModel:
+        """按 model_id 复用或创建模型句柄。"""
         model = self._handles.get(model_id)
         if model is None:
             model = self.model_class(self.get_spec(model_id), self)

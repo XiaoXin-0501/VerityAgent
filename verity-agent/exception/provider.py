@@ -44,6 +44,7 @@ _RETRYABLE: frozenset[ProviderErrorCode] = frozenset(
 
 
 def is_retryable(code: ProviderErrorCode) -> bool:
+    """判断该错误码是否允许上层重试。"""
     return code in _RETRYABLE
 
 
@@ -66,6 +67,7 @@ class ProviderError(VerityError):
         cause: str | None = None,
         retryable: bool | None = None,
     ) -> None:
+        """归一错误码、厂商上下文与可重试标记。"""
         self.provider = provider
         self.model = model
         self.provider_code = provider_code
@@ -89,6 +91,7 @@ class ProviderError(VerityError):
 
     @property
     def error_code(self) -> ProviderErrorCode:
+        """从错误码字符串反解 ProviderErrorCode。"""
         prefix = "PROVIDER_"
         raw = self.code[len(prefix):].lower() if self.code.startswith(prefix) else ""
         try:
@@ -97,6 +100,7 @@ class ProviderError(VerityError):
             return ProviderErrorCode.INTERNAL
 
     def __repr__(self) -> str:  # pragma: no cover
+        """调试表示；只包含 code/provider/model/message。"""
         return (
             f"ProviderError(code={self.code!r}, provider={self.provider!r}, "
             f"model={self.model!r}, message={self.message!r})"

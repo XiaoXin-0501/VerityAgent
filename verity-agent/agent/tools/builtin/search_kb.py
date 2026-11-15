@@ -23,6 +23,7 @@ from agent.tools.policies import (
 from agent.tools.registry import ToolRegistry
 from agent.hooks.enum import HookEvent, HookSource
 from agent.hooks.scope import HookScope
+from config.tools import SearchKbToolConfig
 from exception.tool import ToolErrorCode
 from rag.shared.models import RetrievalRequest
 
@@ -36,7 +37,8 @@ class SearchKbArgs(BaseModel):
 
     query: str = Field(min_length=1, max_length=2000)
     kb_ids: list[UUID] = Field(min_length=1, max_length=20)
-    top_k: int = Field(default=8, ge=1, le=50)
+    # 为空时使用 ToolsConfig.search_kb.default_top_k；上限由执行器按配置收紧
+    top_k: int | None = Field(default=None, ge=1, le=50)
 
 
 def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
@@ -122,6 +124,8 @@ async def _emit_rag_hook(
 async def search_kb_executor(
     arguments: SearchKbArgs,
     context: ToolContext,
+    *,
+    config: SearchKbToolConfig | None = None,
 ) -> ToolResult:
     """执行知识库检索；失败转 ToolResult，不把底层异常抛给主循环。"""
     retriever = getattr(context.services, "rag_retriever", None)
@@ -135,12 +139,16 @@ async def search_kb_executor(
                 retryable=False,
             ),
         )
+    policy = config or SearchKbToolConfig()
+    # 未显式指定时使用运维配置的默认值，并统一收紧到允许上限。
+    top_k = arguments.top_k if arguments.top_k is not None else policy.default_top_k
+    top_k = min(top_k, policy.max_top_k)
     request = RetrievalRequest(
         query=arguments.query,
         kb_ids=list(arguments.kb_ids),
         user_id=context.user_id,
         permissions=context.permissions,
-        top_k=arguments.top_k,
+        top_k=top_k,
         trace_id=context.trace_id,
     )
     try:
@@ -150,7 +158,7 @@ async def search_kb_executor(
             {
                 "query": arguments.query,
                 "kb_ids": [str(item) for item in arguments.kb_ids],
-                "top_k": arguments.top_k,
+                "top_k": top_k,
             },
         )
         result = await retriever.retrieve(request)
@@ -197,11 +205,15 @@ async def search_kb_executor(
 def register_search_kb(
     registry: ToolRegistry,
     retriever: Any | None,
+    *,
+    config: SearchKbToolConfig | None = None,
 ) -> None:
     """注册 ``search_kb``；没有可用 Retriever 时保持不暴露，避免误导 LLM。"""
     if retriever is None:
         logger.info("RAG Retriever 未就绪，跳过 search_kb 注册")
         return
+
+    policy = config or SearchKbToolConfig()
 
     async def _executor(
         arguments: dict[str, Any],
@@ -213,7 +225,7 @@ def register_search_kb(
         bound = context.model_copy(
             update={"call_id": context.call_id, "tool_name": "search_kb"}
         )
-        return await search_kb_executor(parsed, bound)
+        return await search_kb_executor(parsed, bound, config=policy)
 
     registry.register_tool(
         ToolSpec(
@@ -228,14 +240,14 @@ def register_search_kb(
             policy=ToolPolicy(
                 cache=CachePolicy(
                     enabled=True,
-                    ttl_s=60,
+                    ttl_s=policy.cache_ttl_s,
                     key_fields=["query", "kb_ids", "top_k"],
                 ),
                 circuit_breaker=CircuitBreakerPolicy(enabled=True),
                 rate_limit=RateLimitPolicy(
                     enabled=True,
-                    max_calls=60,
-                    window_s=60,
+                    max_calls=policy.rate_limit_calls,
+                    window_s=policy.rate_limit_window_s,
                 ),
             ),
             tags=["rag", "knowledge"],

@@ -91,6 +91,7 @@ class LLMError(VerityError):
         cause: str | None = None,
         retryable: bool | None = None,
     ) -> None:
+        """归一错误码、HTTP 状态、可重试标记与附加上下文。"""
         self.error_code = code
         self.provider = provider
         self.model = model
@@ -120,6 +121,7 @@ class LLMError(VerityError):
 
     @classmethod
     def from_provider(cls, exc: ProviderError) -> "LLMError":
+        """把 ProviderError 映射为 LLMError，保留厂商上下文。"""
         code = _PROVIDER_MAP.get(exc.error_code, LLMErrorCode.INTERNAL)
         return cls(
             code,

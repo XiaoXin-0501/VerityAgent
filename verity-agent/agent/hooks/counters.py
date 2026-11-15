@@ -27,15 +27,18 @@ class UsageCounterStore:
         *,
         redis: RedisConnectionManager | None = None,
     ) -> None:
+        """保存计数配置与可选 Redis 客户端。"""
         self.config = config
         self._redis = redis
 
     @property
     def redis(self) -> RedisConnectionManager:
+        """返回注入的 Redis 客户端或全局实例。"""
         return self._redis or get_redis()
 
     @property
     def scopes(self) -> list[UsageCounterScope]:
+        """解析配置中的计数维度，忽略未知值。"""
         result: list[UsageCounterScope] = []
         for value in self.config.counter_scopes:
             try:
@@ -64,6 +67,7 @@ class UsageCounterStore:
         *,
         user_id: UUID | None = None,
     ) -> list[UsageCounter]:
+        """按配置维度累加用量并返回本次计数快照。"""
         counters: list[UsageCounter] = []
         for scope in self.scopes:
             identifier = self._identifier(scope, record, user_id=user_id)
@@ -83,6 +87,7 @@ class UsageCounterStore:
         return counters
 
     async def read(self, scope: UsageCounterScope, identifier: str) -> UsageCounter | None:
+        """读取指定维度与标识的累计计数。"""
         key = make_key(RedisKeyPrefix.USAGE, scope.value, identifier)
         try:
             data = await self.redis.hgetall(key)
@@ -103,6 +108,7 @@ class UsageCounterStore:
         )
 
     async def _write_hash(self, key: str, record: UsageRecord) -> None:
+        """把用量字段累加写入 Redis hash。"""
         usage = record.usage
         fields = {
             "input_tokens": usage.input_tokens,
@@ -120,6 +126,7 @@ class UsageCounterStore:
 
     @staticmethod
     def _counter_fields(record: UsageRecord) -> dict[str, Any]:
+        """把 UsageRecord 转换为计数字段。"""
         usage = record.usage
         return {
             "input_tokens": usage.input_tokens,
@@ -138,6 +145,7 @@ class UsageCounterStore:
         *,
         user_id: UUID | None,
     ) -> str | None:
+        """按维度生成计数标识；无法生成时返回 None。"""
         if scope is UsageCounterScope.TURN:
             return record.turn_id
         if scope is UsageCounterScope.CONVERSATION:

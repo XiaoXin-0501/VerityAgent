@@ -32,6 +32,7 @@ class ToolRegistry:
     """工具注册表；线程安全，建议启动后只读。"""
 
     def __init__(self) -> None:
+        """初始化工具、工具组与注册锁。"""
         self._tools: dict[str, RegisteredTool] = {}
         self._groups: dict[str, ToolGroup] = {}
         self._lock = RLock()
@@ -102,18 +103,22 @@ class ToolRegistry:
     # ——————————————————— 查询 ———————————————————
 
     def get(self, name: str) -> RegisteredTool | None:
+        """按名称取工具；不存在返回 None。"""
         return self._tools.get(name)
 
     def require(self, name: str) -> RegisteredTool:
+        """按名称取工具；不存在抛 ToolNotFoundError。"""
         tool = self._tools.get(name)
         if tool is None:
             raise ToolNotFoundError(name)
         return tool
 
     def all(self) -> list[RegisteredTool]:
+        """返回全部已注册工具。"""
         return list(self._tools.values())
 
     def groups(self) -> list[ToolGroup]:
+        """返回全部工具组。"""
         return list(self._groups.values())
 
     def snapshot(self) -> ToolCatalog:
@@ -141,11 +146,13 @@ class ToolRegistry:
         )
 
     def clear(self) -> None:
+        """清空工具与工具组；仅用于测试/重载。"""
         with self._lock:
             self._tools.clear()
             self._groups.clear()
 
     def __len__(self) -> int:
+        """已注册工具数量。"""
         return len(self._tools)
 
     # ——————————————————— 校验 ———————————————————
@@ -178,6 +185,7 @@ class ToolRegistry:
         return spec
 
     def _validate_spec(self, spec: ToolSpec) -> None:
+        """校验 router 工具与目标组声明一致。"""
         if spec.kind is ToolKind.ROUTER:
             group = self._groups.get(spec.router_group or "")
             if group is None:
@@ -198,6 +206,7 @@ class ToolRegistry:
         tools: dict[str, RegisteredTool],
         groups: dict[str, ToolGroup],
     ) -> str:
+        """根据工具与组定义计算稳定的 catalog 版本号。"""
         payload = {
             "tools": [
                 item.spec.model_dump(mode="json")

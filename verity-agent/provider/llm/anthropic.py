@@ -78,10 +78,12 @@ _STOP_MAP = {
 
 
 def _finish_reason(value: Any) -> ChatFinishReason:
+    """把 Anthropic stop_reason 归一化为统一结束原因。"""
     return _STOP_MAP.get(str(value), ChatFinishReason.STOP)
 
 
 def _usage(payload: Mapping[str, Any] | None) -> ChatUsage:
+    """从 usage 字典构造统一 token 用量（含缓存命中数）。"""
     data = payload or {}
     return ChatUsage(
         input_tokens=int(data.get("input_tokens") or 0),
@@ -93,6 +95,7 @@ def _usage(payload: Mapping[str, Any] | None) -> ChatUsage:
 
 
 def _image_block(part: ModelImagePart) -> dict[str, Any]:
+    """把图片 part 转成 Anthropic base64 或 URL image block。"""
     if part.data:
         return {
             "type": "image",
@@ -110,6 +113,7 @@ def _image_block(part: ModelImagePart) -> dict[str, Any]:
 
 
 def _blocks(parts: list[ModelContentPart]) -> list[dict[str, Any]]:
+    """把统一 content part 列表转换为 Anthropic content blocks。"""
     blocks: list[dict[str, Any]] = []
     for part in parts:
         if isinstance(part, ModelTextPart):
@@ -138,10 +142,12 @@ def _blocks(parts: list[ModelContentPart]) -> list[dict[str, Any]]:
 
 class AnthropicChatModel(ChatModel):
     def __init__(self, spec, provider: "AnthropicChatProvider") -> None:
+        """绑定模型规格与所属 Provider。"""
         super().__init__(spec)
         self.provider = provider
 
     def _messages(self, messages: list[ModelMessage]) -> tuple[str | None, list[dict[str, Any]]]:
+        """拆分 system 文本并转换消息；连续 tool 结果合并为一条 user 消息。"""
         system_parts: list[str] = []
         result: list[dict[str, Any]] = []
         index = 0
@@ -196,6 +202,7 @@ class AnthropicChatModel(ChatModel):
         return ("\n\n".join(system_parts) if system_parts else None), result
 
     def _tool_choice(self, request: ChatModelRequest) -> dict[str, Any] | None:
+        """把统一工具选择策略转换为 Anthropic tool_choice。"""
         if not request.tools:
             return None
         choice = request.tool_choice
@@ -208,6 +215,7 @@ class AnthropicChatModel(ChatModel):
         return {"type": "auto"}
 
     def _payload(self, request: ChatModelRequest, *, stream: bool) -> dict[str, Any]:
+        """构造 Messages API 请求体；prefix completion 要求末条为 assistant。"""
         system, messages = self._messages(request.messages)
         if request.prefix and (not messages or messages[-1]["role"] != "assistant"):
             raise ProviderError(
@@ -265,6 +273,7 @@ class AnthropicChatModel(ChatModel):
         return payload
 
     def _response(self, data: Mapping[str, Any]) -> ChatModelResponse:
+        """把 Messages 响应解析为统一 ChatModelResponse。"""
         parts: list[ModelContentPart] = []
         calls: list[ModelToolCall] = []
         for block in data.get("content") or []:
@@ -300,6 +309,7 @@ class AnthropicChatModel(ChatModel):
         )
 
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
+        """非流式调用 Messages API，并把 SDK 异常归一化为 ProviderError。"""
         payload = self._payload(request, stream=False)
         try:
             message = await self.provider.client.messages.create(
@@ -314,6 +324,7 @@ class AnthropicChatModel(ChatModel):
         return self._response(sdk_dump(message))
 
     async def stream(self, request: ChatModelRequest) -> AsyncIterator[ChatStreamEvent]:
+        """流式调用 Messages API，累积 tool_use JSON 并产出统一流事件。"""
         payload = self._payload(request, stream=True)
         yield ChatStreamStart(model=self.spec.model)
         blocks: dict[int, dict[str, Any]] = {}
@@ -438,12 +449,14 @@ class AnthropicChatProvider(ChatProvider):
     }
 
     def __init__(self, config: ChatProviderConfig) -> None:
+        """初始化 SDK 客户端占位与模型句柄缓存。"""
         super().__init__(config)
         self._client: anthropic.AsyncAnthropic | None = None
         self._handles: dict[str, ChatModel] = {}
 
     @property
     def client(self) -> anthropic.AsyncAnthropic:
+        """返回已初始化的 SDK 客户端；未 open 时抛 UNAVAILABLE。"""
         if self._client is None:
             raise ProviderError(
                 ProviderErrorCode.UNAVAILABLE,
@@ -453,17 +466,20 @@ class AnthropicChatProvider(ChatProvider):
         return self._client
 
     async def open(self) -> None:
+        """构建并保存 AsyncAnthropic 客户端。"""
         client = build_anthropic_client(self.config)
         await super().open()
         self._client = client
 
     async def close(self) -> None:
+        """关闭 SDK 客户端并清理模型句柄。"""
         if self._client is not None:
             await self._client.close()
             self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> ChatModel:
+        """按 model_id 复用或创建模型句柄。"""
         model = self._handles.get(model_id)
         if model is None:
             model = self.model_class(self.get_spec(model_id), self)

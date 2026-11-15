@@ -141,6 +141,7 @@ class ToolSpec(_Model):
     @field_validator("name")
     @classmethod
     def _valid_name(cls, value: str) -> str:
+        """校验工具名符合命名规则。"""
         if not _NAME_RE.fullmatch(value):
             raise ValueError("工具名必须匹配 ^[a-zA-Z0-9_-]{1,64}$")
         return value
@@ -148,6 +149,7 @@ class ToolSpec(_Model):
     @field_validator("required_permission")
     @classmethod
     def _valid_permission(cls, value: str | None) -> str | None:
+        """校验权限码只包含允许字符。"""
         if value is not None and not _PERMISSION_RE.fullmatch(value):
             raise ValueError("required_permission 只能包含权限码字符")
         return value
@@ -155,6 +157,7 @@ class ToolSpec(_Model):
     @field_validator("resource_permission_template")
     @classmethod
     def _valid_template(cls, value: str | None) -> str | None:
+        """校验资源权限模板含 {field} 占位且格式合法。"""
         if value is None:
             return None
         if not _PERMISSION_RE.fullmatch(value):
@@ -166,6 +169,7 @@ class ToolSpec(_Model):
     @field_validator("parameters")
     @classmethod
     def _valid_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """校验参数 schema 为 object 结构。"""
         if value.get("type") not in (None, "object"):
             raise ValueError("ToolSpec.parameters 必须是 object schema")
         properties = value.get("properties", {})
@@ -180,6 +184,7 @@ class ToolSpec(_Model):
 
     @model_validator(mode="after")
     def _router_consistent(self) -> "ToolSpec":
+        """校验 ROUTER/EXECUTABLE 与 router_group 的一致性。"""
         if self.kind is ToolKind.ROUTER and not self.router_group:
             raise ValueError("kind=ROUTER 必须提供 router_group")
         if self.kind is ToolKind.EXECUTABLE and self.router_group:
@@ -199,6 +204,7 @@ class ToolDescriptor(_Model):
 
     @classmethod
     def from_spec(cls, spec: ToolSpec) -> "ToolDescriptor":
+        """从 ToolSpec 生成 LLM-facing 投影。"""
         return cls(
             name=spec.name,
             description=spec.description,
@@ -242,6 +248,7 @@ class ToolGroup(_Model):
     @field_validator("name")
     @classmethod
     def _valid_name(cls, value: str) -> str:
+        """校验组名符合命名规则。"""
         if not _NAME_RE.fullmatch(value):
             raise ValueError("组名必须匹配 ^[a-zA-Z0-9_-]{1,64}$")
         return value
@@ -249,6 +256,7 @@ class ToolGroup(_Model):
     @field_validator("tool_names")
     @classmethod
     def _unique_tools(cls, value: list[str]) -> list[str]:
+        """校验组内工具名合法且不重复。"""
         if len(value) != len(set(value)):
             raise ValueError("ToolGroup.tool_names 不能重复")
         invalid = [item for item in value if not _NAME_RE.fullmatch(item)]
@@ -259,6 +267,7 @@ class ToolGroup(_Model):
     @field_validator("router_tool_name")
     @classmethod
     def _valid_router_name(cls, value: str) -> str:
+        """校验路由工具名符合工具命名规则。"""
         if not _NAME_RE.fullmatch(value):
             raise ValueError("router_tool_name 必须匹配工具名规则")
         return value
@@ -266,6 +275,7 @@ class ToolGroup(_Model):
     @field_validator("required_permission")
     @classmethod
     def _valid_group_permission(cls, value: str | None) -> str | None:
+        """校验组级权限码格式。"""
         if value is not None and not _PERMISSION_RE.fullmatch(value):
             raise ValueError("required_permission 只能包含权限码字符")
         return value
@@ -281,6 +291,7 @@ class ToolGroupDescriptor(_Model):
 
     @classmethod
     def from_group(cls, group: ToolGroup) -> "ToolGroupDescriptor":
+        """从 ToolGroup 生成只读投影。"""
         return cls(
             name=group.name,
             description=group.description,
@@ -299,15 +310,18 @@ class ToolCatalog:
     created_at: datetime = field(default_factory=utcnow)
 
     def get(self, name: str) -> RegisteredTool | None:
+        """按名称取工具；不存在返回 None。"""
         return self.tools.get(name)
 
     def require(self, name: str) -> RegisteredTool:
+        """按名称取工具；不存在抛 ToolNotFoundError。"""
         tool = self.tools.get(name)
         if tool is None:
             raise ToolNotFoundError(name)
         return tool
 
     def get_group(self, name: str) -> ToolGroup | None:
+        """按名称取工具组。"""
         return self.groups.get(name)
 
     def for_permissions(
@@ -316,6 +330,7 @@ class ToolCatalog:
         routing: ToolRoutingPolicy | None = None,
     ) -> "ToolSelection":
         # 延迟导入，避免 registry/selection 与 models 循环
+        """按权限与路由策略生成本次运行的工具选择。"""
         from .selection import build_selection
 
         return build_selection(self, permissions, routing or ToolRoutingPolicy())
@@ -338,9 +353,11 @@ class ToolSelection(_MutableModel):
 
     @property
     def descriptor_by_name(self) -> dict[str, ToolDescriptor]:
+        """返回 name -> descriptor 的映射，供 LLM 请求组装。"""
         return {item.name: item for item in self.descriptors}
 
     def is_exposed(self, name: str) -> bool:
+        """判断工具是否已暴露给当前运行。"""
         return name in self.exposed_tool_names
 
 
@@ -373,6 +390,7 @@ class ToolContext(_Model):
     logger: Any = None
 
     def has_permission(self, code: str | None) -> bool:
+        """判断当前上下文是否满足权限码（None 表示无需权限）。"""
         return code is None or code in self.permissions
 
 
@@ -391,6 +409,7 @@ class ToolError(_Model):
     @model_validator(mode="before")
     @classmethod
     def _fill_defaults(cls, data: Any) -> Any:
+        """按错误码补齐 category/retryable 默认值。"""
         if not isinstance(data, dict):
             return data
         value = data.get("code")
@@ -404,6 +423,7 @@ class ToolError(_Model):
 
     @classmethod
     def from_exception(cls, exc: ToolException) -> "ToolError":
+        """从 ToolException 构造结构化 ToolError。"""
         return cls(
             code=exc.error_code,
             category=exc.category,
@@ -453,6 +473,7 @@ class ToolResult(_Model):
 
     @model_validator(mode="after")
     def _error_consistent(self) -> "ToolResult":
+        """校验 status 与 error 的一致性。"""
         if self.status is not ToolResultStatus.SUCCEEDED and self.error is None:
             raise ValueError("FAILED/CANCELLED 的 ToolResult 必须带 ToolError")
         if self.status is ToolResultStatus.SUCCEEDED and self.error is not None:
@@ -461,6 +482,7 @@ class ToolResult(_Model):
 
     @property
     def tool_call_status(self) -> ToolCallStatus:
+        """映射为消息层的 ToolCallStatus。"""
         return {
             ToolResultStatus.SUCCEEDED: ToolCallStatus.SUCCEEDED,
             ToolResultStatus.FAILED: ToolCallStatus.FAILED,
@@ -469,6 +491,7 @@ class ToolResult(_Model):
 
     @property
     def message_status(self) -> MessageStatus:
+        """映射为 ToolMessage 的 MessageStatus。"""
         return (
             MessageStatus.COMPLETED
             if self.status is ToolResultStatus.SUCCEEDED
@@ -485,6 +508,7 @@ class ToolResult(_Model):
         data: Any = None,
         **kwargs: Any,
     ) -> "ToolResult":
+        """构造成功结果。"""
         return cls(
             call_id=call_id,
             tool_name=tool_name,
@@ -504,6 +528,7 @@ class ToolResult(_Model):
         content: str | None = None,
         **kwargs: Any,
     ) -> "ToolResult":
+        """构造失败结果。"""
         return cls(
             call_id=call_id,
             tool_name=tool_name,
@@ -522,6 +547,7 @@ class ToolResult(_Model):
         error: ToolError | None = None,
         **kwargs: Any,
     ) -> "ToolResult":
+        """构造取消结果；缺省错误码为 CANCELLED。"""
         return cls(
             call_id=call_id,
             tool_name=tool_name,
@@ -554,10 +580,12 @@ class ToolInvocation(_MutableModel):
     idempotent_replay: bool = False
 
     def mark_running(self) -> None:
+        """标记调用开始并刷新开始时间。"""
         self.status = ToolCallStatus.RUNNING
         self.started_at = utcnow()
 
     def finish(self, result: ToolResult) -> None:
+        """写入终态结果并同步命中标记。"""
         self.status = result.tool_call_status
         self.result = result
         self.ended_at = result.ended_at or utcnow()
@@ -620,6 +648,7 @@ class IdempotencyRecord(_Model):
     locked_until: datetime | None = None
 
     def is_locked(self, now: datetime | None = None) -> bool:
+        """判断幂等记录是否仍处于执行锁定期。"""
         return (
             self.state is IdempotencyState.IN_PROGRESS
             and self.locked_until is not None
@@ -695,4 +724,6 @@ class ToolExecutor(Protocol):
         self,
         arguments: dict[str, Any],
         context: ToolContext,
-    ) -> ToolResult: ...
+    ) -> ToolResult:
+        """工具执行器协议：接收校验后的参数与上下文，返回结果。"""
+        ...

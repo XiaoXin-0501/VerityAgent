@@ -41,6 +41,7 @@ class LoggingHook:
         *,
         logger: logging.Logger | None = None,
     ) -> None:
+        """保存日志配置与脱敏策略，构建 HookSpec。"""
         self.config = config
         self.redaction = redaction
         self.logger = logger or logging.getLogger("verity.hooks")
@@ -64,6 +65,7 @@ class LoggingHook:
         self._level = getattr(logging, config.level.upper(), logging.INFO)
 
     async def __call__(self, context: HookContext) -> None:
+        """输出结构化日志；payload 按配置脱敏并截断。"""
         data: dict[str, Any] = {
             "event": context.event.value,
             "trace_id": context.trace_id,

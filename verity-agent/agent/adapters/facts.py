@@ -66,6 +66,81 @@ class WeaviateFactStore:
         hits.sort(key=lambda item: item["score"], reverse=True)
         return hits
 
+    @staticmethod
+    def fact_id_for(user_id: Any, content: str) -> str:
+        """返回事实确定性 id；写入/冲突判定共用。"""
+        normalized = normalize_whitespace(content, keep_newlines=False).lower()
+        return str(uuid5(NAMESPACE_URL, f"{user_id}{chr(0)}{normalized}"))
+
+    async def find_similar(
+        self,
+        *,
+        user_id: Any,
+        content: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """按新事实内容 BM25 召回当前用户 active 候选。"""
+        from weaviate.classes.query import Filter, MetadataQuery
+
+        collection = self.store.user_facts
+        where = Filter.by_property("user_id").equal(str(user_id)) & (
+            Filter.by_property("status").equal("active")
+        )
+        response = await self.store.maybe_to_thread(
+            collection.query.bm25,
+            query=content,
+            query_properties=["content"],
+            limit=max(1, int(limit)),
+            filters=where,
+            return_metadata=MetadataQuery(score=True),
+        )
+        candidates: list[dict[str, Any]] = []
+        for item in getattr(response, "objects", []) or []:
+            props = dict(getattr(item, "properties", {}) or {})
+            metadata = getattr(item, "metadata", None)
+            candidates.append(
+                {
+                    "id": str(getattr(item, "uuid", "")),
+                    "content": str(props.get("content") or ""),
+                    "category": props.get("category"),
+                    "confidence": float(props.get("confidence") or 0.0),
+                    "context": props.get("context"),
+                    "scope": props.get("scope"),
+                    "score": float(getattr(metadata, "score", 0.0) or 0.0),
+                }
+            )
+        return candidates
+
+    async def supersede(
+        self,
+        *,
+        user_id: Any,
+        old_fact_id: str,
+        new_fact_id: str,
+    ) -> bool:
+        """把旧事实标记为 superseded，指向新事实 id。"""
+        collection = self.store.user_facts
+        existing = await self.store.maybe_to_thread(
+            collection.query.fetch_object_by_id,
+            old_fact_id,
+        )
+        if existing is None or str(
+            (getattr(existing, "properties", {}) or {}).get("user_id")
+        ) != str(user_id):
+            return False
+        now = utcnow().isoformat()
+        await self.store.maybe_to_thread(
+            collection.data.update,
+            uuid=old_fact_id,
+            properties={
+                "status": "superseded",
+                "superseded_by": new_fact_id,
+                "deprecated_at": now,
+                "updated_at": now,
+            },
+        )
+        return True
+
     async def upsert_facts(
         self,
         *,
@@ -190,6 +265,41 @@ class WeaviateFactStore:
             for item in getattr(response, "objects", []) or []
         ]
         return await self.deprecate_facts(user_id=user_id, fact_ids=ids)
+
+    async def penalize_facts(
+        self,
+        *,
+        user_id: Any,
+        fact_ids: list[str],
+        delta: float = 0.1,
+        disputed_threshold: float = 0.4,
+    ) -> int:
+        """下调事实置信度；低于阈值置 disputed，返回修改条数。"""
+        collection = self.store.user_facts
+        changed = 0
+        now = utcnow().isoformat()
+        for fact_id in fact_ids:
+            existing = await self.store.maybe_to_thread(
+                collection.query.fetch_object_by_id,
+                fact_id,
+            )
+            props = dict(getattr(existing, "properties", {}) or {}) if existing else {}
+            if not existing or str(props.get("user_id")) != str(user_id):
+                continue
+            old = float(props.get("confidence") or 0.0)
+            confidence = max(0.0, old - max(0.0, float(delta)))
+            status = "disputed" if confidence < disputed_threshold else props.get("status", "active")
+            await self.store.maybe_to_thread(
+                collection.data.update,
+                uuid=fact_id,
+                properties={
+                    "confidence": confidence,
+                    "status": status,
+                    "updated_at": now,
+                },
+            )
+            changed += 1
+        return changed
 
     async def count_active(self, *, user_id: Any) -> int:
         """统计用户 active 事实数；用于 PG fact_count 对账。"""

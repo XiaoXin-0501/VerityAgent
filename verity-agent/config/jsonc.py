@@ -13,6 +13,7 @@ __all__ = ["loads"]
 
 
 def loads(text: str):
+    """解析带 // 与 /* */ 注释的 JSON；字符串内内容不受影响。"""
     out: list[str] = []
     index = 0
     length = len(text)

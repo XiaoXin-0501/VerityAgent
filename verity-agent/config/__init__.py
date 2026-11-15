@@ -44,6 +44,7 @@ from .infrastructure import (
     WeaviateConfig,
 )
 from .llm import LLMConfig, StructuredOutputConfig
+from .memory import MemoryConfig
 from .message import MessageConfig
 from .model import ModelConfig
 from .prompt import PromptConfig
@@ -90,6 +91,8 @@ __all__ = [
     # llm
     "LLMConfig",
     "StructuredOutputConfig",
+    # memory
+    "MemoryConfig",
     # prompt
     "PromptConfig",
     # message
@@ -145,6 +148,8 @@ class Settings(EnvSettings):
 
     # LLM 应用层默认策略
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    # 长期记忆抽取 worker
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     # Prompt 模板目录/覆盖/严格渲染
     # 字段名用 prompts，避免与 shell 常见的 PROMPT 环境变量冲突
     prompts: PromptConfig = Field(default_factory=PromptConfig)
@@ -166,6 +171,7 @@ class Settings(EnvSettings):
 
     @model_validator(mode="after")
     def _load_models_file(self) -> "Settings":
+        """加载 models_file 指向的 JSON/JSONC 模型清单。"""
         if not self.models_file:
             return self
         path = Path(self.models_file)
@@ -191,6 +197,7 @@ class Settings(EnvSettings):
 
     @model_validator(mode="after")
     def _check_model_refs(self) -> "Settings":
+        """校验模型 id 唯一，并检查 LLM/RAG 引用的模型存在。"""
         seen: set[str] = set()
         for model in self.models:
             if model.id in seen:
@@ -220,9 +227,25 @@ class Settings(EnvSettings):
             refs.append(self.rag.retriever.query_rewrite_model_id)
         if self.rag.retriever.intent_model_id:
             refs.append(self.rag.retriever.intent_model_id)
+        if self.memory.extraction_model_id:
+            refs.append(self.memory.extraction_model_id)
+        if self.memory.compression_model_id:
+            refs.append(self.memory.compression_model_id)
+        if self.memory.fact_conflict_model_id:
+            refs.append(self.memory.fact_conflict_model_id)
         unknown = sorted({item for item in refs if item not in seen})
         if unknown:
             raise ValueError(f"配置引用了未声明的模型 id: {unknown}")
+        if (
+            self.llm.default_model_id
+            and self.llm.model_ids
+            and self.llm.default_model_id not in self.llm.model_ids
+        ):
+            raise ValueError("LLM default_model_id 必须包含在 model_ids 中")
+        if self.llm.model_ids:
+            outside = sorted(set(self.llm.fallback_model_ids) - set(self.llm.model_ids))
+            if outside:
+                raise ValueError(f"LLM fallback 模型不在 model_ids 中: {outside}")
         return self
 
 

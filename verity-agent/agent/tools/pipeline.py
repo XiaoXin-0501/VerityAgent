@@ -80,6 +80,7 @@ class ToolPipeline:
         overflow_writer: OverflowWriter | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        """保存注册表、策略后端与可选观测依赖。"""
         self.registry = registry
         self.config = config
         self.cache = cache
@@ -158,6 +159,7 @@ class ToolPipeline:
         started: float,
         started_at: datetime,
     ) -> ToolResult:
+        """执行权限、参数、策略、幂等/缓存/熔断/限流与重试的完整链路。"""
         tool = self.registry.get(call.name)
         if tool is None:
             return self._failure(
@@ -440,6 +442,7 @@ class ToolPipeline:
         semaphore = asyncio.Semaphore(limit)
 
         async def run(call: ToolCall) -> ToolResult:
+            """绑定单次调用上下文并受批次并发信号量约束。"""
             tool = self.registry.get(call.name)
             timeout = tool.spec.policy.timeout_s if tool else 30.0
             call_context = context.model_copy(
@@ -464,6 +467,7 @@ class ToolPipeline:
         call: ToolCall,
         started_at: datetime,
     ) -> tuple[ToolResult, int]:
+        """按重试策略执行工具，返回终态结果与实际尝试次数。"""
         spec = tool.spec
         policy = spec.policy
         attempts_allowed = policy.retry.max_attempts
@@ -570,6 +574,7 @@ class ToolPipeline:
         context: ToolContext,
         call: ToolCall,
     ) -> ToolResult:
+        """按工具策略截断结果内容，超大内容转溢出文件。"""
         limits = tool.spec.policy.result_limit
         content = result.content
         data = result.data
@@ -673,6 +678,7 @@ class ToolPipeline:
         arguments: dict[str, Any],
         context: ToolContext,
     ) -> tuple[str | None, IdempotencyRecord | None]:
+        """生成并抢占幂等 key；已有可重放结果时直接返回记录。"""
         policy = tool.spec.policy.idempotency
         if policy.mode is IdempotencyMode.NONE or self.idempotency is None:
             return None, None
@@ -766,6 +772,7 @@ class ToolPipeline:
         started_at: datetime,
         record: IdempotencyRecord,
     ) -> ToolResult:
+        """把已有幂等记录转换为本次调用的 ToolResult。"""
         if record.result is not None:
             return self._clone_result(
                 record.result,
@@ -797,6 +804,7 @@ class ToolPipeline:
         *,
         ttl_s: int,
     ) -> None:
+        """把终态结果写回幂等记录并释放锁。"""
         if key is None or self.idempotency is None:
             return
         policy = tool.spec.policy.idempotency
@@ -832,6 +840,7 @@ class ToolPipeline:
         idem_key: str | None,
         attempts: int,
     ) -> None:
+        """回写幂等终态与熔断状态，并按策略写入结果缓存。"""
         if idem_key is not None:
             await self._complete_idempotency(
                 idem_key,
@@ -887,6 +896,7 @@ class ToolPipeline:
         return bool(callable(checker) and checker())
 
     def _write_allowed(self, tool: RegisteredTool) -> tuple[bool, str | None]:
+        """判断写/删除工具是否满足自动执行条件。"""
         spec = tool.spec
         if spec.side_effect is ToolSideEffect.READ:
             return True, None
@@ -900,6 +910,7 @@ class ToolPipeline:
         return False, None
 
     def _retry_allowed(self, tool: RegisteredTool) -> bool:
+        """判断工具是否允许自动重试（只读或可对账写）。"""
         spec = tool.spec
         if spec.side_effect is ToolSideEffect.READ:
             return True
@@ -915,6 +926,7 @@ class ToolPipeline:
         arguments: dict[str, Any],
         context: ToolContext,
     ) -> str | None:
+        """生成包含工具版本与权限上下文的结果缓存 key。"""
         policy = tool.spec.policy.cache
         if not policy.enabled or self.cache is None:
             return None
@@ -945,6 +957,7 @@ class ToolPipeline:
         arguments: dict[str, Any],
         context: ToolContext,
     ) -> str:
+        """生成幂等 key；优先使用调用方提供的业务 key。"""
         if context.idempotency_key:
             digest = sha256_json(
                 {
@@ -970,6 +983,7 @@ class ToolPipeline:
         return make_key(RedisKeyPrefix.IDEMPOTENCY, tool.spec.name, digest)
 
     async def _cache_get(self, key: str) -> ToolResult | None:
+        """读取缓存结果；后端失败按 miss 处理。"""
         cache = self.cache
         if cache is None:
             return None
@@ -985,6 +999,7 @@ class ToolPipeline:
         call: ToolCall,
         started_at: datetime,
     ) -> ToolResult:
+        """把执行器返回值规范化为 ToolResult。"""
         if not isinstance(result, ToolResult):
             raise ToolException(
                 "执行器必须返回 ToolResult",
@@ -1009,6 +1024,7 @@ class ToolPipeline:
         cache_hit: bool = False,
         idempotent_replay: bool = False,
     ) -> ToolResult:
+        """复制缓存/幂等结果并更新本次调用的计时与命中标记。"""
         cloned = result.model_copy(
             update={
                 "call_id": call.call_id,
@@ -1028,6 +1044,7 @@ class ToolPipeline:
         *,
         attempts: int,
     ) -> ToolResult:
+        """补齐耗时与尝试次数指标。"""
         duration_ms = int((perf_counter() - started) * 1000)
         metrics = result.metrics.model_copy(
             update={
@@ -1058,6 +1075,7 @@ class ToolPipeline:
         retry_after_s: float | None = None,
         cause: str | None = None,
     ) -> ToolResult:
+        """构造结构化失败结果并更新指标。"""
         error = ToolError(
             code=code,
             message=message,
@@ -1084,6 +1102,7 @@ class ToolPipeline:
         started_at: datetime,
         exc: ToolException,
     ) -> ToolResult:
+        """把 ToolException 转换为失败 ToolResult。"""
         error = tool_error_from_exception(exc, tool_name=call.name)
         return self._result(
             ToolResult.failure(
@@ -1099,6 +1118,7 @@ class ToolPipeline:
 
     @staticmethod
     def _timeout_for(context: ToolContext, timeout_s: float) -> float | None:
+        """结合调用 deadline 与工具超时计算实际超时。"""
         limit = timeout_s
         if context.timeout_s and context.timeout_s > 0:
             limit = min(limit, context.timeout_s)
@@ -1109,6 +1129,7 @@ class ToolPipeline:
 
     @staticmethod
     async def _sleep_backoff(policy: RetryPolicy, attempt: int) -> None:
+        """按指数退避策略等待，供重试使用。"""
         delay_ms = policy.backoff_ms * (policy.backoff_multiplier ** (attempt - 1))
         if policy.jitter:
             delay_ms = random.uniform(0, delay_ms)
@@ -1117,6 +1138,7 @@ class ToolPipeline:
 
 
 def _truncate_bytes(text: str, max_bytes: int) -> str:
+    """按 UTF-8 字节上限安全截断文本。"""
     raw = text.encode("utf-8")
     if len(raw) <= max_bytes:
         return text

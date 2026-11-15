@@ -29,7 +29,6 @@ from agent.llm import (
     ImagePart,
     LLMMessage,
     LLMRequest,
-    LLMRequestContext,
     LLMResponse,
     LLMStreamPhase,
     LLMToolCall,
@@ -38,11 +37,11 @@ from agent.llm import (
     ModelPurpose,
     TextPart,
     ThinkingPart,
-    ToolChoice as LLMToolChoice,
 )
 from agent.context.models import ContextSection
 from agent.message.enum import MessageStatus
 from agent.message.codec import encode_content
+from agent.prompting import PromptBuilder
 from agent.message.models import (
     AssistantMessage,
     RawMessage,
@@ -84,6 +83,9 @@ class AgentLoop:
         """保存配置与端口；不建立外部连接。"""
         self.config = config
         self.deps = dependencies
+        self.prompt_builder = PromptBuilder(
+            default_model_id=dependencies.model_id
+        )
 
     async def run(
         self,
@@ -107,6 +109,7 @@ class AgentLoop:
         lease_lost = asyncio.Event()
 
         async def emit(event_type: AgentEventType, data=None, **kwargs):
+            """构造绑定当前 publisher 的事件发送协程。"""
             return await publisher.emit(event_type, data or {}, **kwargs)
 
         turn_terminal_emitted = False
@@ -585,6 +588,15 @@ class AgentLoop:
                     ),
                     run_id=run_id,
                 )
+            if self.deps.compressor is not None:
+                self._schedule_background(
+                    "memory.compress",
+                    self.deps.compressor.maybe_compress(
+                        conversation_id,
+                        run_id=run_id,
+                    ),
+                    run_id=run_id,
+                )
             await emit_turn_terminal(
                 TurnStatus.COMPLETED,
                 assistant_message_id=(
@@ -898,25 +910,105 @@ class AgentLoop:
         tools: list[LLMToolDescriptor],
         deadline,
     ) -> LLMRequest:
-        """构造 LLM 应用层请求；ContextAssembler 接入前的直接消息窗口。"""
-        from utils.ids import new_request_id
-
-        return LLMRequest(
-            request_id=new_request_id(),
-            context=LLMRequestContext(
-                trace_id=request.request_id,
-                conversation_id=request.conversation_id,
-                turn_id=turn_id,
-                user_id=request.user_id,
-                purpose=ModelPurpose.CHAT,
-                deadline=deadline,
-                metadata={**self.deps.metadata, **request.metadata},
-            ),
-            model_id=request.model_id or self.deps.model_id,
+        """通过 PromptBuilder 构造 LLM 应用层请求。"""
+        return self.prompt_builder.build(
+            trace_id=request.request_id,
+            conversation_id=request.conversation_id,
+            turn_id=turn_id,
+            user_id=request.user_id,
             messages=messages,
             tools=tools,
-            tool_choice=request.tool_choice or LLMToolChoice(),
+            model_id=request.model_id or self.deps.model_id,
+            tool_choice=request.tool_choice,
+            purpose=ModelPurpose.CHAT,
+            deadline=deadline,
+            metadata={**self.deps.metadata, **request.metadata},
             stream=False,
+        )
+
+    async def _injected_rag_section(
+        self,
+        request: AgentRequest,
+        *,
+        run_id: str,
+        turn_id: str,
+    ) -> ContextSection | None:
+        """INJECTED 模式：检索 KB 并渲染成 RAG section；失败降级不阻断。"""
+        mode = getattr(request.rag_mode, "value", request.rag_mode)
+        if mode != "injected" or self.deps.rag is None:
+            return None
+        raw_ids = request.metadata.get("kb_ids") or []
+        if isinstance(raw_ids, (str, bytes)):
+            raw_ids = [raw_ids]
+        kb_ids: list[UUID] = []
+        for item in raw_ids:
+            try:
+                kb_ids.append(UUID(str(item)))
+            except (TypeError, ValueError):
+                continue
+        if not kb_ids or not request.content.strip():
+            logger.debug("INJECTED RAG 缺少 kb_ids 或 query，跳过注入")
+            return None
+        top_k = request.metadata.get("top_k")
+        await self._emit_hook(
+            "rag.retrieval.start",
+            {
+                "query": request.content,
+                "kb_ids": [str(item) for item in kb_ids],
+                "top_k": top_k,
+            },
+            request=request,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        try:
+            result = await self.deps.rag.retrieve(
+                query=request.content,
+                kb_ids=kb_ids,
+                user_id=request.user_id,
+                permissions=request.permissions,
+                top_k=top_k,
+                trace_id=request.request_id,
+            )
+        except Exception:  # noqa: BLE001 - 注入式 RAG 可降级
+            logger.warning("INJECTED RAG 检索失败，按无 RAG 继续", exc_info=True)
+            await self._emit_hook(
+                "rag.retrieval.end",
+                {"chunk_count": 0, "status": "failed"},
+                request=request,
+                run_id=run_id,
+                turn_id=turn_id,
+            )
+            return None
+        chunks = list(getattr(result, "chunks", []) or [])
+        if not chunks:
+            await self._emit_hook(
+                "rag.retrieval.end",
+                {"chunk_count": 0, "status": "empty"},
+                request=request,
+                run_id=run_id,
+                turn_id=turn_id,
+            )
+            return None
+        lines: list[str] = []
+        for index, chunk in enumerate(chunks, start=1):
+            title = getattr(chunk, "doc_name", None) or str(chunk.doc_id)
+            heading = getattr(chunk, "heading", None)
+            label = f"{title} / {heading}" if heading else title
+            lines.append(f"[RAG {index}] {label}\n{chunk.content}".strip())
+        await self._emit_hook(
+            "rag.retrieval.end",
+            {"chunk_count": len(chunks), "status": "ok"},
+            request=request,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        return ContextSection(
+            source="rag",
+            name="injected_context",
+            content="\n\n".join(lines),
+            priority=60,
+            token_estimate=0,
         )
 
     async def _assemble_context(
@@ -937,6 +1029,7 @@ class AgentLoop:
             include_system=False,
         )
         memory_text: str | None = None
+        # 画像最多占上下文的 1/4，避免长期记忆挤占当前对话与工具结果。
         memory_budget = max(
             256,
             int(getattr(self.deps.context, "max_context_tokens", 8192)) // 4,
@@ -950,6 +1043,13 @@ class AgentLoop:
             except Exception:  # noqa: BLE001 - 画像读取失败不阻断对话
                 logger.warning("加载用户画像失败", exc_info=True)
         sections: list[ContextSection] = []
+        rag_section = await self._injected_rag_section(
+            request,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        if rag_section is not None:
+            sections.append(rag_section)
         if memory_text:
             sections.append(
                 ContextSection(
@@ -979,6 +1079,32 @@ class AgentLoop:
                     token_estimate=0,
                 )
             )
+        if self.deps.facts is not None and request.content.strip():
+            try:
+                hits = await self.deps.facts.recall(
+                    user_id=request.user_id,
+                    query=request.content,
+                    top_k=self.deps.fact_top_k,
+                    min_confidence=self.deps.fact_min_confidence,
+                )
+            except Exception:  # noqa: BLE001 - 事实召回失败不阻断
+                logger.warning("长期事实召回失败", exc_info=True)
+                hits = []
+            fact_lines = [
+                str(item.get("content") or "").strip()
+                for item in hits
+                if str(item.get("content") or "").strip()
+            ]
+            if fact_lines:
+                sections.append(
+                    ContextSection(
+                        source="facts",
+                        name="long_term_facts",
+                        content="\n".join(f"- {line}" for line in fact_lines),
+                        priority=65,
+                        token_estimate=0,
+                    )
+                )
         await self._emit_hook(
             "context.assemble.start",
             {

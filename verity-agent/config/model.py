@@ -65,4 +65,5 @@ class ModelConfig(ConfigModel):
     def resolve_api_key(
         self, environ: dict[str, str] | None = None
     ) -> str | None:
+        """按显式 key 或环境变量解析 API key。"""
         return resolve_api_key(self.api_key, self.api_key_env, environ=environ)

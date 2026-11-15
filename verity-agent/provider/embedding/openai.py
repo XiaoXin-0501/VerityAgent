@@ -26,10 +26,12 @@ _EMBEDDING_KWARGS = frozenset(
 
 class OpenAIEmbeddingModel(EmbeddingModel):
     def __init__(self, spec, provider: "OpenAIEmbeddingProvider") -> None:
+        """绑定模型规格与所属 Provider。"""
         super().__init__(spec)
         self.provider = provider
 
     def _payload(self, request: EmbeddingRequest) -> dict[str, Any]:
+        """构造 embeddings 请求体，统一编码格式与维度参数。"""
         payload: dict[str, Any] = {
             "model": self.spec.model,
             "input": request.inputs,
@@ -45,6 +47,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         return payload
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        """调用 embeddings 接口并按输入顺序返回向量。"""
         payload = self._payload(request)
         try:
             response = await self.provider.client.embeddings.create(
@@ -104,12 +107,14 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     default_capabilities: dict[str, Any] = {}
 
     def __init__(self, config: EmbeddingProviderConfig) -> None:
+        """初始化 SDK 客户端占位与模型句柄缓存。"""
         super().__init__(config)
         self._client: openai.AsyncOpenAI | None = None
         self._handles: dict[str, EmbeddingModel] = {}
 
     @property
     def client(self) -> openai.AsyncOpenAI:
+        """返回已初始化的 SDK 客户端；未 open 时抛 UNAVAILABLE。"""
         if self._client is None:
             raise ProviderError(
                 ProviderErrorCode.UNAVAILABLE,
@@ -119,17 +124,20 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return self._client
 
     async def open(self) -> None:
+        """构建并保存 AsyncOpenAI 客户端。"""
         client = build_openai_client(self.config)
         await super().open()
         self._client = client
 
     async def close(self) -> None:
+        """关闭 SDK 客户端并清理状态。"""
         if self._client is not None:
             await self._client.close()
             self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> EmbeddingModel:
+        """按 model_id 复用或创建模型句柄。"""
         model = self._handles.get(model_id)
         if model is None:
             model = self.model_class(self.get_spec(model_id), self)

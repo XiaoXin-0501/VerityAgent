@@ -42,6 +42,7 @@ def build_openai_client(config: ProviderConfig) -> openai.AsyncOpenAI:
 
 
 def build_anthropic_client(config: ProviderConfig) -> anthropic.AsyncAnthropic:
+    """构建 Anthropic 客户端；base_url 去掉重复的 /v1。"""
     headers = dict(config.headers)
     version = config.metadata.get("anthropic_version")
     if version:
@@ -56,6 +57,7 @@ def build_anthropic_client(config: ProviderConfig) -> anthropic.AsyncAnthropic:
 
 
 def build_cohere_client(config: ProviderConfig) -> cohere.AsyncClient:
+    """构建 Cohere 客户端；base_url 去掉重复的 /v1。"""
     return cohere.AsyncClient(
         api_key=config.resolve_api_key() or "EMPTY",
         base_url=_base_without_v1(config.base_url),
@@ -177,6 +179,7 @@ def sdk_dump(value: Any) -> Any:
 
 
 def _status_code(status: Any) -> ProviderErrorCode | None:
+    """把 HTTP 状态码映射为统一 ProviderErrorCode。"""
     if not isinstance(status, int):
         return None
     if status in (401,):
@@ -199,6 +202,7 @@ def _status_code(status: Any) -> ProviderErrorCode | None:
 
 
 def _retry_after(headers: Any) -> float | None:
+    """从响应头读取 retry-after 秒数；非法值返回 None。"""
     value = None
     if isinstance(headers, Mapping):
         value = headers.get("retry-after") or headers.get("Retry-After")

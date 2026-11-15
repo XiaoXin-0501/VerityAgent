@@ -14,6 +14,7 @@ class AgentRuntimeError(Exception):
     """内部可预期的中止；携带公共 AgentError，由 facade 转成 AgentResult。"""
 
     def __init__(self, error: AgentError) -> None:
+        """保存公共 AgentError 并以其 message 作为异常文本。"""
         self.error = error
         super().__init__(error.message)
 

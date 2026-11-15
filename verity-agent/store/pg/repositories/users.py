@@ -30,6 +30,7 @@ class UserRepository(BaseRepository):
         status: UserStatus = UserStatus.ACTIVE,
         conn: AsyncConnection[Row] | None = None,
     ) -> User:
+        """创建用户账户并返回持久化记录。"""
         username = require_text(username, "username")
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
@@ -47,6 +48,7 @@ class UserRepository(BaseRepository):
     async def get(
         self, user_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> User | None:
+        """按 id 取用户。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c, "SELECT * FROM users WHERE id = %s", (as_uuid(user_id),)
@@ -56,6 +58,7 @@ class UserRepository(BaseRepository):
     async def get_by_username(
         self, username: str, *, conn: AsyncConnection[Row] | None = None
     ) -> User | None:
+        """按用户名取用户（登录用）。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c, "SELECT * FROM users WHERE username = %s", (username,)
@@ -65,6 +68,7 @@ class UserRepository(BaseRepository):
     async def get_by_email(
         self, email: str, *, conn: AsyncConnection[Row] | None = None
     ) -> User | None:
+        """按邮箱取用户。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c, "SELECT * FROM users WHERE email = %s", (email,)
@@ -79,6 +83,7 @@ class UserRepository(BaseRepository):
         offset: int = 0,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[User]:
+        """分页列出用户，可按状态过滤。"""
         limit, offset = pagination(limit, offset)
         conditions: list[str] = []
         params: list[Any] = []
@@ -95,6 +100,28 @@ class UserRepository(BaseRepository):
             )
         return self._models(User, rows)
 
+    async def list_deletion_ready(
+        self,
+        *,
+        limit: int = 20,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[User]:
+        """列出已到重试时间的待删除用户；未设置重试时间的优先。"""
+        limit, _ = pagination(limit, 0)
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT * FROM users
+                WHERE status = %s
+                  AND (delete_next_retry_at IS NULL OR delete_next_retry_at <= now())
+                ORDER BY delete_next_retry_at NULLS FIRST, created_at
+                LIMIT %s
+                """,
+                (_param(UserStatus.DELETING), limit),
+            )
+        return self._models(User, rows)
+
     async def update(
         self,
         user_id: UUID | str,
@@ -106,6 +133,7 @@ class UserRepository(BaseRepository):
         status: Any = _UNSET,
         conn: AsyncConnection[Row] | None = None,
     ) -> User:
+        """按非 _UNSET 字段局部更新用户。"""
         sets: list[str] = []
         params: list[Any] = []
         for column, value in (
@@ -140,6 +168,7 @@ class UserRepository(BaseRepository):
         at: datetime | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> User:
+        """记录登录时间并返回最新用户记录。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -211,6 +240,7 @@ class UserRepository(BaseRepository):
         retry_at: datetime | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> User:
+        """记录用户跨存储删除失败并安排重试。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -232,6 +262,7 @@ class UserRepository(BaseRepository):
     async def delete(
         self, user_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> bool:
+        """物理删除用户记录，返回是否实际删除。"""
         async with self._transaction(conn) as c:
             affected = await self._execute(
                 c, "DELETE FROM users WHERE id = %s", (as_uuid(user_id),)
@@ -253,6 +284,7 @@ class PermissionRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> Permission:
+        """创建权限项；权限码全局唯一。"""
         permission_code = require_text(permission_code, "permission_code")
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
@@ -270,6 +302,7 @@ class PermissionRepository(BaseRepository):
     async def get(
         self, permission_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> Permission | None:
+        """按 id 取权限。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c, "SELECT * FROM permissions WHERE id = %s", (as_uuid(permission_id),)
@@ -279,6 +312,7 @@ class PermissionRepository(BaseRepository):
     async def get_by_code(
         self, permission_code: str, *, conn: AsyncConnection[Row] | None = None
     ) -> Permission | None:
+        """按权限码取权限。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -294,6 +328,7 @@ class PermissionRepository(BaseRepository):
         offset: int = 0,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[Permission]:
+        """分页列出权限项。"""
         limit, offset = pagination(limit, offset)
         async with self._transaction(conn) as c:
             rows = await self._fetch_all(
@@ -336,6 +371,7 @@ class PermissionRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> bool:
+        """撤销用户的某个权限，返回是否实际删除。"""
         async with self._transaction(conn) as c:
             affected = await self._execute(
                 c,
@@ -347,6 +383,7 @@ class PermissionRepository(BaseRepository):
     async def list_for_user(
         self, user_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> list[UserPermission]:
+        """列出用户已授予的权限关系。"""
         async with self._transaction(conn) as c:
             rows = await self._fetch_all(
                 c,
@@ -378,6 +415,7 @@ class PermissionRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> bool:
+        """判断用户是否拥有指定权限。"""
         async with self._transaction(conn) as c:
             value = await self._fetch_val(
                 c,
@@ -398,6 +436,7 @@ class PermissionRepository(BaseRepository):
         offset: int = 0,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[UUID]:
+        """分页列出拥有指定权限的用户 id。"""
         limit, offset = pagination(limit, offset)
         async with self._transaction(conn) as c:
             rows = await self._fetch_all(

@@ -127,6 +127,7 @@ def activate_group(
 
 
 def is_router_tool(catalog: ToolCatalog, name: str) -> bool:
+    """判断工具是否为 router 类型。"""
     tool = catalog.tools.get(name)
     return tool is not None and tool.spec.kind is ToolKind.ROUTER
 
@@ -136,6 +137,7 @@ def _flat_selection(
     allowed_tools: list[RegisteredTool],
     allowed_groups: list[ToolGroup],
 ) -> ToolSelection:
+    """构造平铺模式选择：全部合格工具直接暴露。"""
     descriptors = sorted(
         (ToolDescriptor.from_spec(tool.spec) for tool in allowed_tools),
         key=lambda item: item.name,

@@ -35,6 +35,7 @@ class HookDispatcher:
         *,
         logger: logging.Logger | None = None,
     ) -> None:
+        """保存注册表、配置与后台队列状态。"""
         self.registry = registry
         self.config = config
         self._logger = logger or logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class HookDispatcher:
     # ——————————————————— 公共入口 ———————————————————
 
     async def emit(self, context: HookContext) -> HookDispatchResult:
+        """按事件分发 Hook：采样、内联执行、后台入队并汇总结果。"""
         started = perf_counter()
         result = HookDispatchResult(event=context.event)
         if not self.config.enabled:
@@ -92,10 +94,12 @@ class HookDispatcher:
         return result
 
     async def flush(self) -> None:
+        """等待后台队列中所有 Hook 执行完成。"""
         if self._queue is not None:
             await self._queue.join()
 
     async def close(self) -> None:
+        """停止接收事件，等待队列清空并取消后台 worker。"""
         if self._closed:
             return
         self._closed = True
@@ -109,11 +113,13 @@ class HookDispatcher:
             self._worker = None
 
     def get_stats(self) -> list[HookStats]:
+        """返回按 hook/event 聚合的执行统计。"""
         return list(self._stats.values())
 
     # ——————————————————— 内部实现 ———————————————————
 
     def _enqueue(self, hook: RegisteredHook, context: HookContext) -> bool:
+        """把后台 Hook 放入队列；队列满时按配置丢弃或抛错。"""
         queue = self._ensure_worker()
         try:
             queue.put_nowait((context, hook))
@@ -129,6 +135,7 @@ class HookDispatcher:
             raise
 
     def _ensure_worker(self) -> asyncio.Queue[tuple[HookContext, RegisteredHook]]:
+        """惰性创建后台队列与 worker。"""
         if self._queue is None:
             self._queue = asyncio.Queue(maxsize=self.config.max_queue_size)
         if self._worker is None or self._worker.done():
@@ -138,6 +145,7 @@ class HookDispatcher:
         return self._queue
 
     async def _background_worker(self) -> None:
+        """后台 worker 循环：串行消费队列并隔离异常。"""
         assert self._queue is not None
         while True:
             context, hook = await self._queue.get()
@@ -152,6 +160,7 @@ class HookDispatcher:
                 self._queue.task_done()
 
     async def _run(self, hook: RegisteredHook, context: HookContext) -> HookOutcome:
+        """执行单个 Hook，处理超时与失败策略。"""
         started = perf_counter()
         timeout = hook.spec.timeout_s or self.config.dispatch_timeout_s
         try:
@@ -207,6 +216,7 @@ class HookDispatcher:
         *,
         timed_out: bool = False,
     ) -> None:
+        """累加 Hook 执行统计。"""
         key = (hook.spec.name, context.event.value)
         stats = self._stats.get(key)
         if stats is None:

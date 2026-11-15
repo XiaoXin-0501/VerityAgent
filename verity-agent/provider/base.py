@@ -104,6 +104,7 @@ class ProviderModelSpec(_SpecModel):
 
     @model_validator(mode="after")
     def _capabilities_match_kind(self) -> "ProviderModelSpec":
+        """校验 capabilities 类型与模型 kind 一致。"""
         expected = {
             ProviderModelKind.CHAT: ChatModelCapabilities,
             ProviderModelKind.EMBEDDING: EmbeddingModelCapabilities,
@@ -117,18 +118,21 @@ class ProviderModelSpec(_SpecModel):
 
     @property
     def chat_capabilities(self) -> ChatModelCapabilities:
+        """以 chat 能力类型返回 capabilities；类型不符时抛 TypeError。"""
         if not isinstance(self.capabilities, ChatModelCapabilities):
             raise TypeError("不是 chat 模型")
         return self.capabilities
 
     @property
     def embedding_capabilities(self) -> EmbeddingModelCapabilities:
+        """以 embedding 能力类型返回 capabilities；类型不符时抛 TypeError。"""
         if not isinstance(self.capabilities, EmbeddingModelCapabilities):
             raise TypeError("不是 embedding 模型")
         return self.capabilities
 
     @property
     def rerank_capabilities(self) -> RerankModelCapabilities:
+        """以 rerank 能力类型返回 capabilities；类型不符时抛 TypeError。"""
         if not isinstance(self.capabilities, RerankModelCapabilities):
             raise TypeError("不是 rerank 模型")
         return self.capabilities
@@ -161,6 +165,7 @@ class BaseProvider(ABC, Generic[ConfigT]):
     kind: ProviderKind
 
     def __init__(self, config: ConfigT) -> None:
+        """校验配置 kind 与实例 kind 一致，并初始化模型表。"""
         if config.kind is not self.kind:
             raise ConfigurationError(
                 f"provider {config.name} 配置类型为 {config.kind}，"
@@ -172,13 +177,16 @@ class BaseProvider(ABC, Generic[ConfigT]):
 
     @property
     def name(self) -> str:
+        """Provider 唯一名称（来自配置）。"""
         return self.config.name
 
     @property
     def enabled(self) -> bool:
+        """Provider 是否启用。"""
         return self.config.enabled
 
     def register_model(self, spec: ProviderModelSpec) -> None:
+        """注册模型元数据；校验归属、kind 与重复 id。"""
         if spec.provider != self.name:
             raise ConfigurationError(
                 f"模型 {spec.id} 属于 provider {spec.provider}，不能注册到 {self.name}"
@@ -192,9 +200,11 @@ class BaseProvider(ABC, Generic[ConfigT]):
         self._models[spec.id] = spec
 
     def list_models(self) -> list[ProviderModelSpec]:
+        """返回已注册模型元数据快照。"""
         return list(self._models.values())
 
     def get_spec(self, model_id: str) -> ProviderModelSpec:
+        """按模型 id 取元数据；不存在时抛 ConfigurationError。"""
         spec = self._models.get(model_id)
         if spec is None:
             raise ConfigurationError(

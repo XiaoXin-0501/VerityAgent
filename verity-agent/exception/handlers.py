@@ -27,6 +27,7 @@ __all__ = ["register_exception_handlers", "verity_error_handler"]
 
 
 def _request_id(request: Request) -> str:
+    """读取中间件写入的 request_id；缺失时回退到请求头。"""
     value = getattr(request.state, "request_id", None)
     if value:
         return str(value)
@@ -44,6 +45,7 @@ def _envelope(
     retryable: bool = False,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
+    """按统一错误信封构造 JSON 响应，并回写 X-Request-ID。"""
     error: dict[str, Any] = {
         "code": code,
         "message": message,
@@ -87,6 +89,7 @@ async def verity_error_handler(request: Request, exc: Exception) -> JSONResponse
 async def _validation_error_handler(
     request: Request, exc: Exception
 ) -> JSONResponse:
+    """把 FastAPI 请求校验错误转换为统一 422 信封。"""
     if not isinstance(exc, RequestValidationError):
         raise exc
     return _envelope(
@@ -101,6 +104,7 @@ async def _validation_error_handler(
 async def _http_error_handler(
     request: Request, exc: Exception
 ) -> JSONResponse:
+    """把 Starlette HTTPException 转换为统一错误信封。"""
     if not isinstance(exc, StarletteHTTPException):
         raise exc
     code_by_status = {
@@ -121,6 +125,7 @@ async def _http_error_handler(
 
 
 async def _unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """记录未处理异常并返回脱敏的 500 信封。"""
     logger.exception("未处理异常: %s %s", request.method, request.url.path)
     return _envelope(
         code="INTERNAL",

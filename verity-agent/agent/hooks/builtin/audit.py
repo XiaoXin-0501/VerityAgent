@@ -40,6 +40,7 @@ class AuditHook:
         *,
         logger_: logging.Logger | None = None,
     ) -> None:
+        """保存审计配置并构建 HookSpec（未配置事件时用默认集合）。"""
         self.config = config
         self.redaction = redaction
         self.logger = logger_ or logger
@@ -56,6 +57,7 @@ class AuditHook:
         )
 
     async def __call__(self, context: HookContext) -> None:
+        """把事件转换为结构化审计记录并输出。"""
         payload = context.payload
         action = context.event.value
         result = AuditResult.SUCCESS

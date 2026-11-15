@@ -34,10 +34,12 @@ class RedisEventStore:
         redis: RedisConnectionManager | None = None,
         *,
         ttl_s: int = 3600,
+        poll_timeout_s: float = 1.0,
     ) -> None:
-        """保存 Redis 管理器与 TTL；不建立连接。"""
+        """保存 Redis 管理器、TTL 与 Pub/Sub 轮询粒度；不建立连接。"""
         self.redis = redis or get_redis()
         self.ttl_s = max(60, int(ttl_s))
+        self.poll_timeout_s = max(0.1, float(poll_timeout_s))
         self._disabled = False
 
     def _run_key(self, run_id: str) -> str:
@@ -186,7 +188,7 @@ class RedisEventStore:
             while not self._disabled:
                 message = await pubsub.get_message(
                     ignore_subscribe_messages=True,
-                    timeout=1.0,
+                    timeout=self.poll_timeout_s,
                 )
                 if message and message.get("type") == "message":
                     yield str(message.get("data") or "")

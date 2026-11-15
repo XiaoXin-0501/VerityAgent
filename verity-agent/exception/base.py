@@ -55,6 +55,7 @@ class VerityError(Exception):
         retryable: bool | None = None,
         retry_after_s: float | None = None,
     ) -> None:
+        """规范化错误消息、details 与可重试标记。"""
         self.message = message or self.default_message
         self.details: dict[str, Any] = dict(details or {})
         if retry_after_s is not None:
@@ -84,6 +85,7 @@ class VerityError(Exception):
         return {"error": error}
 
     def __repr__(self) -> str:  # pragma: no cover - 调试用
+        """调试表示；只包含 code 与 message，不带内部 details。"""
         return (
             f"{type(self).__name__}(code={self.code!r}, "
             f"message={self.message!r})"
@@ -137,6 +139,7 @@ class NotFoundError(VerityError):
         *,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        """按资源名与标识构造 NOT_FOUND 错误，并归一 details。"""
         message = (
             f"{resource}不存在"
             if identifier is None
@@ -173,6 +176,7 @@ class InvalidStateTransitionError(ConflictError):
         *,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        """按资源当前态与目标态构造非法迁移错误。"""
         merged: dict[str, Any] = {
             "resource": resource,
             "current": str(current),

@@ -46,6 +46,7 @@ class SchemaCheckResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
     def raise_if_bad(self) -> None:
+        """校验失败时抛出 WeaviateSchemaError。"""
         if self.ok:
             return
         raise WeaviateSchemaError(
@@ -83,6 +84,7 @@ def load_schema_import(path: str | Path) -> dict[str, Any]:
 
 
 def _value(value: Any) -> Any:
+    """取枚举值；非枚举值原样返回。"""
     return getattr(value, "value", value)
 
 
@@ -90,6 +92,7 @@ class SchemaManager:
     """基于 import JSON 的 schema 校验/创建。"""
 
     def __init__(self, config: WeaviateConfig, schema: Mapping[str, Any] | None = None):
+        """保存配置并加载手写 schema（未传入时读文件）。"""
         self.config = config
         self._schema = dict(schema) if schema is not None else load_schema_import(
             config.schema_import_path
@@ -97,10 +100,12 @@ class SchemaManager:
 
     @property
     def schema(self) -> dict[str, Any]:
+        """返回 schema 的浅拷贝。"""
         return dict(self._schema)
 
     @property
     def expected_collections(self) -> dict[str, Mapping[str, Any]]:
+        """按 class 名索引期望的 collection 定义。"""
         return {item["class"]: item for item in self._schema.get("classes", [])}
 
     def _schema_version_warning(self) -> str | None:
@@ -135,6 +140,7 @@ class SchemaManager:
         *,
         expected_dimensions: int | None = None,
     ) -> SchemaCheckResult:
+        """比对线上 collection 与 schema，返回差异结果。"""
         try:
             existing = await asyncio.to_thread(client.collections.list_all, False)
         except Exception as exc:
@@ -326,6 +332,7 @@ class SchemaManager:
         *,
         expected_dimensions: int | None = None,
     ) -> SchemaCheckResult:
+        """按配置创建缺失 collection 或仅校验 schema。"""
         if self.config.auto_create_collections:
             return await self.ensure(
                 client,

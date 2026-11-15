@@ -42,6 +42,7 @@ _END_EVENTS = {
 
 class TracingHook:
     def __init__(self, config: TracingHookConfig) -> None:
+        """保存 tracing 配置并构建起止事件的 HookSpec。"""
         self.config = config
         self._spans: dict[str, SpanRecord] = {}
         self.spec = HookSpec(
@@ -53,6 +54,7 @@ class TracingHook:
         )
 
     async def __call__(self, context: HookContext) -> None:
+        """在开始事件记录 span，在结束事件补齐状态并导出。"""
         name = _START_EVENTS.get(context.event) or _END_EVENTS.get(context.event)
         if name is None:
             return
@@ -94,6 +96,7 @@ class TracingHook:
         self._export(span)
 
     def _key(self, context: HookContext, name: str) -> str:
+        """用 trace/turn/call/name 生成 span 关联 key。"""
         return ":".join(
             [
                 context.trace_id,
@@ -104,6 +107,7 @@ class TracingHook:
         )
 
     def _export(self, span: SpanRecord) -> None:
+        """按配置导出 span；none 表示不输出。"""
         if self.config.exporter == "none":
             return
         logger.info(

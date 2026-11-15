@@ -150,6 +150,7 @@ class LLMUsage(_Model):
 
     @model_validator(mode="after")
     def _fill_total(self) -> "LLMUsage":
+        """未提供 total_tokens 时用输入 + 输出补齐。"""
         if self.total_tokens == 0 and (self.input_tokens or self.output_tokens):
             object.__setattr__(
                 self, "total_tokens", self.input_tokens + self.output_tokens

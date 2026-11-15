@@ -67,6 +67,7 @@ def group_allowed(
 
 
 def _field_values(arguments: Mapping[str, Any], field: str) -> list[Any]:
+    """读取模板字段值；兼容 kb_id -> kb_ids 的复数参数。"""
     value = arguments.get(field)
     if value is None and field.endswith("_id"):
         # 模板写 {kb_id}、参数常传 kb_ids；做一次兼容映射
@@ -107,6 +108,7 @@ def missing_resource_permissions(
     arguments: Mapping[str, Any],
     permissions: frozenset[str],
 ) -> list[str]:
+    """返回当前权限集合缺失的资源级权限码。"""
     return [
         code
         for code in required_resource_permissions(spec, arguments)

@@ -30,6 +30,7 @@ _EVENTS = frozenset(
 
 class MetricsHook:
     def __init__(self, config: MetricsHookConfig) -> None:
+        """保存指标配置并构建 HookSpec。"""
         self.config = config
         self.spec = HookSpec(
             name="builtin.metrics",
@@ -40,6 +41,7 @@ class MetricsHook:
         )
 
     async def __call__(self, context: HookContext) -> None:
+        """把事件转换为指标记录并写入配置的 sink。"""
         if self.config.sink == "noop":
             return
         records = self._records(context)
@@ -54,6 +56,7 @@ class MetricsHook:
             )
 
     def _records(self, context: HookContext) -> list[MetricRecord]:
+        """按事件类型生成一条或多条指标记录。"""
         payload = context.payload
         tags: dict[str, str] = {"event": context.event.value}
         name = f"{self.config.prefix}_unknown"

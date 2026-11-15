@@ -74,6 +74,7 @@ class SystemMessage(BaseMessage):
 
     @model_validator(mode="after")
     def _completed_only(self) -> Self:
+        """SystemMessage 写入即完成，不接受中间状态。"""
         if self.status is not MessageStatus.COMPLETED:
             raise ValueError("SystemMessage 写入即 completed")
         return self
@@ -85,6 +86,7 @@ class ImageRef(MessageModel):
 
     @model_validator(mode="after")
     def _url_required(self) -> Self:
+        """图片引用必须有非空 URL。"""
         if not self.url.strip():
             raise ValueError("ImageRef.url 不能为空")
         return self
@@ -102,12 +104,14 @@ class UserMessage(BaseMessage):
 
     @model_validator(mode="after")
     def _has_payload(self) -> Self:
+        """用户消息的 content/images/files 至少一个非空。"""
         if not self.content.strip() and not self.images and not self.files:
             raise ValueError("用户消息的 content/images/files 至少有一个非空")
         return self
 
     @model_validator(mode="after")
     def _unique_files(self) -> Self:
+        """同一条用户消息的文件 id 不得重复。"""
         ids = [item.file_id for item in self.files]
         if len(ids) != len(set(ids)):
             raise ValueError("同一用户消息的 file_id 不能重复")
@@ -115,6 +119,7 @@ class UserMessage(BaseMessage):
 
     @model_validator(mode="after")
     def _completed_only(self) -> Self:
+        """UserMessage 写入即完成，不接受中间状态。"""
         if self.status is not MessageStatus.COMPLETED:
             raise ValueError("UserMessage 写入即 completed")
         return self
@@ -127,6 +132,7 @@ class Thinking(MessageModel):
 
     @model_validator(mode="after")
     def _has_content(self) -> Self:
+        """非 redacted 的 thinking 必须有文本。"""
         if not self.redacted and not self.text:
             raise ValueError("非 redacted 的 thinking 必须有文本")
         return self
@@ -141,6 +147,7 @@ class ToolCall(MessageModel):
 
     @model_validator(mode="after")
     def _ids_required(self) -> Self:
+        """工具调用的 call_id 与 name 不能为空。"""
         if not self.call_id.strip():
             raise ValueError("ToolCall.call_id 不能为空")
         if not self.name.strip():
@@ -155,6 +162,7 @@ class Artifact(MessageModel):
 
     @model_validator(mode="after")
     def _url_required(self) -> Self:
+        """产物必须有非空 URL。"""
         if not self.url.strip():
             raise ValueError("Artifact.url 不能为空")
         return self
@@ -170,6 +178,7 @@ class AssistantMessage(BaseMessage):
 
     @model_validator(mode="after")
     def _unique_call_ids(self) -> Self:
+        """同一条 assistant 消息的 call_id 不得重复。"""
         ids = [call.call_id for call in self.tool_calls]
         if len(ids) != len(set(ids)):
             raise ValueError("同一 assistant 消息的 call_id 不能重复")
@@ -177,6 +186,7 @@ class AssistantMessage(BaseMessage):
 
     @model_validator(mode="after")
     def _has_payload(self) -> Self:
+        """完成/部分完成的 assistant 消息必须有内容、thinking、工具调用或产物。"""
         if self.status in (MessageStatus.COMPLETED, MessageStatus.PARTIAL):
             if not (
                 self.content.strip()
@@ -198,6 +208,7 @@ class ToolFile(MessageModel):
 
     @model_validator(mode="after")
     def _has_source(self) -> Self:
+        """工具文件必须提供 url 或 content。"""
         if not self.url and not self.content:
             raise ValueError("ToolFile 必须提供 url 或 content")
         return self
@@ -209,6 +220,7 @@ class ToolImage(MessageModel):
 
     @model_validator(mode="after")
     def _url_required(self) -> Self:
+        """工具图片必须有非空 URL。"""
         if not self.url.strip():
             raise ValueError("ToolImage.url 不能为空")
         return self
@@ -224,6 +236,7 @@ class ToolMessage(BaseMessage):
 
     @model_validator(mode="after")
     def _has_result(self) -> Self:
+        """工具消息必须提供 content/json/files/images 之一。"""
         if not (
             self.content.strip() or self.json_data is not None or self.files or self.images
         ):
@@ -232,12 +245,14 @@ class ToolMessage(BaseMessage):
 
     @model_validator(mode="after")
     def _tool_status(self) -> Self:
+        """工具消息状态只能是 completed 或 failed。"""
         if self.status not in (MessageStatus.COMPLETED, MessageStatus.FAILED):
             raise ValueError("ToolMessage 只能是 completed 或 failed")
         return self
 
     @model_validator(mode="after")
     def _json_serializable(self) -> Self:
+        """工具消息的 json 必须可序列化。"""
         if self.json_data is not None:
             try:
                 to_jsonable(self.json_data)
@@ -284,4 +299,5 @@ class Turn(BaseModel):
 
 
 def is_message(value: BaseModel) -> bool:
+    """判断对象是否为领域消息基类实例。"""
     return isinstance(value, BaseMessage)

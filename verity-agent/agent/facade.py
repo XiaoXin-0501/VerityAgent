@@ -68,6 +68,7 @@ class Agent:
         self._loop = AgentLoop(config, dependencies)
         self._runs: dict[str, _ActiveRun] = {}
         self._cancel_tasks: set[asyncio.Task] = set()
+        self.event_store = dependencies.event_store
         self.background_tasks = (
             dependencies.background_tasks
             if dependencies.background_tasks is not None
@@ -123,13 +124,15 @@ class Agent:
         self._prune_runs()
         active = self._runs.get(run_id)
         if active is None:
-            raise AgentRuntimeError(
-                agent_error(
-                    AgentErrorCode.RUN_NOT_FOUND,
-                    "run 不存在或已过期",
-                    details={"run_id": run_id},
+            if self.event_store is None:
+                raise AgentRuntimeError(
+                    agent_error(
+                        AgentErrorCode.RUN_NOT_FOUND,
+                        "run 不存在或已过期",
+                        details={"run_id": run_id},
+                    )
                 )
-            )
+            return self._attach_remote(run_id, last_event_id)
         queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue(
             maxsize=self.config.stream.max_buffer_events
         )
@@ -155,12 +158,18 @@ class Agent:
         """幂等取消；不存在/已终态 no-op。"""
         self._prune_runs()
         active = self._runs.get(run_id)
-        if active is None or active.result is not None:
+        if active is None:
+            if self.event_store is not None:
+                await self.event_store.request_cancel(run_id, reason.value)
+            return
+        if active.result is not None:
             return
         if active.cancel_event.is_set():
             return
         active.cancel_reason = reason
         active.cancel_event.set()
+        if self.event_store is not None:
+            await self.event_store.request_cancel(run_id, reason.value)
         await self.background_tasks.cancel_run(run_id)
         # 先给主循环一个收尾窗口；超过 cancel_grace_s 仍不结束则强制取消 task。
         if active.task is not None and not active.task.done():
@@ -176,6 +185,8 @@ class Agent:
         self._prune_runs()
         active = self._runs.get(run_id)
         if active is None:
+            if self.event_store is not None:
+                return await self.event_store.snapshot(run_id)
             return None
         if active.result is not None:
             view = _view_from_result(active.result)
@@ -253,6 +264,140 @@ class Agent:
         for run_id in expired:
             self._runs.pop(run_id, None)
 
+    def _attach_remote(
+        self,
+        run_id: str,
+        last_event_id: str | None,
+    ) -> "AgentStream":
+        """本地无 run 时，从 Redis Stream 回放并轮询终态。"""
+        queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue(
+            maxsize=self.config.stream.max_buffer_events
+        )
+        future = asyncio.get_running_loop().create_future()
+        task = asyncio.create_task(
+            self._remote_attach_loop(
+                run_id,
+                last_event_id,
+                queue,
+                future,
+            ),
+            name=f"verity-agent-remote-{run_id}",
+        )
+        return AgentStream(
+            run_id=run_id,
+            turn_id="",
+            queue=queue,
+            task=task,
+            result_future=future,
+        )
+
+    async def _remote_attach_loop(
+        self,
+        run_id: str,
+        last_event_id: str | None,
+        queue: asyncio.Queue[AgentEvent | None],
+        future: asyncio.Future[AgentResult],
+    ) -> None:
+        """轮询 Redis 快照/事件，直到收到终态。"""
+        if self.event_store is None:
+            if not future.done():
+                future.set_exception(
+                    AgentRuntimeError(
+                        agent_error(AgentErrorCode.RUN_NOT_FOUND, "run 不存在")
+                    )
+                )
+            queue.put_nowait(None)
+            return
+        last_seq = _event_seq(last_event_id)
+        try:
+            while True:
+                events = await self.event_store.replay(
+                    run_id,
+                    f"{run_id}:{last_seq}" if last_seq else None,
+                )
+                for event in events:
+                    if event.seq <= last_seq:
+                        continue
+                    last_seq = event.seq
+                    _put_nowait(queue, event)
+                snapshot = await self.event_store.snapshot(run_id)
+                if snapshot is None:
+                    raise AgentRuntimeError(
+                        agent_error(
+                            AgentErrorCode.RUN_NOT_FOUND,
+                            "run 不存在或已过期",
+                            details={"run_id": run_id},
+                        )
+                    )
+                if snapshot.status.value in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "expired",
+                    "conflict",
+                }:
+                    if snapshot.result is not None:
+                        future.set_result(snapshot.result)
+                    else:
+                        future.set_exception(
+                            AgentRuntimeError(
+                                agent_error(
+                                    AgentErrorCode.RUN_NOT_FOUND,
+                                    "run 终态结果不可用",
+                                    details={"run_id": run_id},
+                                )
+                            )
+                        )
+                    queue.put_nowait(None)
+                    return
+                await asyncio.sleep(self.config.remote_event_poll_interval_s)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 远程流失败要收敛
+            if not future.done():
+                future.set_exception(exc)
+            queue.put_nowait(None)
+
+    async def _save_event_store_run(
+        self,
+        active: _ActiveRun,
+        status: str,
+        result: AgentResult | None = None,
+    ) -> None:
+        """写 Redis run 快照；失败由 event_store 自行降级。"""
+        if self.event_store is None:
+            return
+        await self.event_store.save_run(
+            run_id=active.run_id,
+            conversation_id=active.conversation_id,
+            turn_id=active.turn_id,
+            status=status,
+            result=result,
+        )
+
+    async def _watch_remote_cancel(self, active: _ActiveRun) -> None:
+        """优先订阅 Redis Pub/Sub，失败后退回轮询取消标记。"""
+        if self.event_store is None:
+            return
+        watch = getattr(self.event_store, "watch_cancel", None)
+        if callable(watch):
+            try:
+                async for _ in watch(active.run_id):
+                    active.cancel_event.set()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - 订阅失败退回轮询
+                logger.debug("取消 Pub/Sub 监听失败，退回轮询", exc_info=True)
+        while active.result is None and not active.cancel_event.is_set():
+            try:
+                if await self.event_store.cancel_requested(active.run_id):
+                    active.cancel_event.set()
+                    return
+            except Exception:  # noqa: BLE001 - 观测失败不影响 run
+                return
+            await asyncio.sleep(self.config.remote_cancel_poll_interval_s)
+
     async def _cancel_after_grace(self, active: _ActiveRun) -> None:
         """等待收尾宽限期；仍不结束则强制取消执行 task。"""
         task = active.task
@@ -305,7 +450,16 @@ class Agent:
             buffer=active.buffer,
             sink=self._publish(active),
         )
+        cancel_watch = (
+            asyncio.create_task(
+                self._watch_remote_cancel(active),
+                name=f"verity-agent-cancel-watch-{active.run_id}",
+            )
+            if self.event_store is not None
+            else None
+        )
         try:
+            await self._save_event_store_run(active, "running")
             result = await self._loop.run(
                 request,
                 run_id=active.run_id,
@@ -323,8 +477,23 @@ class Agent:
             # 如果 loop/任务在异常路径没有 result，这里也必须给 attach 一个终态。
             if "result" not in locals() or result is None:
                 result = _failed_result(active, RuntimeError("agent run ended without result"))
+            if cancel_watch is not None:
+                cancel_watch.cancel()
+                try:
+                    await cancel_watch
+                except asyncio.CancelledError:
+                    pass
             active.result = result
             active.updated_at = utcnow()
+            try:
+                await self._save_event_store_run(
+                    active,
+                    result.status.value,
+                    result=result,
+                )
+            except asyncio.CancelledError:
+                # 强制取消时仍要先保证 result future 被 set，避免 attach 永久等待。
+                pass
             if active.result_future is not None and not active.result_future.done():
                 active.result_future.set_result(result)
             for queue in list(active.subscribers):
@@ -333,10 +502,13 @@ class Agent:
         return result
 
     def _publish(self, active: _ActiveRun):
+        """构造发布协程：更新运行快照、写事件存储并广播给订阅者。"""
         async def publish(event: AgentEvent) -> None:
-            """更新最近事件并广播给所有 attach 的消费者。"""
+            """更新最近事件、写 Redis Stream 并广播给 attach 的消费者。"""
             active.last_event = event
             active.updated_at = utcnow()
+            if self.event_store is not None:
+                await self.event_store.append_event(event)
             for queue in list(active.subscribers):
                 _put_nowait(queue, event)
 
@@ -370,6 +542,7 @@ class AgentStream:
         return self._last_event_id
 
     def __aiter__(self) -> "AgentStream":
+        """返回自身作为异步迭代器。"""
         return self
 
     async def __anext__(self) -> AgentEvent:
@@ -389,6 +562,16 @@ class AgentStream:
             return self._result_future.result()
         # future 由 _execute 结束时显式 set_result；这里只等待，不重复消费队列。
         return await self._result_future
+
+
+def _event_seq(event_id: str | None) -> int:
+    """从 ``run_id:seq`` 解析序号；非法值按 0 处理。"""
+    if not event_id:
+        return 0
+    try:
+        return int(str(event_id).rsplit(":", 1)[-1])
+    except (TypeError, ValueError):
+        return 0
 
 
 def _put_nowait(queue: asyncio.Queue, item) -> None:

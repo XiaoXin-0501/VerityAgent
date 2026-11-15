@@ -75,6 +75,7 @@ class DashScopeRerankModel(RerankModel):
     """百炼原生 rerank 接口。"""
 
     def __init__(self, spec, provider: "DashScopeRerankProvider") -> None:
+        """绑定模型规格与所属 Provider。"""
         super().__init__(spec)
         self.provider = provider
 
@@ -210,12 +211,14 @@ class DashScopeRerankProvider(RerankProvider):
     }
 
     def __init__(self, config: RerankProviderConfig) -> None:
+        """初始化 HTTP 客户端占位与模型句柄缓存。"""
         super().__init__(config)
         self._client: httpx.AsyncClient | None = None
         self._handles: dict[str, DashScopeRerankModel] = {}
 
     @property
     def client(self) -> httpx.AsyncClient:
+        """返回已初始化的 HTTP 客户端；未 open 时抛 UNAVAILABLE。"""
         if self._client is None:
             raise ProviderError(
                 ProviderErrorCode.UNAVAILABLE,
@@ -245,6 +248,7 @@ class DashScopeRerankProvider(RerankProvider):
         await super().close()
 
     def get_model(self, model_id: str) -> DashScopeRerankModel:
+        """按 model_id 复用或创建模型句柄。"""
         model = self._handles.get(model_id)
         if model is None:
             model = DashScopeRerankModel(self.get_spec(model_id), self)

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from config.tools import ToolsConfig
+from config.tools import SearchKbToolConfig, ToolsConfig
 
-from .builtin import register_search_kb
+from .builtin import register_conflict_tool, register_search_kb
 from .overflow import MinioOverflowWriter
 from .pipeline import ToolPipeline
 from .redis_state import build_redis_tool_state
@@ -19,10 +19,20 @@ from .registry import ToolRegistry
 __all__ = ["build_tool_registry", "build_tool_pipeline"]
 
 
-def build_tool_registry(retriever: Any | None = None) -> ToolRegistry:
+def build_tool_registry(
+    retriever: Any | None = None,
+    *,
+    conflict_enabled: bool = False,
+    search_kb: SearchKbToolConfig | None = None,
+) -> ToolRegistry:
     """创建并注册内置工具；启动后注册表只读。"""
     registry = ToolRegistry()
-    _register_builtin_tools(registry, retriever=retriever)
+    _register_builtin_tools(
+        registry,
+        retriever=retriever,
+        conflict_enabled=conflict_enabled,
+        search_kb=search_kb,
+    )
     return registry
 
 
@@ -53,6 +63,10 @@ def _register_builtin_tools(
     registry: ToolRegistry,
     *,
     retriever: Any | None = None,
+    conflict_enabled: bool = False,
+    search_kb: SearchKbToolConfig | None = None,
 ) -> None:
     """内置工具注册点；工具依赖由调用方注入，不在此 import 全局单例。"""
-    register_search_kb(registry, retriever)
+    register_search_kb(registry, retriever, config=search_kb)
+    if conflict_enabled:
+        register_conflict_tool(registry)

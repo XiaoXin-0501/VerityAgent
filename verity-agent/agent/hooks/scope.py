@@ -29,6 +29,7 @@ class HookScope:
         turn_id: str | None = None,
         source: HookSource = HookSource.AGENT,
     ) -> None:
+        """保存公共上下文；缺省 trace/run id 自动生成。"""
         self.dispatcher = dispatcher
         self.trace_id = trace_id or new_request_id()
         self.run_id = run_id or new_run_id()
@@ -50,6 +51,7 @@ class HookScope:
         metadata: dict[str, Any] | None = None,
         duration_ms: int | None = None,
     ) -> HookDispatchResult:
+        """补齐公共字段后分发事件；payload 可为模型或字典。"""
         if payload is None:
             payload_model = HookPayload()
         elif isinstance(payload, HookPayload):
@@ -76,7 +78,9 @@ class HookScope:
         return await self.dispatcher.emit(context)
 
     async def flush(self) -> None:
+        """等待该 scope 触发的后台 Hook 完成。"""
         await self.dispatcher.flush()
 
     async def close(self) -> None:
+        """刷新后结束 scope（不关闭共享 dispatcher）。"""
         await self.flush()

@@ -45,24 +45,29 @@ class MinioStorage:
     """MinIO 对象存储门面；所有网络调用都放到线程池。"""
 
     def __init__(self, manager: MinioConnectionManager | None = None) -> None:
+        """保存可选的管理器；默认使用全局实例。"""
         self._manager = manager
 
     @property
     def manager(self) -> MinioConnectionManager:
+        """返回注入的管理器或全局 MinIO 管理器。"""
         return self._manager or get_minio()
 
     @property
     def config(self):
+        """返回当前 MinIO 配置。"""
         return self.manager.config
 
     # ——————————————————— bucket 约定 ———————————————————
 
     @property
     def kb_bucket(self) -> str:
+        """知识库长期对象所在 bucket。"""
         return self.config.buckets.kb
 
     @property
     def session_bucket(self) -> str:
+        """会话临时对象所在 bucket。"""
         return self.config.buckets.session
 
     # ——————————————————— 上传 ———————————————————
@@ -76,12 +81,14 @@ class MinioStorage:
         content_type: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> ObjectInfo:
+        """上传 bytes 并返回对象元信息；网络调用放到线程池。"""
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("data 必须是 bytes")
         payload = bytes(data)
         content_type = content_type or mimetypes.guess_type(key)[0] or "application/octet-stream"
 
         def _put():
+            """在线程池中执行同步 put_object。"""
             result = self.manager.client.put_object(
                 bucket,
                 key,
@@ -114,6 +121,7 @@ class MinioStorage:
         content_type: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> ObjectInfo:
+        """读取本地文件后按 bytes 上传。"""
         file_path = Path(path)
         data = await asyncio.to_thread(file_path.read_bytes)
         return await self.put_bytes(
@@ -134,6 +142,7 @@ class MinioStorage:
         content_type: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> ObjectInfo:
+        """上传知识库文档原件。"""
         return await self.put_bytes(
             self.kb_bucket,
             kb_source_key(kb_id, doc_id, extension),
@@ -152,6 +161,7 @@ class MinioStorage:
         content_type: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> ObjectInfo:
+        """上传会话文件原件。"""
         return await self.put_bytes(
             self.session_bucket,
             session_source_key(conversation_id, file_id, extension),
@@ -169,6 +179,7 @@ class MinioStorage:
         extension: str = "json",
         content_type: str | None = None,
     ) -> ObjectInfo:
+        """上传工具结果溢出对象。"""
         return await self.put_bytes(
             self.session_bucket,
             session_overflow_key(conversation_id, call_id, extension),
@@ -186,6 +197,7 @@ class MinioStorage:
         data: bytes,
         content_type: str | None = None,
     ) -> ObjectInfo:
+        """上传产物对象；按 kb 或会话归属选择 bucket/key。"""
         if (kb_id is None) == (conversation_id is None):
             raise ValueError("kb_id 与 conversation_id 必须且只能提供一个")
         if kb_id is not None:
@@ -199,7 +211,9 @@ class MinioStorage:
     # ——————————————————— 读取 ———————————————————
 
     async def get_bytes(self, bucket: str, key: str) -> bytes:
+        """下载对象内容。"""
         def _get():
+            """在线程池中执行同步 get_object 并读取内容。"""
             response = self.manager.client.get_object(bucket, key)
             try:
                 return response.read()
@@ -213,6 +227,7 @@ class MinioStorage:
             raise self.manager.translate_error(exc) from exc
 
     async def stat(self, bucket: str, key: str) -> ObjectInfo:
+        """获取对象元信息。"""
         try:
             stat = await asyncio.to_thread(self.manager.client.stat_object, bucket, key)
         except Exception as exc:
@@ -228,6 +243,7 @@ class MinioStorage:
         )
 
     async def exists(self, bucket: str, key: str) -> bool:
+        """判断对象是否存在。"""
         try:
             await self.stat(bucket, key)
             return True
@@ -242,6 +258,7 @@ class MinioStorage:
         expiry_s: int | None = None,
         response_headers: Mapping[str, str] | None = None,
     ) -> str:
+        """生成预签名下载 URL，可覆盖响应头。"""
         from datetime import timedelta
 
         expires = timedelta(seconds=expiry_s or self.config.presign_expiry_s)
@@ -265,7 +282,9 @@ class MinioStorage:
         *,
         recursive: bool = True,
     ) -> list[str]:
+        """列出指定前缀下的对象 key。"""
         def _list() -> list[str]:
+            """在线程池中执行同步对象列举。"""
             return [
                 item.object_name
                 for item in self.manager.client.list_objects(
@@ -280,6 +299,7 @@ class MinioStorage:
             raise self.manager.translate_error(exc) from exc
 
     async def remove(self, bucket: str, key: str) -> None:
+        """删除单个对象。"""
         try:
             await asyncio.to_thread(self.manager.client.remove_object, bucket, key)
         except Exception as exc:
@@ -290,6 +310,7 @@ class MinioStorage:
             raise error from exc
 
     async def remove_prefix(self, bucket: str, prefix: str) -> int:
+        """删除指定前缀下全部对象，返回删除数量。"""
         keys = await self.list_keys(bucket, prefix, recursive=True)
         for key in keys:
             await self.remove(bucket, key)
@@ -324,6 +345,7 @@ class MinioStorage:
         *,
         extension: str | None = None,
     ) -> int:
+        """删除会话文件的原件与解析产物。"""
         removed = 0
         if extension:
             await self.remove(

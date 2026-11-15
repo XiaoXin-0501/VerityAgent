@@ -30,6 +30,10 @@ class MemoryConfig(ConfigModel):
     extraction_model_id: str | None = None
     # 送入 LLM 的画像/消息最大 token
     extraction_max_input_tokens: int = Field(default=4000, ge=256)
+    # 每次画像确认的 confidence 提升步长
+    profile_confidence_step: float = Field(default=0.05, gt=0.0, le=1.0)
+    # 画像抽取输出 token 上限
+    extraction_max_output_tokens: int = Field(default=1024, ge=128)
 
     # 是否启用回合后会话摘要压缩
     compression_enabled: bool = False
@@ -41,6 +45,8 @@ class MemoryConfig(ConfigModel):
     compression_keep_recent_messages: int = Field(default=10, ge=1)
     # 压缩输入消息/摘要的最大 token
     compression_max_input_tokens: int = Field(default=8000, ge=256)
+    # 压缩输出 token 上限
+    compression_max_output_tokens: int = Field(default=2048, ge=128)
     # 压缩 LLM 超时（秒）
     compression_timeout_s: float = Field(default=60.0, gt=0)
 
@@ -52,11 +58,35 @@ class MemoryConfig(ConfigModel):
     fact_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     # 是否把抽取结果写入 Weaviate UserFact
     fact_write_enabled: bool = False
+    # 是否启用事实冲突判定（规则优先，必要时 LLM 兜底）
+    fact_conflict_enabled: bool = False
+    # 冲突判定模型 id；为空使用默认 chat
+    fact_conflict_model_id: str | None = None
+    # 冲突判定候选事实数
+    fact_conflict_max_candidates: int = Field(default=10, ge=1)
+    # 冲突判定 LLM 超时（秒）
+    fact_conflict_timeout_s: float = Field(default=20.0, gt=0)
+    # 冲突判定 LLM 输出 token 上限（只输出简短 JSON 决策）
+    fact_conflict_max_output_tokens: int = Field(default=128, ge=16)
+    # 是否启动事实置信度惩罚 worker
+    penalty_worker_enabled: bool = False
+    # 单批处理惩罚数
+    penalty_batch_size: int = Field(default=20, ge=1)
+    # 惩罚轮询间隔（秒）
+    penalty_interval_s: float = Field(default=5.0, gt=0)
+    # 惩罚队列最大长度；超出时丢弃最旧消息
+    penalty_queue_max_len: int = Field(default=10_000, ge=1)
+    # 单条惩罚失败后的最大尝试次数；超过后丢弃并记录
+    penalty_max_attempts: int = Field(default=3, ge=1)
+    # 置信度低于该值置 disputed
+    penalty_disputed_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
 
     # 是否启动用户跨存储删除 worker
     deletion_worker_enabled: bool = False
     # 单批删除用户数
     deletion_batch_size: int = Field(default=20, ge=1)
+    # 无待删除任务时的轮询间隔（秒）
+    deletion_scan_interval_s: float = Field(default=60.0, gt=0)
     # 删除失败重试间隔（秒）
     deletion_retry_backoff_s: float = Field(default=60.0, gt=0)
 

@@ -60,6 +60,7 @@ class UnsupportedMessageVersionError(MessageDecodeError):
         *,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        """构造不支持版本错误并记录版本号。"""
         merged: dict[str, Any] = {"version": version}
         merged.update(details or {})
         super().__init__(f"不支持的消息版本: {version}", details=merged)
@@ -77,6 +78,7 @@ class UnknownMessageRoleError(MessageDecodeError):
         *,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        """构造未知角色错误并记录角色值。"""
         merged: dict[str, Any] = {"role": str(role)}
         merged.update(details or {})
         super().__init__(f"未知的消息角色: {role}", details=merged)

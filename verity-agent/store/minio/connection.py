@@ -52,6 +52,7 @@ class MinioConnectionManager:
     """MinIO client 封装；构造不发起网络请求。"""
 
     def __init__(self, config: MinioConfig | None = None) -> None:
+        """保存配置并初始化客户端占位。"""
         self._config = config or settings.minio
         if not self._config.endpoint.strip():
             raise ConfigurationError("MinIO endpoint 不能为空")
@@ -60,10 +61,12 @@ class MinioConnectionManager:
 
     @property
     def config(self) -> MinioConfig:
+        """返回 MinIO 配置。"""
         return self._config
 
     @property
     def client(self) -> Minio:
+        """返回已打开的同步客户端；未 open 时抛错。"""
         if self._client is None:
             raise MinioConnectionError("MinIO 客户端尚未初始化，请先调用 open()")
         return self._client
@@ -97,6 +100,7 @@ class MinioConnectionManager:
                 raise
 
     async def close(self) -> None:
+        """关闭客户端并重置状态。"""
         async with self._lock:
             client, self._client = self._client, None
             if client is None:
@@ -117,6 +121,7 @@ class MinioConnectionManager:
         return True
 
     async def bucket_exists(self, bucket: str) -> bool:
+        """判断 bucket 是否存在。"""
         try:
             return bool(await asyncio.to_thread(self.client.bucket_exists, bucket))
         except Exception as exc:
@@ -153,6 +158,7 @@ class MinioConnectionManager:
 
     @staticmethod
     def _translate(exc: Exception) -> MinioError:
+        """把 MinIO SDK 异常翻译为统一的 MinioError。"""
         if isinstance(exc, MinioError):
             return exc
         if isinstance(exc, S3Error):
@@ -182,6 +188,7 @@ _default_minio: MinioConnectionManager | None = None
 
 
 def get_minio() -> MinioConnectionManager:
+    """返回全局 MinIO 管理器，不存在时惰性创建。"""
     global _default_minio
     if _default_minio is None:
         _default_minio = MinioConnectionManager()
@@ -189,17 +196,20 @@ def get_minio() -> MinioConnectionManager:
 
 
 def set_minio(manager: MinioConnectionManager | None) -> None:
+    """替换或清空全局 MinIO 管理器。"""
     global _default_minio
     _default_minio = manager
 
 
 async def init_minio() -> MinioConnectionManager:
+    """打开全局 MinIO 管理器并返回。"""
     manager = get_minio()
     await manager.open()
     return manager
 
 
 async def close_minio() -> None:
+    """关闭并清空全局 MinIO 管理器。"""
     global _default_minio
     if _default_minio is not None:
         await _default_minio.close()

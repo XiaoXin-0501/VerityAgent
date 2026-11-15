@@ -13,11 +13,13 @@ router = APIRouter(tags=["健康检查"])
 
 @router.get("/health")
 async def health() -> dict[str, str]:
+    """存活探针：进程可响应即返回 ok。"""
     return {"status": "ok", "name": settings.app.name, "version": settings.app.version}
 
 
 @router.get("/ready")
 async def ready(request: Request) -> dict[str, object]:
+    """就绪探针：检查 PG 与 Redis 可用性。"""
     pg_ok = False
     redis_ok = False
     try:

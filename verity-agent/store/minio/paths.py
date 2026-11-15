@@ -30,6 +30,7 @@ __all__ = [
 
 
 def _segment(value: Any, field: str) -> str:
+    """校验 key 段：非空且不含路径分隔符。"""
     text = str(value).strip()
     if not text or "/" in text or "\\" in text:
         raise ValidationError(
@@ -65,14 +66,17 @@ def parse_prefix(scope_id: Any, file_id: Any) -> str:
 
 
 def kb_source_key(kb_id: Any, doc_id: Any, extension: str | None) -> str:
+    """知识库原件 key（复用 source_key 约定）。"""
     return source_key(kb_id, doc_id, extension)
 
 
 def kb_parse_prefix(kb_id: Any, doc_id: Any) -> str:
+    """知识库解析产物前缀。"""
     return parse_prefix(kb_id, doc_id)
 
 
 def kb_artifact_key(kb_id: Any, artifact_id: Any, extension: str | None) -> str:
+    """知识库产物 key：artifact/{kb_id}/{artifact_id}.{ext}。"""
     return (
         f"artifact/{_segment(kb_id, 'kb_id')}/"
         f"{_segment(artifact_id, 'artifact_id')}.{sanitize_extension(extension)}"
@@ -82,16 +86,19 @@ def kb_artifact_key(kb_id: Any, artifact_id: Any, extension: str | None) -> str:
 def session_source_key(
     conversation_id: Any, file_id: Any, extension: str | None
 ) -> str:
+    """会话原件 key（复用 source_key 约定）。"""
     return source_key(conversation_id, file_id, extension)
 
 
 def session_parse_prefix(conversation_id: Any, file_id: Any) -> str:
+    """会话解析产物前缀。"""
     return parse_prefix(conversation_id, file_id)
 
 
 def session_overflow_key(
     conversation_id: Any, call_id: Any, extension: str = "json"
 ) -> str:
+    """会话工具溢出 key：overflow/{conversation_id}/{call_id}.json。"""
     return (
         f"overflow/{_segment(conversation_id, 'conversation_id')}/"
         f"{_segment(call_id, 'call_id')}.{sanitize_extension(extension, default='json')}"
@@ -101,6 +108,7 @@ def session_overflow_key(
 def session_artifact_key(
     conversation_id: Any, artifact_id: Any, extension: str | None
 ) -> str:
+    """会话产物 key：artifact/{conversation_id}/{artifact_id}.{ext}。"""
     return (
         f"artifact/{_segment(conversation_id, 'conversation_id')}/"
         f"{_segment(artifact_id, 'artifact_id')}.{sanitize_extension(extension)}"

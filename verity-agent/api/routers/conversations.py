@@ -208,21 +208,24 @@ async def send_message(
     await ConversationRepository().get_for_user(user.id, conversation_id)
     permissions = await PermissionRepository().list_codes_for_user(user.id)
     agent = _agent(request)
-    agent_request = AgentRequest(
-        user_id=user.id,
-        conversation_id=conversation_id,
-        client_message_id=payload.client_message_id,
-        content=payload.content,
-        images=[ImageRef.model_validate(item) for item in payload.images],
-        files=[FileRef.model_validate(item) for item in payload.files],
-        permissions=frozenset(permissions),
-        stream=payload.stream,
-        model_id=payload.model_id,
-        rag_mode=payload.rag_mode,
-        tool_choice=payload.tool_choice,
-        max_tool_rounds=payload.max_tool_rounds,
-        metadata=payload.metadata,
-    )
+    try:
+        agent_request = AgentRequest(
+            user_id=user.id,
+            conversation_id=conversation_id,
+            client_message_id=payload.client_message_id,
+            content=payload.content,
+            images=[ImageRef.model_validate(item) for item in payload.images],
+            files=[FileRef.model_validate(item) for item in payload.files],
+            permissions=frozenset(permissions),
+            stream=payload.stream,
+            model_id=payload.model_id,
+            rag_mode=payload.rag_mode,
+            tool_choice=payload.tool_choice,
+            max_tool_rounds=payload.max_tool_rounds,
+            metadata=payload.metadata,
+        )
+    except ValueError as exc:
+        raise ValidationError("消息参数不合法", details={"cause": str(exc)}) from exc
     if payload.stream:
         stream = agent.stream(agent_request)
         return {

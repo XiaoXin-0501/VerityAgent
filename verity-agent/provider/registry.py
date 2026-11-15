@@ -24,11 +24,13 @@ class ProviderRegistry:
     """
 
     def __init__(self) -> None:
+        """初始化 provider、模型句柄与全局模型索引。"""
         self._providers: dict[str, BaseProvider] = {}
         self._models: dict[tuple[str, str], ModelHandle] = {}
         self._models_by_id: dict[str, ModelHandle] = {}
 
     def register(self, provider: BaseProvider) -> None:
+        """注册 provider 及其模型句柄；拒绝重名 provider 和重复模型 id。"""
         name = provider.name
         if name in self._providers:
             raise ConfigurationError(f"Provider 重复注册: {name}")
@@ -46,10 +48,12 @@ class ProviderRegistry:
             self._models_by_id[model_id] = handle
 
     def register_many(self, providers: list[BaseProvider]) -> None:
+        """批量注册 provider，任一失败即抛出。"""
         for provider in providers:
             self.register(provider)
 
     def get(self, name: str, *, kind: ProviderKind | None = None) -> BaseProvider:
+        """按名称取 provider；可校验 kind。"""
         provider = self._providers.get(name)
         if provider is None:
             raise ConfigurationError(
@@ -64,15 +68,18 @@ class ProviderRegistry:
         return provider
 
     def maybe_get(self, name: str) -> BaseProvider | None:
+        """按名称取 provider；不存在返回 None。"""
         return self._providers.get(name)
 
     def list(self, kind: ProviderKind | None = None) -> list[BaseProvider]:
+        """列出全部或指定 kind 的 provider。"""
         providers = list(self._providers.values())
         if kind is not None:
             providers = [p for p in providers if p.kind is kind]
         return providers
 
     def get_model(self, provider: str, model_id: str) -> ModelHandle:
+        """按 (provider, model_id) 取句柄，首次访问时惰性创建。"""
         key = (provider, model_id)
         handle = self._models.get(key)
         if handle is None:
@@ -109,11 +116,13 @@ class ProviderRegistry:
                 )
 
     async def close_all(self) -> None:
+        """并发关闭所有 provider，忽略单个关闭异常。"""
         await asyncio.gather(
             *(p.close() for p in self._providers.values()), return_exceptions=True
         )
 
     async def health(self) -> list[ProviderHealth]:
+        """并发探活并汇总健康状态，异常的 provider 标记为 DOWN。"""
         providers = [p for p in self._providers.values() if p.enabled]
         results = await asyncio.gather(
             *(p.health_check() for p in providers), return_exceptions=True
@@ -136,4 +145,5 @@ class ProviderRegistry:
         return health
 
     def __len__(self) -> int:
+        """已注册 provider 数量。"""
         return len(self._providers)

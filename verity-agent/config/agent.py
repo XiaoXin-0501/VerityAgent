@@ -23,8 +23,6 @@ class AgentStreamConfig(ConfigModel):
 class AgentPolicy(ConfigModel):
     """内部运行限制；由 AgentConfig 派生，不直接暴露给调用方。"""
 
-    # 单次 run 最多回合数；防止无限循环
-    max_turns_per_run: int = Field(default=20, ge=1)
     # 单回合最多工具轮数
     max_tool_rounds: int = Field(default=8, ge=1)
     # 单批最多并行工具数
@@ -46,8 +44,16 @@ class AgentConfig(ConfigModel):
     stream: AgentStreamConfig = Field(default_factory=AgentStreamConfig)
     # 运行期状态落 Redis 时的 TTL；必须大于 run 租约
     run_state_ttl_s: int = Field(default=3600, ge=60)
+    # 默认消息窗口条数；ContextAssembler 会在 token 预算内继续裁剪
+    history_limit: int = Field(default=40, ge=1)
     # 取消 run 时等待工具/流收尾的宽限时间（秒）
     cancel_grace_s: float = Field(default=5.0, ge=0)
+    # 是否将事件镜像到 Redis Stream，支持多实例 replay/resync
+    event_store_enabled: bool = True
+    # 跨实例事件轮询间隔（秒）；Pub/Sub 不可用时的兜底
+    remote_event_poll_interval_s: float = Field(default=0.5, gt=0)
+    # 跨实例取消轮询间隔（秒）；Pub/Sub 不可用时的兜底
+    remote_cancel_poll_interval_s: float = Field(default=1.0, gt=0)
 
     @model_validator(mode="after")
     def _check_lease_heartbeat(self) -> "AgentConfig":

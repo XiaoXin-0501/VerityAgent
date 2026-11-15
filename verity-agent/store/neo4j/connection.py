@@ -51,21 +51,25 @@ class Neo4jConnectionManager:
     """Neo4j AsyncDriver 封装；构造不发起网络请求。"""
 
     def __init__(self, config: Neo4jConfig | None = None) -> None:
+        """保存配置并初始化驱动占位。"""
         self._config = config or settings.neo4j
         self._driver = None
         self._lock = asyncio.Lock()
 
     @property
     def config(self) -> Neo4jConfig:
+        """返回 Neo4j 配置。"""
         return self._config
 
     @property
     def driver(self):
+        """返回已打开的驱动；未 open 时抛错。"""
         if self._driver is None:
             raise Neo4jConnectionError("Neo4j 驱动尚未初始化，请先调用 open()")
         return self._driver
 
     async def open(self) -> None:
+        """建立 Neo4j 驱动连接。"""
         async with self._lock:
             if self._driver is not None:
                 return
@@ -105,18 +109,21 @@ class Neo4jConnectionManager:
             self._driver = driver
 
     async def close(self) -> None:
+        """关闭驱动并重置状态。"""
         async with self._lock:
             driver, self._driver = self._driver, None
             if driver is not None:
                 await driver.close()
 
     async def ping(self) -> bool:
+        """探活：执行轻量查询验证连接。"""
         async with self.session() as session:
             result = await session.run("RETURN 1 AS ok")
             record = await result.single()
         return bool(record and record["ok"] == 1)
 
     async def health_check(self) -> dict[str, Any]:
+        """返回包含连接状态的健康信息。"""
         try:
             return {"ready": await self.ping(), "uri": self._config.uri}
         except Exception as exc:
@@ -124,6 +131,7 @@ class Neo4jConnectionManager:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[Any]:
+        """打开一个异步 session 的上下文管理器。"""
         try:
             async with self.driver.session(database=self._config.database) as session:
                 yield session
@@ -131,6 +139,7 @@ class Neo4jConnectionManager:
             raise self._translate(exc) from exc
 
     async def execute_read(self, work: Callable[..., Any], *args: Any) -> Any:
+        """在读写事务中执行回调。"""
         try:
             async with self.session() as session:
                 return await session.execute_read(work, *args)
@@ -140,6 +149,7 @@ class Neo4jConnectionManager:
             raise self._translate(exc) from exc
 
     async def execute_write(self, work: Callable[..., Any], *args: Any) -> Any:
+        """在写事务中执行回调。"""
         try:
             async with self.session() as session:
                 return await session.execute_write(work, *args)
@@ -161,6 +171,7 @@ class Neo4jConnectionManager:
 
     @staticmethod
     def _translate(exc: Exception) -> Neo4jError:
+        """把 Neo4j 驱动异常翻译为 Neo4jError。"""
         if isinstance(exc, Neo4jError):
             return exc
         try:
@@ -178,6 +189,7 @@ _default_neo4j: Neo4jConnectionManager | None = None
 
 
 def get_neo4j() -> Neo4jConnectionManager:
+    """返回全局 Neo4j 管理器，不存在时惰性创建。"""
     global _default_neo4j
     if _default_neo4j is None:
         _default_neo4j = Neo4jConnectionManager()
@@ -185,17 +197,20 @@ def get_neo4j() -> Neo4jConnectionManager:
 
 
 def set_neo4j(manager: Neo4jConnectionManager | None) -> None:
+    """替换或清空全局 Neo4j 管理器。"""
     global _default_neo4j
     _default_neo4j = manager
 
 
 async def init_neo4j() -> Neo4jConnectionManager:
+    """打开全局 Neo4j 管理器并返回。"""
     manager = get_neo4j()
     await manager.open()
     return manager
 
 
 async def close_neo4j() -> None:
+    """关闭并清空全局 Neo4j 管理器。"""
     global _default_neo4j
     if _default_neo4j is not None:
         await _default_neo4j.close()

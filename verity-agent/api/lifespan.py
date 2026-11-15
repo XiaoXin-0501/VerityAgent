@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,9 +16,24 @@ from fastapi import FastAPI
 from config import settings
 from exception import ConfigurationError, RedisError
 from agent.bootstrap import build_default_agent
+from agent.adapters.facts import WeaviateFactStore
 from agent.adapters.hooks import DispatcherHookAdapter
 from agent.hooks.builtin.factory import build_dispatcher
+from agent.recovery import (
+    recover_expired_leases,
+    recover_missing_tool_messages,
+    recover_streaming_messages,
+)
 from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
+from agent.workers import (
+    CompressionService,
+    ConflictPenaltyQueue,
+    FactConfidencePenaltyWorker,
+    FactConflictService,
+    FactReconciliationWorker,
+    MemoryProfileWorker,
+    UserDeletionWorker,
+)
 from provider.factory import build_registry
 from prompt import build_prompt_registry
 from rag.bootstrap import build_default_retriever
@@ -156,6 +172,114 @@ async def _build_rag_retriever(registry):
     return retriever
 
 
+def _build_memory_worker(registry, hook_dispatcher):
+    """按配置构造记忆抽取 worker；未启用/无模型时返回 None。"""
+    cfg = settings.memory
+    if not cfg.worker_enabled:
+        return None
+    default_chat = _default_chat_model_id()
+    model_id = cfg.extraction_model_id or default_chat
+    model = _resolve_model(
+        registry,
+        model_id,
+        fallback=default_chat,
+        kind="chat",
+    )
+    if model is None:
+        logger.warning("记忆抽取 worker 缺少可用 chat 模型，跳过启动")
+        return None
+    conflict_service = None
+    if cfg.fact_conflict_enabled:
+        conflict_model_id = cfg.fact_conflict_model_id or model_id
+        conflict_model = _resolve_model(
+            registry,
+            conflict_model_id,
+            fallback=model_id,
+            kind="chat",
+        )
+        if conflict_model is not None:
+            conflict_service = FactConflictService(
+                model=conflict_model,
+                model_id=str(conflict_model_id),
+                max_candidates=cfg.fact_conflict_max_candidates,
+                timeout_s=cfg.fact_conflict_timeout_s,
+                max_output_tokens=cfg.fact_conflict_max_output_tokens,
+            )
+    return MemoryProfileWorker(
+        cfg,
+        model=model,
+        model_id=str(model_id),
+        hook_dispatcher=hook_dispatcher,
+        facts_store=(
+            WeaviateFactStore()
+            if cfg.fact_write_enabled and settings.weaviate.enabled
+            else None
+        ),
+        conflict_service=conflict_service,
+    )
+
+
+def _build_compressor(registry, hook_dispatcher):
+    """按配置构造回合后摘要压缩服务；未启用/无模型时返回 None。"""
+    cfg = settings.memory
+    if not cfg.compression_enabled:
+        return None
+    default_chat = _default_chat_model_id()
+    model_id = cfg.compression_model_id or default_chat
+    model = _resolve_model(
+        registry,
+        model_id,
+        fallback=default_chat,
+        kind="chat",
+    )
+    if model is None:
+        logger.warning("会话压缩缺少可用 chat 模型，跳过压缩")
+        return None
+    return CompressionService(
+        cfg,
+        model=model,
+        model_id=str(model_id),
+        hook_dispatcher=hook_dispatcher,
+    )
+
+
+def _build_deletion_worker(config):
+    """按配置构造用户删除 worker；未启用时返回 None。"""
+    if not config.deletion_worker_enabled:
+        return None
+    return UserDeletionWorker(config)
+
+
+def _build_reconciliation_worker(config):
+    """按配置构造事实对账 worker；未启用/无 Weaviate 时返回 None。"""
+    if not config.reconciliation_worker_enabled:
+        return None
+    if not settings.weaviate.enabled:
+        logger.warning("Weaviate 未启用，跳过事实对账 worker")
+        return None
+    return FactReconciliationWorker(
+        config,
+        facts_store=WeaviateFactStore(),
+    )
+
+
+def _build_penalty_worker(config, queue):
+    """按配置构造事实置信度惩罚 worker；未启用/无 Weaviate 时返回 None。"""
+    if not config.penalty_worker_enabled:
+        return None
+    if not settings.weaviate.enabled:
+        logger.warning("Weaviate 未启用，跳过事实惩罚 worker")
+        return None
+    return FactConfidencePenaltyWorker(
+        queue=queue,
+        facts_store=WeaviateFactStore(),
+        disputed_threshold=config.penalty_disputed_threshold,
+        batch_size=config.penalty_batch_size,
+        interval_s=config.penalty_interval_s,
+        max_attempts=config.penalty_max_attempts,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """启动/关闭全部基础设施；任一步失败也按相反顺序释放已建资源。"""
@@ -163,6 +287,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     hook_dispatcher = None
     agent = None
     rag_retriever = None
+    memory_worker = None
+    memory_worker_task = None
+    deletion_worker = None
+    deletion_worker_task = None
+    reconciliation_worker = None
+    reconciliation_worker_task = None
+    penalty_worker = None
+    penalty_worker_task = None
+    compressor = None
     redis_ready = False
     try:
         await init_pg()
@@ -170,6 +303,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 首版没有迁移框架：dev/test 幂等建表；prod 只连接，不自动改结构
         if not settings.app.is_prod:
             await init_schema()
+
+        # 进程重启后先收敛过期 run 租约，避免旧 run 阻塞新对话。
+        try:
+            await recover_expired_leases()
+            await recover_streaming_messages()
+            await recover_missing_tool_messages()
+        except Exception:  # noqa: BLE001 - 恢复失败不阻断启动
+            logger.warning("启动期 run/消息恢复失败", exc_info=True)
 
         try:
             await init_redis()
@@ -189,6 +330,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         weaviate_ready = False
         if settings.weaviate.enabled:
             async def _init_weaviate_with_schema() -> None:
+                """初始化 Weaviate 并按配置校验/创建 schema。"""
                 await init_weaviate()
                 if settings.weaviate.startup_schema_check:
                     manager = SchemaManager(settings.weaviate)
@@ -211,6 +353,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         neo4j_ready = False
         if settings.neo4j.enabled:
             async def _init_neo4j_with_schema() -> None:
+                """初始化 Neo4j 并按配置创建与校验图 schema。"""
                 await init_neo4j()
                 if settings.neo4j.init_schema_on_startup:
                     await init_graph_schema(get_neo4j())
@@ -239,7 +382,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             conversation_repository=ConversationRepository(),
         )
         app.state.hook_dispatcher = hook_dispatcher
-        tool_registry = build_tool_registry(retriever=rag_retriever)
+        memory_worker = _build_memory_worker(registry, hook_dispatcher)
+        if memory_worker is not None:
+            memory_worker_task = asyncio.create_task(
+                memory_worker.run_forever(),
+                name="verity-memory-worker",
+            )
+            app.state.memory_worker = memory_worker
+        compressor = _build_compressor(registry, hook_dispatcher)
+        deletion_worker = _build_deletion_worker(settings.memory)
+        if deletion_worker is not None:
+            deletion_worker_task = asyncio.create_task(
+                deletion_worker.run_forever(),
+                name="verity-deletion-worker",
+            )
+            app.state.deletion_worker = deletion_worker
+        reconciliation_worker = _build_reconciliation_worker(settings.memory)
+        if reconciliation_worker is not None:
+            reconciliation_worker_task = asyncio.create_task(
+                reconciliation_worker.run_forever(),
+                name="verity-reconciliation-worker",
+            )
+            app.state.reconciliation_worker = reconciliation_worker
+        penalty_queue = ConflictPenaltyQueue(
+            max_len=settings.memory.penalty_queue_max_len
+        )
+        app.state.conflict_penalty_queue = penalty_queue
+        penalty_worker = _build_penalty_worker(settings.memory, penalty_queue)
+        if penalty_worker is not None:
+            penalty_worker_task = asyncio.create_task(
+                penalty_worker.run_forever(),
+                name="verity-penalty-worker",
+            )
+        if (
+            settings.rag.retriever.chunk_conflict_tool_enabled
+            and not settings.memory.penalty_worker_enabled
+        ):
+            logger.warning(
+                "resolve_chunk_conflict 已启用，但 penalty worker 未启用；"
+                "惩罚消息只会在有界队列中等待/被淘汰"
+            )
+        tool_registry = build_tool_registry(
+            retriever=rag_retriever,
+            conflict_enabled=settings.rag.retriever.chunk_conflict_tool_enabled,
+            search_kb=settings.tools.search_kb,
+        )
         app.state.tool_registry = tool_registry
         tool_pipeline = build_tool_pipeline(tool_registry, settings.tools)
         app.state.tool_pipeline = tool_pipeline
@@ -249,6 +436,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             tool_pipeline=tool_pipeline,
             services=app.state,
             hooks=DispatcherHookAdapter(hook_dispatcher),
+            rag_retriever=rag_retriever,
+            compressor=compressor,
         )
         app.state.agent = agent
         app.state.redis_ready = redis_ready
@@ -260,6 +449,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if agent is not None:
             await agent.close()
+        if memory_worker is not None:
+            memory_worker.stop()
+        if memory_worker_task is not None:
+            memory_worker_task.cancel()
+            await asyncio.gather(memory_worker_task, return_exceptions=True)
+        if deletion_worker is not None:
+            deletion_worker.stop()
+        if deletion_worker_task is not None:
+            deletion_worker_task.cancel()
+            await asyncio.gather(deletion_worker_task, return_exceptions=True)
+        if reconciliation_worker is not None:
+            reconciliation_worker.stop()
+        if reconciliation_worker_task is not None:
+            reconciliation_worker_task.cancel()
+            await asyncio.gather(
+                reconciliation_worker_task,
+                return_exceptions=True,
+            )
+        if penalty_worker is not None:
+            penalty_worker.stop()
+        if penalty_worker_task is not None:
+            penalty_worker_task.cancel()
+            await asyncio.gather(
+                penalty_worker_task,
+                return_exceptions=True,
+            )
         if rag_retriever is not None:
             await rag_retriever.close()
         if registry is not None:

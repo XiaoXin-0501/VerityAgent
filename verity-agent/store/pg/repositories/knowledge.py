@@ -49,6 +49,7 @@ class KnowledgeBaseRepository(BaseRepository):
         status: KnowledgeBaseStatus = KnowledgeBaseStatus.ACTIVE,
         conn: AsyncConnection[Row] | None = None,
     ) -> KnowledgeBase:
+        """创建知识库并记录其向量模型与权限要求。"""
         name = require_text(name, "name")
         required_permission_code = require_text(
             required_permission_code, "required_permission_code"
@@ -88,6 +89,7 @@ class KnowledgeBaseRepository(BaseRepository):
         include_deleted: bool = False,
         conn: AsyncConnection[Row] | None = None,
     ) -> KnowledgeBase | None:
+        """按 id 取知识库；默认过滤软删除。"""
         sql = "SELECT * FROM knowledge_bases WHERE id = %s"
         if not include_deleted:
             sql += " AND deleted_at IS NULL"
@@ -104,6 +106,7 @@ class KnowledgeBaseRepository(BaseRepository):
         offset: int = 0,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[KnowledgeBase]:
+        """分页列出知识库，可按状态过滤。"""
         limit, offset = pagination(limit, offset)
         conditions: list[str] = []
         params: list[Any] = []
@@ -136,6 +139,7 @@ class KnowledgeBaseRepository(BaseRepository):
         status: Any = _UNSET,
         conn: AsyncConnection[Row] | None = None,
     ) -> KnowledgeBase:
+        """按非 _UNSET 字段局部更新知识库。"""
         sets: list[str] = []
         params: list[Any] = []
         for column, value in (
@@ -260,6 +264,7 @@ class KnowledgeBaseRepository(BaseRepository):
         retry_at: Any | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> KnowledgeBase:
+        """记录知识库跨存储删除失败并安排重试。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -283,6 +288,7 @@ class KnowledgeBaseRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> KnowledgeBase:
+        """恢复被软删除的知识库。"""
         async with self._transaction(conn) as c:
             row = await self._fetch_one(
                 c,
@@ -307,6 +313,7 @@ class KnowledgeBaseRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> bool:
+        """判断用户是否有权访问指定知识库。"""
         async with self._transaction(conn) as c:
             value = await self._fetch_val(
                 c,
@@ -363,6 +370,7 @@ class KnowledgeBaseRepository(BaseRepository):
         offset: int = 0,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[KnowledgeBase]:
+        """分页列出用户有权访问的知识库。"""
         limit, offset = pagination(limit, offset)
         async with self._transaction(conn) as c:
             rows = await self._fetch_all(
@@ -405,6 +413,7 @@ class DocumentRepository(BaseRepository):
         status: DocumentStatus = DocumentStatus.PENDING,
         conn: AsyncConnection[Row] | None = None,
     ) -> Document:
+        """登记文档元数据；索引前状态为 pending。"""
         original_filename = require_text(original_filename, "original_filename")
         source_object_key = require_text(source_object_key, "source_object_key")
         if size_bytes < 0:
@@ -442,6 +451,7 @@ class DocumentRepository(BaseRepository):
         include_deleted: bool = False,
         conn: AsyncConnection[Row] | None = None,
     ) -> Document | None:
+        """按 id 取文档；默认过滤软删除。"""
         sql = "SELECT * FROM documents WHERE id = %s"
         if not include_deleted:
             sql += " AND deleted_at IS NULL"
@@ -459,6 +469,7 @@ class DocumentRepository(BaseRepository):
         offset: int = 0,
         conn: AsyncConnection[Row] | None = None,
     ) -> list[Document]:
+        """分页列出知识库下的文档。"""
         limit, offset = pagination(limit, offset)
         conditions = ["kb_id = %s"]
         params: list[Any] = [as_uuid(kb_id)]
@@ -508,6 +519,7 @@ class DocumentRepository(BaseRepository):
         *,
         conn: AsyncConnection[Row] | None = None,
     ) -> int:
+        """统计知识库下的文档数量。"""
         async with self._transaction(conn) as c:
             value = await self._fetch_val(
                 c,
@@ -665,6 +677,7 @@ class DocumentRepository(BaseRepository):
         doc_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> Document | None:
+        """领取单个待索引文档（claim_index_jobs 的 limit=1 包装）。"""
         docs = await self.claim_index_jobs(
             worker_id,
             limit=1,
@@ -856,6 +869,7 @@ class DocumentRepository(BaseRepository):
         worker_id: str,
         conn: AsyncConnection[Row] | None = None,
     ) -> bool:
+        """释放文档索引租约；仅持有者可释放。"""
         async with self._transaction(conn) as c:
             affected = await self._execute(
                 c,
@@ -871,6 +885,7 @@ class DocumentRepository(BaseRepository):
     async def mark_processing(
         self, doc_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> Document:
+        """把文档置为处理中。"""
         return await self.set_status(doc_id, DocumentStatus.PROCESSING, conn=conn)
 
     async def mark_completed(
@@ -882,6 +897,7 @@ class DocumentRepository(BaseRepository):
         parse_manifest_key: str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> Document:
+        """把文档置为已完成并记录 token/chunk 统计。"""
         kwargs: dict[str, Any] = {}
         if token_count is not None:
             kwargs["token_count"] = token_count
@@ -896,16 +912,19 @@ class DocumentRepository(BaseRepository):
     async def mark_failed(
         self, doc_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> Document:
+        """把文档置为失败。"""
         return await self.set_status(doc_id, DocumentStatus.FAILED, conn=conn)
 
     async def mark_deleting(
         self, doc_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> Document:
+        """把文档置为删除中（跨存储删除补偿）。"""
         return await self.set_status(doc_id, DocumentStatus.DELETING, conn=conn)
 
     async def mark_deleted(
         self, doc_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> Document:
+        """把文档置为已删除。"""
         return await self.set_status(doc_id, DocumentStatus.DELETED, conn=conn)
 
 

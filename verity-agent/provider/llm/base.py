@@ -18,6 +18,7 @@ class ChatModel:
     """单个 chat 模型句柄；只做厂商调用，不组装 Prompt。"""
 
     def __init__(self, spec: ProviderModelSpec) -> None:
+        """校验模型类型并缓存模型级默认参数。"""
         if spec.kind.value != ProviderKind.CHAT.value:
             raise ValueError(f"{spec.id} 不是 chat 模型")
         self.spec = spec
@@ -28,6 +29,7 @@ class ChatModel:
         return value if value is not None else self._defaults.get(name)
 
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
+        """非流式调用；由具体厂商适配器实现。"""
         raise NotImplementedError
 
     async def stream(
@@ -46,12 +48,15 @@ class ChatProvider(BaseProvider[ChatProviderConfig]):
     kind = ProviderKind.CHAT
 
     def __init__(self, config: ChatProviderConfig) -> None:
+        """保存 Provider 配置；不创建网络客户端。"""
         super().__init__(config)
 
     @property
     def api_style(self) -> ChatApiStyle:
+        """返回该 Provider 使用的 Chat API 风格。"""
         return self.config.api_style
 
     @abstractmethod
     def get_model(self, model_id: str) -> ChatModel:
+        """返回指定模型句柄；同一 model_id 由实现方负责复用。"""
         raise NotImplementedError

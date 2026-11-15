@@ -19,6 +19,7 @@ def tool_error_from_exception(
     *,
     tool_name: str | None = None,
 ) -> ToolError:
+    """把内部异常统一映射为可回喂 LLM 的 ToolError。"""
     if isinstance(exc, ToolException):
         error = ToolError.from_exception(exc)
         if tool_name and "tool_name" not in error.details:

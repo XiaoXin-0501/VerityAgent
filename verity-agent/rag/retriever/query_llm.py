@@ -18,6 +18,7 @@ import json
 import logging
 from typing import Any
 
+from provider.llm.helpers import response_text as _response_text
 from provider.llm.types import (
     ChatModelRequest,
     ModelGenerationOptions,
@@ -48,17 +49,6 @@ _REWRITE_SYSTEM = """你是检索查询改写器。把用户问题改写成适�
 _INTENT_SYSTEM = """你是查询意图分类器。只能从以下枚举中选择一个：
 LOOKUP（查定义/事实）、COMPARE（比较/区别）、SUMMARIZE（总结/概括）、HOWTO（步骤/方法）。
 只输出枚举名，不要解释；无法判断输出 UNKNOWN。"""
-
-
-def _model_text(response: Any) -> str:
-    """从 provider ChatModelResponse 中提取普通文本，忽略 thinking。"""
-    message = getattr(response, "message", None)
-    parts = getattr(message, "content", None) or []
-    return "".join(
-        part.text
-        for part in parts
-        if isinstance(part, ModelTextPart)
-    ).strip()
 
 
 def _parse_variants(text: str, *, max_variants: int) -> list[str]:
@@ -163,7 +153,7 @@ class ChatQueryRewriter:
         except Exception as exc:  # noqa: BLE001 - LLM 改写可降级
             logger.warning("query 改写失败: %s", exc)
             return []
-        variants = _parse_variants(_model_text(response), max_variants=self.max_variants)
+        variants = _parse_variants(_response_text(response), max_variants=self.max_variants)
         variants = [item for item in variants if item and item != query]
         if variants:
             await self._write_cache(query, variants)
@@ -260,7 +250,7 @@ class ChatIntentClassifier:
         except Exception as exc:  # noqa: BLE001 - 意图兜底可降级
             logger.warning("意图分类失败: %s", exc)
             return None
-        intent = _parse_intent(_model_text(response))
+        intent = _parse_intent(_response_text(response))
         if intent is not None:
             await self._write_cache(query, intent)
         return intent

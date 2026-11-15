@@ -95,6 +95,7 @@ class RedisConfig(ConfigModel):
     @field_validator("url", mode="before")
     @classmethod
     def _normalize_url(cls, value: object) -> str:
+        """补全 redis:// scheme，兼容 host:port 写法。"""
         text = str(value).strip()
         if text and "://" not in text:
             # 兼容 ``host:port/db`` 写法，统一成 redis://
@@ -104,6 +105,7 @@ class RedisConfig(ConfigModel):
     @field_validator("password", mode="before")
     @classmethod
     def _fallback_compose_password(cls, value: object) -> object:
+        """密码为空时回退读取 docker-compose 的 REDIS_PASSWORD。"""
         if value:
             return value
         import os
@@ -219,6 +221,7 @@ class WeaviateConfig(ConfigModel):
 
     @property
     def is_configured(self) -> bool:
+        """MinIO 是否配置了地址。"""
         return bool(self.url)
 
 
@@ -254,6 +257,7 @@ class Neo4jConfig(ConfigModel):
     @field_validator("uri")
     @classmethod
     def _validate_uri(cls, value: str) -> str:
+        """校验 Neo4j URI 非空并补全 bolt:// scheme。"""
         text = value.strip()
         if not text:
             raise ValueError("Neo4j uri 不能为空")
@@ -264,4 +268,5 @@ class Neo4jConfig(ConfigModel):
 
     @property
     def is_configured(self) -> bool:
+        """Neo4j 是否配置了地址与密码。"""
         return bool(self.uri and self.password.get_secret_value())

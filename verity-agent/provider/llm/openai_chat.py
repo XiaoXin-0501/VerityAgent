@@ -93,10 +93,12 @@ _FINISH_MAP = {
 
 
 def _finish_reason(value: Any) -> ChatFinishReason:
+    """把 OpenAI finish_reason 归一化为统一结束原因。"""
     return _FINISH_MAP.get(str(value), ChatFinishReason.STOP)
 
 
 def _parse_arguments(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """解析 tool_call.arguments：返回解析后的 dict 与原始字符串，便于回放。"""
     if isinstance(raw, dict):
         return raw, None
     if raw is None:
@@ -110,6 +112,7 @@ def _parse_arguments(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def _usage(data: Mapping[str, Any] | None) -> ChatUsage:
+    """从 usage 字典构造统一 token 用量（含缓存与推理 token）。"""
     payload = data or {}
     prompt_details = payload.get("prompt_tokens_details") or {}
     completion_details = payload.get("completion_tokens_details") or {}
@@ -125,6 +128,7 @@ def _usage(data: Mapping[str, Any] | None) -> ChatUsage:
 
 
 def _image_url(part: ModelImagePart) -> str:
+    """把图片 part 转成 URL 或 data URI。"""
     if part.url:
         return part.url
     if part.data:
@@ -174,6 +178,7 @@ def _content_parts(parts: list[ModelContentPart]) -> str | list[dict[str, Any]]:
 
 
 def _tool_choice(choice) -> Any:
+    """把统一工具选择策略转换为 Chat Completions tool_choice。"""
     if choice.mode is ToolChoiceMode.AUTO:
         return "auto"
     if choice.mode is ToolChoiceMode.NONE:
@@ -185,12 +190,14 @@ def _tool_choice(choice) -> Any:
 
 class OpenAIChatModel(ChatModel):
     def __init__(self, spec, provider: "OpenAIChatProvider") -> None:
+        """绑定模型规格与所属 Provider。"""
         super().__init__(spec)
         self.provider = provider
 
     # ——————————————————— request 映射 ———————————————————
 
     def _messages(self, messages: list[ModelMessage]) -> list[dict[str, Any]]:
+        """把统一消息转换为 Chat Completions messages，保留 tool_calls/name。"""
         result: list[dict[str, Any]] = []
         for message in messages:
             if message.role is ModelRole.ASSISTANT:
@@ -232,6 +239,7 @@ class OpenAIChatModel(ChatModel):
         return result
 
     def _response_format(self, request: ChatModelRequest) -> dict[str, Any] | None:
+        """按响应格式配置生成 response_format；TEXT 不传该字段。"""
         fmt = request.response_format
         if fmt.type is ResponseFormatType.TEXT:
             return None
@@ -248,6 +256,7 @@ class OpenAIChatModel(ChatModel):
 
     def _apply_prefix(self, payload: dict[str, Any], request: ChatModelRequest) -> None:
         # OpenAI Chat 没有原生 prefix；由子类实现 DeepSeek/vLLM 的机制
+        """默认不支持 prefix completion；厂商子类按各自机制覆盖。"""
         raise ProviderError(
             ProviderErrorCode.UNSUPPORTED_CAPABILITY,
             "当前 OpenAI Chat provider 不支持 prefix completion",
@@ -256,6 +265,7 @@ class OpenAIChatModel(ChatModel):
         )
 
     def _payload(self, request: ChatModelRequest, *, stream: bool) -> dict[str, Any]:
+        """构造 Chat Completions 请求体，统一映射采样参数与工具定义。"""
         payload: dict[str, Any] = {
             "model": self.spec.model,
             "messages": self._messages(request.messages),
@@ -329,6 +339,7 @@ class OpenAIChatModel(ChatModel):
     # ——————————————————— response 映射 ———————————————————
 
     def _response_message(self, message: Mapping[str, Any]) -> ModelMessage:
+        """把 Chat Completions message 解析为统一 ModelMessage。"""
         parts: list[ModelContentPart] = []
         content = message.get("content")
         if isinstance(content, str) and content:
@@ -367,6 +378,7 @@ class OpenAIChatModel(ChatModel):
         )
 
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
+        """非流式调用 Chat Completions，并校验 choices 非空。"""
         payload = self._payload(request, stream=False)
         try:
             completion = await self.provider.client.chat.completions.create(
@@ -397,6 +409,7 @@ class OpenAIChatModel(ChatModel):
         )
 
     async def stream(self, request: ChatModelRequest) -> AsyncIterator[ChatStreamEvent]:
+        """流式调用 Chat Completions，累积工具参数并在结束时统一产出。"""
         payload = self._payload(request, stream=True)
         yield ChatStreamStart(model=self.spec.model)
 
@@ -499,12 +512,14 @@ class OpenAIChatProvider(ChatProvider):
     default_capabilities: dict[str, Any] = {}
 
     def __init__(self, config: ChatProviderConfig) -> None:
+        """初始化 SDK 客户端占位与模型句柄缓存。"""
         super().__init__(config)
         self._client: openai.AsyncOpenAI | None = None
         self._handles: dict[str, ChatModel] = {}
 
     @property
     def client(self) -> openai.AsyncOpenAI:
+        """返回已初始化的 SDK 客户端；未 open 时抛 UNAVAILABLE。"""
         if self._client is None:
             raise ProviderError(
                 ProviderErrorCode.UNAVAILABLE,
@@ -514,17 +529,20 @@ class OpenAIChatProvider(ChatProvider):
         return self._client
 
     async def open(self) -> None:
+        """构建并保存 AsyncOpenAI 客户端。"""
         client = build_openai_client(self.config)
         await super().open()
         self._client = client
 
     async def close(self) -> None:
+        """关闭 SDK 客户端并清理模型句柄。"""
         if self._client is not None:
             await self._client.close()
             self._client = None
         await super().close()
 
     def get_model(self, model_id: str) -> ChatModel:
+        """按 model_id 复用或创建模型句柄。"""
         model = self._handles.get(model_id)
         if model is None:
             model = self.model_class(self.get_spec(model_id), self)
@@ -534,6 +552,7 @@ class OpenAIChatProvider(ChatProvider):
 
 class DeepSeekChatModel(OpenAIChatModel):
     def _apply_prefix(self, payload: dict[str, Any], request: ChatModelRequest) -> None:
+        """DeepSeek 以 prefix=true 开启续写模式。"""
         payload["prefix"] = True
 
 
@@ -544,6 +563,7 @@ class DeepSeekChatProvider(OpenAIChatProvider):
 
 class VLLMChatModel(OpenAIChatModel):
     def _apply_prefix(self, payload: dict[str, Any], request: ChatModelRequest) -> None:
+        """vLLM 通过 continue_final_message 续写最后一条 assistant 消息。"""
         payload["continue_final_message"] = True
         payload["add_generation_prompt"] = False
 
