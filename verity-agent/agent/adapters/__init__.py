@@ -1,9 +1,11 @@
 """Agent 端口适配器。"""
 
+from .facts import WeaviateFactStore
 from .hooks import DispatcherHookAdapter
 from .llm import ProviderChatAdapter, RoutingChatAdapter
 from .memory import PgMemoryProfileAdapter
 from .pg import PgLeaseAdapter, PgMemoryQueueAdapter, PgMessageAdapter
+from .rag import RetrieverRagAdapter
 from .tools import PipelineToolAdapter
 
 __all__ = [
@@ -14,5 +16,7 @@ __all__ = [
     "PgMemoryProfileAdapter",
     "PgMemoryQueueAdapter",
     "PgMessageAdapter",
+    "RetrieverRagAdapter",
     "PipelineToolAdapter",
+    "WeaviateFactStore",
 ]
