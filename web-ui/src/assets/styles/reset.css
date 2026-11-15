@@ -18,6 +18,7 @@ body {
   margin: 0;
   font-family: var(--app-font-family);
   font-size: var(--app-font-size-base);
+  line-height: var(--app-line-height-base);
   color: var(--app-text-primary);
   background-color: var(--app-bg-page);
   -webkit-font-smoothing: antialiased;

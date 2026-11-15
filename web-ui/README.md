@@ -1,48 +1,91 @@
 # web-ui
 
-This template should help get you started developing with Vue 3 in Vite.
+VerityAgent 前端：Vue 3 + TypeScript + Vite + Pinia + Vue Router + Element Plus。
 
-## Recommended IDE Setup
-
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
-
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Type Support for `.vue` Imports in TS
-
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
+## 开发
 
 ```sh
-npm install
+pnpm install
+pnpm dev
 ```
 
-### Compile and Hot-Reload for Development
+默认地址 `http://localhost:5173`，`/api` 代理到 `http://127.0.0.1:8000`。
+后端需先启动：
 
 ```sh
-npm run dev
+cd ../verity-agent
+uv run python -m api.server
 ```
 
-### Type-Check, Compile and Minify for Production
+## 环境变量
 
-```sh
-npm run build
+所有可变配置放在 `.env.development` / `.env.production`，不要在组件里写死。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `VITE_API_BASE_URL` | `/api/v1` | 后端 API 前缀（后端 `APP__API_PREFIX`） |
+| `VITE_PROXY_TARGET` | `http://127.0.0.1:8000` | 仅开发环境 Vite 代理目标 |
+| `VITE_APP_NAME` | `VerityAgent` | 品牌名/页面标题 |
+| `VITE_TOKEN_STORAGE_KEY` | `verity-agent-token` | JWT localStorage key |
+| `VITE_THEME_STORAGE_KEY` | `verity-agent-theme` | 主题 localStorage key |
+| `VITE_REQUEST_TIMEOUT_MS` | `15000` | axios 超时 |
+| `VITE_MESSAGE_PAGE_SIZE` | `50` | 消息分页大小 |
+| `VITE_MAX_MESSAGE_PAGES` | `20` | 消息翻页上限 |
+| `VITE_SSE_RECONNECT_DELAY_MS` | `1000` | SSE 重连间隔 |
+| `VITE_SSE_MAX_RECONNECT_ATTEMPTS` | `5` | SSE 最大重连次数 |
+| `VITE_SHOW_THINKING` | `true` | 是否展示思考过程 |
+| `VITE_CONVERSATION_TITLE_MAX_LENGTH` | `30` | 首条消息生成会话标题长度 |
+| `VITE_MAX_MESSAGE_CHARS` | `200000` | 单条消息最大字符数，对齐后端 `MessageConfig` |
+| `VITE_RUN_STORAGE_PREFIX` | `verity-agent-run:` | 会话当前 run_id 的 sessionStorage 前缀；刷新后可恢复 SSE |
+
+## 目录
+
+```text
+src/
+├── api/                 # DTO 与服务端接口（与 FastAPI 字段一致）
+│   └── modules/         # auth / conversations / runs
+├── assets/styles/       # 设计变量、reset、全局样式
+├── components/
+│   ├── chat/            # 会话侧栏、消息、Markdown、工具卡片、输入框
+│   └── common/          # 主题切换等通用组件
+├── composables/         # useTheme
+├── config/              # Vite env -> 运行期配置
+├── layouts/             # 应用壳
+├── router/              # 路由与登录守卫
+├── stores/              # user / conversations / chat
+├── utils/               # 请求、SSE、Markdown、格式化、幂等 id
+└── views/               # login / home(ChatView)
 ```
 
-### Lint with [ESLint](https://eslint.org/)
+## 后端对接
+
+| 前端行为 | 后端接口 |
+|---|---|
+| 登录 / 恢复用户态 | `POST /api/v1/auth/login`、`GET /api/v1/auth/me` |
+| 会话列表 / 新建 | `GET /api/v1/conversations`、`POST /api/v1/conversations` |
+| 消息历史 | `GET /api/v1/conversations/{id}/messages`（`after_seq` 翻页） |
+| 发送消息 | `POST /api/v1/conversations/{id}/messages`（`stream=true`） |
+| 订阅生成 | `GET /api/v1/runs/{run_id}/events`（Bearer + `Last-Event-ID`） |
+| 取消生成 | `POST /api/v1/runs/{run_id}/cancel` |
+
+SSE 使用 `fetch` + `ReadableStream`，因为原生 `EventSource` 不能携带
+`Authorization` 头。事件 `data` 是完整 `AgentEvent` 信封，前端从
+`event.data` 读取 `assistant.delta / tool.* / run.*` 等字段。
+发送消息后把 `run_id` 写入 `sessionStorage`，刷新页面/切回会话时通过
+`GET /runs/{run_id}` 判断是否仍在运行，再用 `Last-Event-ID` 重新 attach。
+
+## 设计约定
+
+- 组件样式只使用 `var(--app-*)`，颜色、间距、圆角、阴影全部在
+  `src/assets/styles/variables.css` 定义；深色模式使用 `[data-theme='dark']`。
+- API 返回字段使用后端 snake_case，不额外做 camelCase 转换。
+- 不消费内部模型（`AgentRun / ContextPlan / MemoryView`），只使用公共 DTO。
+- 当前后端没有文件上传、知识库管理、模型列表接口，前端不提供对应入口。
+
+## 构建 / 检查
 
 ```sh
-npm run lint
+pnpm type-check
+pnpm lint
+pnpm build
 ```

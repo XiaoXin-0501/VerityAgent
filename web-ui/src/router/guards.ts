@@ -1,13 +1,14 @@
 import type { Router } from 'vue-router'
 
+import { appConfig } from '@/config'
 import { useUserStore } from '@/stores/user'
 import { getToken } from '@/utils/auth'
 
-const APP_TITLE = 'VerityAgent'
-
 export function setupRouterGuards(router: Router): void {
   router.beforeEach(async (to) => {
-    document.title = to.meta.title ? `${to.meta.title} - ${APP_TITLE}` : APP_TITLE
+    document.title = to.meta.title
+      ? `${to.meta.title} - ${appConfig.appName}`
+      : appConfig.appName
 
     const token = getToken()
 

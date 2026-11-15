@@ -1,15 +1,13 @@
 import axios, { type AxiosError } from 'axios'
 
+import { appConfig } from '@/config'
 import { getToken, removeToken } from '@/utils/auth'
 
 import { ApiError, type RequestConfig } from './types'
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
-const TIMEOUT = 15_000
-
 const service = axios.create({
-  baseURL: BASE_URL,
-  timeout: TIMEOUT,
+  baseURL: appConfig.apiBaseUrl,
+  timeout: appConfig.requestTimeoutMs,
 })
 
 /** 统一附加 Bearer token。 */
@@ -84,7 +82,9 @@ service.interceptors.response.use(
     if (status === 401) {
       await redirectToLogin()
     }
-    ElMessage.error(message)
+    if (!(error.config as RequestConfig | undefined)?.silent) {
+      ElMessage.error(message)
+    }
 
     return Promise.reject(new ApiError(message, { status, code, data: payload }))
   },

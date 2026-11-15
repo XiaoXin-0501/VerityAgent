@@ -63,6 +63,14 @@ def _agent(request: Request):
     return agent
 
 
+def _dump_items(value: Any) -> list[Any]:
+    """把消息内的附件/产物模型列表投影成 JSON。"""
+    return [
+        item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        for item in (value or [])
+    ]
+
+
 def _decision_payload(message: Any) -> dict[str, Any]:
     """把领域消息投影为前端可读结构。"""
     role = getattr(message, "role", None)
@@ -91,6 +99,11 @@ def _decision_payload(message: Any) -> dict[str, Any]:
         "thinking": thinking,
         "tool_calls": tool_calls,
         "json": json_data,
+        "name": getattr(message, "name", None),
+        "tool_call_id": getattr(message, "tool_call_id", None),
+        "images": _dump_items(getattr(message, "images", None)),
+        "files": _dump_items(getattr(message, "files", None)),
+        "artifacts": _dump_items(getattr(message, "artifacts", None)),
         "created_at": (
             message.created_at.isoformat()
             if getattr(message, "created_at", None) is not None

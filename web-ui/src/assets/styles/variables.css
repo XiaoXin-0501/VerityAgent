@@ -4,66 +4,163 @@
  * ========================================================== */
 
 :root {
+  color-scheme: light;
+
   /* —— 品牌色 —— */
   --app-color-primary: #4f6ef7;
   --app-color-primary-hover: #6b84ff;
   --app-color-primary-active: #3d59d6;
-  --app-color-success: #22c55e;
-  --app-color-warning: #f59e0b;
-  --app-color-danger: #ef4444;
+  --app-color-primary-soft: rgba(79, 110, 247, 0.12);
+  --app-color-primary-contrast: #ffffff;
+  --app-color-success: #16a34a;
+  --app-color-success-soft: rgba(22, 163, 74, 0.12);
+  --app-color-warning: #d97706;
+  --app-color-warning-soft: rgba(217, 119, 6, 0.14);
+  --app-color-danger: #dc2626;
+  --app-color-danger-soft: rgba(220, 38, 38, 0.12);
+  --app-color-info: #2563eb;
+  --app-color-info-soft: rgba(37, 99, 235, 0.12);
 
   /* —— 文本 —— */
   --app-text-primary: #1f2937;
   --app-text-regular: #4b5563;
   --app-text-secondary: #6b7280;
+  --app-text-muted: #9ca3af;
   --app-text-placeholder: #9ca3af;
   --app-text-inverse: #ffffff;
+  --app-text-on-primary: #ffffff;
 
   /* —— 背景 —— */
   --app-bg-page: #f3f5fb;
   --app-bg-card: #ffffff;
+  --app-bg-elevated: #ffffff;
   --app-bg-muted: #f7f8fc;
+  --app-bg-subtle: #f1f3f9;
   --app-bg-hover: #eef1f9;
+  --app-bg-active: #e7ebfa;
+  --app-bg-sidebar: #f7f8fc;
+  --app-bg-chat: #f9fafc;
+  --app-bg-user-bubble: #4f6ef7;
+  --app-bg-assistant-bubble: #ffffff;
+  --app-bg-tool: #f7f8fc;
+  --app-bg-code: #111827;
+  --app-bg-overlay: rgba(15, 23, 42, 0.45);
 
   /* —— 边框 —— */
   --app-border-color: #e5e7eb;
   --app-border-color-light: #f0f2f5;
+  --app-border-color-strong: #d1d5db;
 
   /* —— 间距 —— */
+  --app-space-2xs: 2px;
   --app-space-xs: 4px;
   --app-space-sm: 8px;
   --app-space-md: 16px;
   --app-space-lg: 24px;
   --app-space-xl: 32px;
   --app-space-2xl: 40px;
+  --app-space-3xl: 56px;
 
   /* —— 圆角 —— */
+  --app-radius-xs: 4px;
   --app-radius-sm: 6px;
   --app-radius-md: 10px;
   --app-radius-lg: 16px;
+  --app-radius-xl: 22px;
+  --app-radius-pill: 999px;
 
   /* —— 阴影 —— */
   --app-shadow-card: 0 12px 32px rgba(31, 41, 55, 0.08);
-  --app-shadow-focus: 0 0 0 3px rgba(79, 110, 247, 0.15);
+  --app-shadow-float: 0 18px 48px rgba(31, 41, 55, 0.14);
+  --app-shadow-focus: 0 0 0 3px rgba(79, 110, 247, 0.18);
+  --app-shadow-bubble: 0 4px 18px rgba(31, 41, 55, 0.06);
 
   /* —— 字体 —— */
   --app-font-family:
     'Inter', 'Helvetica Neue', Helvetica, 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
+  --app-font-family-mono:
+    'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  --app-font-size-xs: 12px;
   --app-font-size-sm: 13px;
   --app-font-size-base: 14px;
   --app-font-size-lg: 16px;
   --app-font-size-xl: 20px;
   --app-font-size-2xl: 28px;
+  --app-line-height-base: 1.7;
+  --app-line-height-tight: 1.35;
 
   /* —— 布局尺寸 —— */
   --app-layout-header-height: 60px;
   --app-layout-max-width: 1200px;
   --app-login-card-width: 400px;
+  --app-sidebar-width: 288px;
+  --app-chat-max-width: 920px;
+  --app-composer-max-height: 220px;
+  --app-message-avatar-size: 34px;
+  --app-scrollbar-size: 8px;
+
+  /* —— 动效 —— */
+  --app-transition-fast: 140ms ease;
+  --app-transition-base: 220ms ease;
 
   /* —— 页面背景 —— */
   --app-login-background:
     radial-gradient(circle at 15% 20%, rgba(79, 110, 247, 0.18), transparent 45%),
     radial-gradient(circle at 85% 80%, rgba(34, 197, 94, 0.12), transparent 40%), var(--app-bg-page);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --app-color-primary: #7c92ff;
+  --app-color-primary-hover: #93a5ff;
+  --app-color-primary-active: #6279e6;
+  --app-color-primary-soft: rgba(124, 146, 255, 0.18);
+  --app-color-primary-contrast: #0b1020;
+  --app-color-success: #4ade80;
+  --app-color-success-soft: rgba(74, 222, 128, 0.16);
+  --app-color-warning: #fbbf24;
+  --app-color-warning-soft: rgba(251, 191, 36, 0.16);
+  --app-color-danger: #f87171;
+  --app-color-danger-soft: rgba(248, 113, 113, 0.16);
+  --app-color-info: #60a5fa;
+  --app-color-info-soft: rgba(96, 165, 250, 0.16);
+
+  --app-text-primary: #e5e7eb;
+  --app-text-regular: #cbd5e1;
+  --app-text-secondary: #94a3b8;
+  --app-text-muted: #64748b;
+  --app-text-placeholder: #64748b;
+  --app-text-inverse: #e5e7eb;
+  --app-text-on-primary: #ffffff;
+
+  --app-bg-page: #0b1020;
+  --app-bg-card: #111827;
+  --app-bg-elevated: #151d2e;
+  --app-bg-muted: #151d2e;
+  --app-bg-subtle: #1b2436;
+  --app-bg-hover: #1f2a3d;
+  --app-bg-active: #25314a;
+  --app-bg-sidebar: #0f1626;
+  --app-bg-chat: #0b1020;
+  --app-bg-user-bubble: #3d59d6;
+  --app-bg-assistant-bubble: #111827;
+  --app-bg-tool: #151d2e;
+  --app-bg-code: #05080f;
+  --app-bg-overlay: rgba(2, 6, 16, 0.65);
+
+  --app-border-color: #263247;
+  --app-border-color-light: #1d2739;
+  --app-border-color-strong: #334155;
+
+  --app-shadow-card: 0 12px 32px rgba(0, 0, 0, 0.32);
+  --app-shadow-float: 0 18px 48px rgba(0, 0, 0, 0.45);
+  --app-shadow-focus: 0 0 0 3px rgba(124, 146, 255, 0.24);
+  --app-shadow-bubble: 0 4px 18px rgba(0, 0, 0, 0.22);
+
+  --app-login-background:
+    radial-gradient(circle at 15% 20%, rgba(124, 146, 255, 0.16), transparent 45%),
+    radial-gradient(circle at 85% 80%, rgba(74, 222, 128, 0.1), transparent 40%), var(--app-bg-page);
 }
 
 /* 覆盖 Element Plus 主题变量。
@@ -75,6 +172,7 @@ html:root {
   --el-color-success: var(--app-color-success);
   --el-color-warning: var(--app-color-warning);
   --el-color-danger: var(--app-color-danger);
+  --el-color-info: var(--app-color-info);
   --el-font-family: var(--app-font-family);
   --el-border-radius-base: var(--app-radius-sm);
   --el-text-color-primary: var(--app-text-primary);
@@ -83,6 +181,13 @@ html:root {
   --el-text-color-placeholder: var(--app-text-placeholder);
   --el-border-color: var(--app-border-color);
   --el-border-color-light: var(--app-border-color-light);
+  --el-border-color-lighter: var(--app-border-color-light);
   --el-bg-color: var(--app-bg-card);
   --el-bg-color-page: var(--app-bg-page);
+  --el-bg-color-overlay: var(--app-bg-elevated);
+  --el-fill-color-blank: var(--app-bg-card);
+  --el-fill-color-light: var(--app-bg-muted);
+  --el-fill-color-lighter: var(--app-bg-subtle);
+  --el-fill-color: var(--app-bg-muted);
+  --el-mask-color: var(--app-bg-overlay);
 }

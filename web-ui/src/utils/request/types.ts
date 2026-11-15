@@ -24,4 +24,7 @@ export class ApiError extends Error {
   }
 }
 
-export type RequestConfig = AxiosRequestConfig
+export type RequestConfig = AxiosRequestConfig & {
+  /** 为 true 时不弹全局错误提示，由调用方自行处理。 */
+  silent?: boolean
+}
