@@ -21,7 +21,7 @@ from agent.message.models import (
     Thinking,
     ToolCall,
 )
-from common.enums import RAGMode
+from rag.shared.enums import RAGMode
 from utils.ids import new_request_id
 from utils.time import utcnow
 

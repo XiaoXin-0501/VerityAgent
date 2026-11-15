@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from common.enums import RAGMode
-
 __all__ = [
     "DocumentType",
     "SUPPORTED_DOC_TYPES",
@@ -31,6 +29,14 @@ __all__ = [
     "RetrievalErrorCode",
     "QueryIntent",
 ]
+
+
+class RAGMode(StrEnum):
+    """RAG 使用模式；与 Agent 公共请求和 RAG 检索契约保持一致。"""
+
+    TOOL = "tool"
+    INJECTED = "injected"
+    OFF = "off"
 
 
 class DocumentType(StrEnum):
