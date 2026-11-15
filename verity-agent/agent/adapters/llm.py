@@ -7,6 +7,7 @@ Agent framework 以 ``agent.llm.LLMRequest/LLMResponse`` 为边界；
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from agent.llm import (
@@ -16,6 +17,7 @@ from agent.llm import (
     LLMMessage,
     LLMRequest,
     LLMResponse,
+    LLMStreamEvent,
     LLMToolCall,
     LLMUsage,
     TextPart,
@@ -26,6 +28,14 @@ from exception.provider import ProviderError, ProviderErrorCode
 from provider.enums import ChatFinishReason, ModelRole
 from provider.llm.types import (
     ChatModelRequest,
+    ChatStreamEnd,
+    ChatStreamError,
+    ChatTextDelta,
+    ChatThinkingDelta,
+    ChatToolCallDelta,
+    ChatToolCallEnd,
+    ChatToolCallStart,
+    ChatUsageEvent,
     ModelFilePart,
     ModelGenerationOptions,
     ModelImagePart,
@@ -63,6 +73,76 @@ class ProviderChatAdapter:
             )
         response = await self.model.complete(self._request(request))
         return self._response(request, response)
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamEvent]:
+        """调用 provider 流式接口，并归一为 Agent 应用层事件。"""
+        if request.model_id and request.model_id != self.model_id:
+            raise ConfigurationError(
+                f"ProviderChatAdapter 绑定模型 {self.model_id}，"
+                f"但请求要求 {request.model_id}",
+                details={"model_id": request.model_id},
+            )
+        provider_request = self._request(request).model_copy(update={"stream": True})
+        try:
+            async for event in self.model.stream(provider_request):
+                if isinstance(event, ChatTextDelta):
+                    yield LLMStreamEvent(
+                        type="text_delta",
+                        text=event.text,
+                        index=event.index,
+                    )
+                elif isinstance(event, ChatThinkingDelta):
+                    yield LLMStreamEvent(
+                        type="thinking_delta",
+                        text=event.text,
+                        index=event.index,
+                    )
+                elif isinstance(event, ChatToolCallStart):
+                    yield LLMStreamEvent(
+                        type="tool_call_start",
+                        call_id=event.call_id,
+                        name=event.name,
+                        index=event.index,
+                    )
+                elif isinstance(event, ChatToolCallDelta):
+                    yield LLMStreamEvent(
+                        type="tool_call_delta",
+                        call_id=event.call_id,
+                        arguments_delta=event.arguments_delta,
+                        index=event.index,
+                    )
+                elif isinstance(event, ChatToolCallEnd):
+                    yield LLMStreamEvent(
+                        type="tool_call_end",
+                        call_id=event.call_id,
+                        arguments=dict(event.arguments or {}),
+                        raw_arguments=event.raw_arguments,
+                        index=event.index,
+                    )
+                elif isinstance(event, ChatUsageEvent):
+                    yield LLMStreamEvent(
+                        type="usage",
+                        usage=_usage(event.usage),
+                    )
+                elif isinstance(event, ChatStreamEnd):
+                    yield LLMStreamEvent(
+                        type="end",
+                        finish_reason=_finish_reason(event.finish_reason),
+                        usage=_usage(event.usage) if event.usage else None,
+                    )
+                elif isinstance(event, ChatStreamError):
+                    yield LLMStreamEvent(
+                        type="error",
+                        error_code=str(getattr(event.error, "code", "PROVIDER_ERROR")),
+                        error_message=str(event.error),
+                    )
+                    return
+        except Exception as exc:  # noqa: BLE001 - 流式端口异常收敛
+            yield LLMStreamEvent(
+                type="error",
+                error_code=type(exc).__name__,
+                error_message=str(exc),
+            )
 
     def _request(self, request: LLMRequest) -> ChatModelRequest:
         """LLMRequest -> provider ChatModelRequest。"""
@@ -174,6 +254,16 @@ class RoutingChatAdapter:
             adapter = self._resolve(model_id)
             self._adapters[model_id] = adapter
         return await adapter.chat(request)
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamEvent]:
+        """按请求模型 id 路由流式调用。"""
+        model_id = request.model_id or self.default_model_id
+        adapter = self._adapters.get(model_id)
+        if adapter is None:
+            adapter = self._resolve(model_id)
+            self._adapters[model_id] = adapter
+        async for event in adapter.stream(request):
+            yield event
 
     def _resolve(self, model_id: str) -> ProviderChatAdapter:
         """从 ProviderRegistry 解析 chat 模型句柄。"""

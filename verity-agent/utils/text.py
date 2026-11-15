@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .cjk import is_cjk_char
+
 __all__ = [
     "normalize_whitespace",
     "strip_control_chars",
@@ -83,20 +85,8 @@ _DEFAULT_ENCODINGS: tuple[str, ...] = (
     "latin-1",
 )
 
-# 判断语言时使用的 CJK 区间（与 token 估算的区间保持同一口径）。
-_CJK_RANGES = (
-    (0x3400, 0x4DBF),   # CJK Extension A
-    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
-    (0x3040, 0x30FF),   # Hiragana / Katakana
-    (0xAC00, 0xD7AF),   # Hangul Syllables
-    (0xF900, 0xFAFF),   # CJK Compatibility Ideographs
-)
-
-# 全角标点：拼接中文句子时不应在两侧再插空格。
-_FULLWIDTH_PUNCT = (
-    (0x3000, 0x303F),   # CJK Symbols and Punctuation
-    (0xFF00, 0xFFEF),   # Halfwidth and Fullwidth Forms
-)
+# 判断语言时使用的 CJK 区间由 utils.cjk 统一维护；全角标点也视为 CJK，
+# 用于中文拼接时不插空格。
 
 # 收尾标点：拼接时标点前不留空格。
 _CLOSING_PUNCT = set("。，、；：！？）】」』》〉”’,.;:!?)]}\"'")
@@ -107,10 +97,7 @@ _OPENING_PUNCT = set("（【「『《〈“‘([{\"'")
 
 def _is_cjk(char: str) -> bool:
     """判断字符是否属于 CJK 文字或全角标点。"""
-    code = ord(char)
-    return any(start <= code <= end for start, end in _CJK_RANGES) or any(
-        start <= code <= end for start, end in _FULLWIDTH_PUNCT
-    )
+    return is_cjk_char(char, include_fullwidth=True)
 
 
 def decode_text(
@@ -118,9 +105,11 @@ def decode_text(
     *,
     encodings: tuple[str, ...] = _DEFAULT_ENCODINGS,
 ) -> str:
-    """按候选编码依次解码字节；全部失败时用 UTF-8 + replace 兜底。
+    """按候选编码依次解码字节；latin-1 永不失败，作为最后兜底。
 
     parser 不应假设上传文件一定是 UTF-8；中文 TXT/Markdown 常见 GBK/GB18030。
+    因此 latin-1 的“兜底”优先保证不抛异常，可能产生 mojibake；需要严格
+    诊断时应由调用方显式指定 ``encodings``。
     """
     for encoding in encodings:
         try:
@@ -288,6 +277,7 @@ def table_to_markdown(
         return ""
 
     def normalize(row: list[str]) -> list[str]:
+        """把一行补齐/裁剪到统一列数。"""
         cells = [_cell_text(item) for item in row[:width]]
         return cells + [""] * (width - len(cells))
 

@@ -76,4 +76,5 @@ def new_turn_id() -> str:
 
 
 def new_idempotency_key() -> str:
+    """生成带 ``idem_`` 前缀的随机幂等键。"""
     return f"idem_{new_token(16)}"

@@ -2,7 +2,8 @@
 
 from .hooks import DispatcherHookAdapter
 from .llm import ProviderChatAdapter, RoutingChatAdapter
-from .pg import PgLeaseAdapter, PgMessageAdapter
+from .memory import PgMemoryProfileAdapter
+from .pg import PgLeaseAdapter, PgMemoryQueueAdapter, PgMessageAdapter
 from .tools import PipelineToolAdapter
 
 __all__ = [
@@ -10,6 +11,8 @@ __all__ = [
     "ProviderChatAdapter",
     "RoutingChatAdapter",
     "PgLeaseAdapter",
+    "PgMemoryProfileAdapter",
+    "PgMemoryQueueAdapter",
     "PgMessageAdapter",
     "PipelineToolAdapter",
 ]

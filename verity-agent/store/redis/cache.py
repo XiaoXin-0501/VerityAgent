@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Awaitable, Callable
 from uuid import UUID
@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from exception import RedisError, ValidationError
 from utils.serialization import json_dumps, json_loads
+from utils.time import utcnow
 
 from .connection import RedisConnectionManager, get_redis
 from .keys import RedisKeyPrefix, make_key
@@ -42,6 +43,9 @@ class CacheScope(StrEnum):
     CHUNK_DESCRIPTION = "rag:chunk_description"
     RERANK = "rag:rerank"
     GRAPH_NEXT_HOP = "graph"
+    # query 改写 / 意图分类的 LLM 结果；key 带 query 摘要 + 模型 + Prompt 版本
+    QUERY_REWRITE = "rag:query_rewrite"
+    QUERY_INTENT = "rag:query_intent"
     MEMORY_PROFILE = "memory:profile"
     MEMORY_SUMMARY = "memory:summary"
     MEMORY_FACTS = "memory:facts"
@@ -61,6 +65,8 @@ DEFAULT_TTLS: dict[CacheScope, int] = {
     CacheScope.CHUNK_DESCRIPTION: 2_592_000,
     CacheScope.RERANK: 3_600,
     CacheScope.GRAPH_NEXT_HOP: 3_600,
+    CacheScope.QUERY_REWRITE: 86_400,
+    CacheScope.QUERY_INTENT: 86_400,
     CacheScope.MEMORY_PROFILE: 600,
     CacheScope.MEMORY_SUMMARY: 600,
     CacheScope.MEMORY_FACTS: 300,
@@ -271,7 +277,7 @@ class RedisCache:
             {
                 "value": value,
                 "value_type": type(value).__name__,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": utcnow().isoformat(),
                 "version": version,
                 "size_bytes": len(json_dumps(value).encode("utf-8")),
             }

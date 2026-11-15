@@ -13,9 +13,13 @@ from config import settings
 from config.agent import AgentConfig
 
 from .adapters.llm import RoutingChatAdapter
-from .adapters.pg import PgLeaseAdapter, PgMessageAdapter
+from .adapters.memory import PgMemoryProfileAdapter
+from .adapters.pg import PgLeaseAdapter, PgMemoryQueueAdapter, PgMessageAdapter
 from .adapters.tools import PipelineToolAdapter
+from .context import ContextAssembler
 from .facade import Agent, create_agent
+from .llm_service import ChatService
+from .runtime.background import BackgroundTaskRunner
 from .runtime.ports import AgentDependencies
 from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 
@@ -32,6 +36,10 @@ def build_default_agent_dependencies(
     system_prompt: str | None = None,
     history_limit: int = 40,
     hooks: Any | None = None,
+    memory_queue: Any | None = None,
+    background_tasks: Any | None = None,
+    memory: Any | None = None,
+    context: Any | None = None,
 ) -> AgentDependencies:
     """用当前 Settings/ProviderRegistry 构造 Agent 依赖。
 
@@ -61,10 +69,22 @@ def build_default_agent_dependencies(
 
     registry = tool_registry or build_tool_registry()
     pipeline = tool_pipeline or build_tool_pipeline(registry, settings.tools)
+    capabilities = getattr(spec, "capabilities", None)
+    max_context_tokens = int(
+        getattr(capabilities, "max_context_tokens", 8192) or 8192
+    )
+    assembler = context or ContextAssembler(
+        max_context_tokens=max_context_tokens,
+        reserved_output_tokens=min(2048, max(128, max_context_tokens // 4)),
+    )
     return AgentDependencies(
-        llm=RoutingChatAdapter(
-            provider_registry,
-            default_model_id=target_model_id,
+        llm=ChatService(
+            RoutingChatAdapter(
+                provider_registry,
+                default_model_id=target_model_id,
+            ),
+            fallback_model_ids=settings.llm.fallback_model_ids,
+            enable_fallback=settings.llm.enable_model_fallback,
         ),
         model_id=target_model_id,
         messages=PgMessageAdapter(),
@@ -74,6 +94,10 @@ def build_default_agent_dependencies(
         system_prompt=system_prompt,
         history_limit=history_limit,
         hooks=hooks,
+        memory_queue=memory_queue or PgMemoryQueueAdapter(),
+        memory=memory if memory is not None else PgMemoryProfileAdapter(),
+        context=assembler,
+        background_tasks=background_tasks or BackgroundTaskRunner(),
     )
 
 

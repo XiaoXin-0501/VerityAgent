@@ -12,20 +12,14 @@ v1 不引入 tiktoken / 厂商 tokenizer 依赖，先用保守的字符启发式
 
 from __future__ import annotations
 
-__all__ = ["estimate_tokens", "fits_budget", "truncate_to_tokens", "split_by_tokens"]
+from .cjk import is_cjk_char
 
-_CJK_RANGES = (
-    (0x4E00, 0x9FFF),    # CJK Unified Ideographs
-    (0x3400, 0x4DBF),    # CJK Extension A
-    (0x3040, 0x30FF),    # Hiragana / Katakana
-    (0xAC00, 0xD7AF),    # Hangul Syllables
-    (0xF900, 0xFAFF),    # CJK Compatibility Ideographs
-)
+__all__ = ["estimate_tokens", "fits_budget", "truncate_to_tokens", "split_by_tokens"]
 
 
 def _is_cjk(char: str) -> bool:
-    code = ord(char)
-    return any(start <= code <= end for start, end in _CJK_RANGES)
+    """判断单个字符是否属于 CJK 文字（不包含全角标点）。"""
+    return is_cjk_char(char)
 
 
 def estimate_tokens(text: str) -> int:
@@ -38,6 +32,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def fits_budget(text: str, max_tokens: int) -> bool:
+    """判断文本估算 token 是否不超过预算。"""
     if max_tokens < 0:
         raise ValueError("max_tokens 不能为负数")
     return estimate_tokens(text) <= max_tokens

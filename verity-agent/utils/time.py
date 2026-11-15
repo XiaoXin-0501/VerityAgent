@@ -61,6 +61,7 @@ def parse_datetime(value: str) -> datetime:
 
 
 def today_utc() -> date:
+    """返回当前 UTC 日期。"""
     return utcnow().date()
 
 

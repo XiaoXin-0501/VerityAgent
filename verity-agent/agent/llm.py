@@ -51,6 +51,7 @@ __all__ = [
     "LLMRequestContext",
     "LLMRequest",
     "LLMResponse",
+    "LLMStreamEvent",
     "LLMStreamPhase",
 ]
 
@@ -289,3 +290,31 @@ class LLMResponse(_Model):
     partial: bool = False
     phase: LLMStreamPhase | None = None
     warnings: list[str] = Field(default_factory=list)
+
+
+class LLMStreamEvent(_Model):
+    """应用层统一流式事件；provider wire 事件在这里收敛。"""
+
+    # text_delta / thinking_delta / tool_call_start / tool_call_delta /
+    # tool_call_end / usage / end / error
+    type: Literal[
+        "text_delta",
+        "thinking_delta",
+        "tool_call_start",
+        "tool_call_delta",
+        "tool_call_end",
+        "usage",
+        "end",
+        "error",
+    ]
+    text: str = ""
+    call_id: str | None = None
+    name: str | None = None
+    arguments_delta: str | None = None
+    arguments: dict[str, Any] | None = None
+    raw_arguments: str | None = None
+    index: int = 0
+    finish_reason: FinishReason | None = None
+    usage: LLMUsage | None = None
+    error_code: str | None = None
+    error_message: str | None = None

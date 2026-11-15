@@ -218,6 +218,8 @@ class Settings(EnvSettings):
             refs.append(self.rag.retriever.rerank_model_id)
         if self.rag.retriever.query_rewrite_model_id:
             refs.append(self.rag.retriever.query_rewrite_model_id)
+        if self.rag.retriever.intent_model_id:
+            refs.append(self.rag.retriever.intent_model_id)
         unknown = sorted({item for item in refs if item not in seen})
         if unknown:
             raise ValueError(f"配置引用了未声明的模型 id: {unknown}")

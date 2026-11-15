@@ -57,6 +57,7 @@ def to_jsonable(value: Any) -> Any:
 
 
 def json_dumps(value: Any, *, sort_keys: bool = False) -> str:
+    """序列化为 UTF-8 紧凑 JSON；默认保留非 ASCII 字符。"""
     return json.dumps(
         to_jsonable(value),
         ensure_ascii=False,
@@ -66,6 +67,7 @@ def json_dumps(value: Any, *, sort_keys: bool = False) -> str:
 
 
 def json_loads(value: str | bytes | bytearray) -> Any:
+    """解析 JSON 文本/字节；异常直接抛给调用方。"""
     return json.loads(value)
 
 

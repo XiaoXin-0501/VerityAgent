@@ -19,6 +19,7 @@ _START_EVENTS = {
     HookEvent.TURN_START: "turn",
     HookEvent.LLM_REQUEST_START: "llm.request",
     HookEvent.TOOL_EXECUTION_START: "tool.execute",
+    HookEvent.TOOL_CALL_START: "tool.execute",
     HookEvent.RAG_RETRIEVAL_START: "rag.retrieve",
     HookEvent.SUMMARY_COMPRESS_START: "memory.compress",
     HookEvent.FILE_UPLOADED: "file.parse",
@@ -31,6 +32,7 @@ _END_EVENTS = {
     HookEvent.LLM_REQUEST_END: "llm.request",
     HookEvent.LLM_ERROR: "llm.request",
     HookEvent.TOOL_EXECUTION_END: "tool.execute",
+    HookEvent.TOOL_RESULT: "tool.execute",
     HookEvent.TOOL_ERROR: "tool.execute",
     HookEvent.RAG_RETRIEVAL_END: "rag.retrieve",
     HookEvent.SUMMARY_COMPRESS_END: "memory.compress",
@@ -73,7 +75,16 @@ class TracingHook:
         span = self._spans.pop(key, None)
         if span is None:
             return
-        failed = context.event in (HookEvent.RUN_ERROR, HookEvent.TURN_ERROR)
+        failed = context.event in (
+            HookEvent.RUN_ERROR,
+            HookEvent.TURN_ERROR,
+            HookEvent.LLM_ERROR,
+            HookEvent.TOOL_ERROR,
+        )
+        if context.event is HookEvent.TOOL_RESULT:
+            failed = failed or str(
+                getattr(context.payload, "status", "")
+            ).upper() in {"FAILED", "CANCELLED"}
         span = span.model_copy(
             update={
                 "ended_at": context.timestamp,

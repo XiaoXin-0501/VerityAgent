@@ -18,7 +18,8 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from time import perf_counter
+from typing import TYPE_CHECKING, Coroutine
 from uuid import UUID
 
 from agent.llm import (
@@ -30,6 +31,7 @@ from agent.llm import (
     LLMRequest,
     LLMRequestContext,
     LLMResponse,
+    LLMStreamPhase,
     LLMToolCall,
     LLMToolDescriptor,
     LLMUsage,
@@ -38,7 +40,9 @@ from agent.llm import (
     ThinkingPart,
     ToolChoice as LLMToolChoice,
 )
+from agent.context.models import ContextSection
 from agent.message.enum import MessageStatus
+from agent.message.codec import encode_content
 from agent.message.models import (
     AssistantMessage,
     RawMessage,
@@ -195,6 +199,20 @@ class AgentLoop:
                 client_message_id=request.client_message_id,
             )
             message_ids.append(user_stored.message.id)
+            await self._emit_hook(
+                "message.appended",
+                {
+                    "message_id": str(user_stored.message.id),
+                    "role": "user",
+                    "status": "completed",
+                    "content_bytes": len(user_stored.message.content.encode("utf-8")),
+                    "image_count": len(request.images),
+                    "file_count": len(request.files),
+                },
+                request=request,
+                run_id=run_id,
+                turn_id=turn_id,
+            )
 
             history: list[StoredMessage] = await self.deps.messages.load_window(
                 conversation_id,
@@ -213,7 +231,13 @@ class AgentLoop:
             tools = self._tool_descriptors(tool_selection)
             tool_rounds = 0
             llm_calls = 0
-            llm_messages = await self._llm_messages(history, request)
+            llm_messages = await self._assemble_context(
+                history,
+                request,
+                tools,
+                run_id=run_id,
+                turn_id=turn_id,
+            )
 
             while True:
                 self._check_runtime(limits, cancel_event, lease_lost)
@@ -242,16 +266,60 @@ class AgentLoop:
                     tools=tools,
                     deadline=limits.deadline,
                 )
+                use_stream = bool(getattr(request, "stream", False)) and hasattr(
+                    self.deps.llm, "stream"
+                )
+                if use_stream:
+                    llm_request = llm_request.model_copy(update={"stream": True})
+                await self._emit_hook(
+                    "llm.request.start",
+                    {
+                        "provider": self.deps.model_id,
+                        "model": llm_request.model_id,
+                        "purpose": llm_request.context.purpose.value,
+                        "message_count": len(llm_request.messages),
+                        "tool_count": len(llm_request.tools),
+                        "stream": use_stream,
+                    },
+                    request=request,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    call_id=llm_request.request_id,
+                )
                 remaining = max(
                     0.01,
                     (limits.deadline - utcnow()).total_seconds(),
                 )
                 try:
-                    response = await asyncio.wait_for(
-                        self.deps.llm.chat(llm_request),
-                        timeout=remaining,
-                    )
+                    if use_stream:
+                        response = await self._stream_response(
+                            llm_request,
+                            request=request,
+                            run_id=run_id,
+                            turn_id=turn_id,
+                            assistant_id=assistant_id,
+                            publisher=publisher,
+                            deadline=limits.deadline,
+                            cancel_event=cancel_event,
+                        )
+                    else:
+                        response = await asyncio.wait_for(
+                            self.deps.llm.chat(llm_request),
+                            timeout=remaining,
+                        )
                 except asyncio.TimeoutError as exc:
+                    await self._emit_hook(
+                        "llm.error",
+                        {
+                            "error_code": AgentErrorCode.TIMEOUT.value,
+                            "retryable": True,
+                            "model": llm_request.model_id,
+                        },
+                        request=request,
+                        run_id=run_id,
+                        turn_id=turn_id,
+                        call_id=llm_request.request_id,
+                    )
                     raise AgentRuntimeError(
                         agent_error(
                             AgentErrorCode.TIMEOUT,
@@ -261,6 +329,18 @@ class AgentLoop:
                         )
                     ) from exc
                 except ConfigurationError as exc:
+                    await self._emit_hook(
+                        "llm.error",
+                        {
+                            "error_code": AgentErrorCode.INVALID_CONFIG.value,
+                            "retryable": False,
+                            "model": llm_request.model_id,
+                        },
+                        request=request,
+                        run_id=run_id,
+                        turn_id=turn_id,
+                        call_id=llm_request.request_id,
+                    )
                     raise AgentRuntimeError(
                         agent_error(
                             AgentErrorCode.INVALID_CONFIG,
@@ -272,6 +352,19 @@ class AgentLoop:
                 except AgentRuntimeError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - 端口异常收敛
+                    await self._emit_hook(
+                        "llm.error",
+                        {
+                            "error_code": AgentErrorCode.MODEL_UNAVAILABLE.value,
+                            "retryable": True,
+                            "model": llm_request.model_id,
+                            "cause": str(exc),
+                        },
+                        request=request,
+                        run_id=run_id,
+                        turn_id=turn_id,
+                        call_id=llm_request.request_id,
+                    )
                     raise AgentRuntimeError(
                         agent_error(
                             AgentErrorCode.MODEL_UNAVAILABLE,
@@ -289,6 +382,21 @@ class AgentLoop:
                 )
                 assistant_stored = await self.deps.messages.append_assistant(assistant)
                 message_ids.append(assistant_stored.message.id)
+                await self._emit_hook(
+                    "message.appended",
+                    {
+                        "message_id": str(assistant.id),
+                        "role": "assistant",
+                        "status": assistant.status.value,
+                        "content_bytes": len(assistant.content.encode("utf-8")),
+                        "thinking_count": len(assistant.thinking),
+                        "tool_call_count": len(assistant.tool_calls),
+                    },
+                    request=request,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    call_id=assistant.id.hex,
+                )
                 # 工具轮的下一次 LLM 请求必须包含 assistant(tool_calls)；否则
                 # tool 结果前面缺少调用来源，OpenAI/Anthropic 协议不成立。
                 assistant_llm = _to_llm_message(assistant)
@@ -329,6 +437,21 @@ class AgentLoop:
                         "finish_reason": response.finish_reason.value,
                         "call_id": response.request_id,
                         "latency_ms": response.latency_ms,
+                    },
+                    request=request,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    call_id=response.request_id,
+                    duration_ms=response.latency_ms,
+                )
+                await self._emit_hook(
+                    "llm.request.end",
+                    {
+                        "provider": response.provider,
+                        "model": response.model,
+                        "purpose": llm_request.context.purpose.value,
+                        "finish_reason": response.finish_reason.value,
+                        "usage": response.usage.model_dump(mode="json"),
                     },
                     request=request,
                     run_id=run_id,
@@ -384,14 +507,43 @@ class AgentLoop:
                         conversation_id=conversation_id,
                         deadline=limits.deadline,
                         publisher=publisher,
+                        cancel_event=cancel_event,
                     )
                     for tool_message in tool_messages:
                         stored = await self.deps.messages.append_tool(tool_message)
                         message_ids.append(stored.message.id)
                         llm_messages.append(_to_llm_message(stored.message))
+                        await self._emit_hook(
+                            "message.appended",
+                            {
+                                "message_id": str(stored.message.id),
+                                "role": "tool",
+                                "status": stored.message.status.value,
+                                "content_bytes": len(stored.message.content.encode("utf-8")),
+                                "tool_call_id": stored.message.tool_call_id,
+                            },
+                            request=request,
+                            run_id=run_id,
+                            turn_id=turn_id,
+                            call_id=stored.message.tool_call_id,
+                        )
                     if tool_selection is not None and self.deps.tools is not None:
-                        # router 激活等选择变化由后续 ContextPhase 处理；
-                        # framework 阶段保持同一 selection，避免静默复用旧 Plan。
+                        # router 工具调用后展开组内工具；非 router 调用是 no-op。
+                        activate = getattr(self.deps.tools, "activate_group", None)
+                        if callable(activate):
+                            for call in assistant.tool_calls:
+                                try:
+                                    tool_selection = activate(
+                                        tool_selection,
+                                        call.name,
+                                        request.permissions,
+                                    )
+                                except Exception:  # noqa: BLE001 - 路由失败不阻断回合
+                                    logger.warning(
+                                        "工具路由激活失败: %s",
+                                        call.name,
+                                        exc_info=True,
+                                    )
                         tools = self._tool_descriptors(tool_selection)
                     continue
 
@@ -423,6 +575,16 @@ class AgentLoop:
                 warnings=[_public_warning(item) for item in warnings],
                 duration_ms=duration,
             )
+            if self.deps.memory_queue is not None:
+                self._schedule_background(
+                    "memory.enqueue_ready",
+                    self._enqueue_then_mark_ready(
+                        request=request,
+                        user_message=user_stored.message,
+                        conversation_id=conversation_id,
+                    ),
+                    run_id=run_id,
+                )
             await emit_turn_terminal(
                 TurnStatus.COMPLETED,
                 assistant_message_id=(
@@ -628,6 +790,41 @@ class AgentLoop:
                 cancel_event.set()
                 return
 
+    def _schedule_background(
+        self,
+        name: str,
+        coro: Coroutine,
+        *,
+        run_id: str,
+    ) -> None:
+        """投递后台任务；runner 缺失/已关闭时只记录，不影响主回合。"""
+        runner = self.deps.background_tasks
+        if runner is None:
+            coro.close()
+            return
+        try:
+            runner.submit(name, coro, run_id=run_id)
+        except Exception:  # noqa: BLE001 - 后台调度失败不能阻断回复
+            logger.warning("后台任务投递失败: %s", name, exc_info=True)
+            coro.close()
+
+    async def _enqueue_then_mark_ready(
+        self,
+        *,
+        request: AgentRequest,
+        user_message,
+        conversation_id: UUID,
+    ) -> None:
+        """后台串行执行“入队 -> ready”，避免 mark_ready 早于入队完成。"""
+        assert self.deps.memory_queue is not None
+        await self.deps.memory_queue.enqueue_user_message(
+            user_id=request.user_id,
+            conversation_id=conversation_id,
+            message_id=user_message.id,
+            content=encode_content(user_message),
+        )
+        await self.deps.memory_queue.mark_ready(conversation_id)
+
     async def _emit_hook(
         self,
         event: str,
@@ -722,14 +919,110 @@ class AgentLoop:
             stream=False,
         )
 
+    async def _assemble_context(
+        self,
+        history: Sequence[StoredMessage],
+        request: AgentRequest,
+        tools: list[LLMToolDescriptor],
+        *,
+        run_id: str,
+        turn_id: str,
+    ) -> list[LLMMessage]:
+        """加载 memory/预算并组装 Prompt；未注入 assembler 时走旧窗口逻辑。"""
+        if self.deps.context is None:
+            return await self._llm_messages(history, request)
+        base_messages = await self._llm_messages(
+            history,
+            request,
+            include_system=False,
+        )
+        memory_text: str | None = None
+        memory_budget = max(
+            256,
+            int(getattr(self.deps.context, "max_context_tokens", 8192)) // 4,
+        )
+        if self.deps.memory is not None:
+            try:
+                memory_text = await self.deps.memory.load_profile(
+                    request.user_id,
+                    token_budget=memory_budget,
+                )
+            except Exception:  # noqa: BLE001 - 画像读取失败不阻断对话
+                logger.warning("加载用户画像失败", exc_info=True)
+        sections: list[ContextSection] = []
+        if memory_text:
+            sections.append(
+                ContextSection(
+                    source="memory",
+                    name="long_term_profile",
+                    content=memory_text,
+                    priority=80,
+                    token_estimate=0,
+                )
+            )
+        session_text: str | None = None
+        if self.deps.memory is not None:
+            try:
+                session_text = await self.deps.memory.load_session_summary(
+                    request.conversation_id,
+                    token_budget=memory_budget,
+                )
+            except Exception:  # noqa: BLE001 - 摘要读取失败不阻断对话
+                logger.warning("加载会话摘要失败", exc_info=True)
+        if session_text:
+            sections.append(
+                ContextSection(
+                    source="summary",
+                    name="session_summary",
+                    content=session_text,
+                    priority=70,
+                    token_estimate=0,
+                )
+            )
+        await self._emit_hook(
+            "context.assemble.start",
+            {
+                "history_count": len(base_messages),
+                "section_count": len(sections),
+                "tool_count": len(tools),
+            },
+            request=request,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        plan = self.deps.context.assemble(
+            system_prompt=self.deps.system_prompt,
+            sections=sections,
+            messages=base_messages,
+            tool_tokens=sum(
+                len(item.name) + len(item.description) for item in tools
+            )
+            // 4,
+        )
+        await self._emit_hook(
+            "context.assemble.end",
+            {
+                "token_estimate": plan.token_estimate,
+                "sections": [item.name for item in plan.sections],
+                "dropped": plan.dropped_sections,
+                "truncated": plan.truncated,
+            },
+            request=request,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        return plan.messages
+
     async def _llm_messages(
         self,
         history: Sequence[StoredMessage],
         request: AgentRequest,
+        *,
+        include_system: bool = True,
     ) -> list[LLMMessage]:
         """把持久化消息投影为 LLM wire 消息；RawMessage 跳过。"""
         messages: list[LLMMessage] = []
-        if self.deps.system_prompt:
+        if include_system and self.deps.system_prompt:
             messages.append(
                 LLMMessage(
                     role="system",
@@ -823,6 +1116,151 @@ class AgentLoop:
             for item in selection.descriptors
         ]
 
+    async def _stream_response(
+        self,
+        llm_request: LLMRequest,
+        *,
+        request: AgentRequest,
+        run_id: str,
+        turn_id: str,
+        assistant_id: UUID,
+        publisher: AgentEventPublisher,
+        deadline,
+        cancel_event: asyncio.Event,
+    ) -> LLMResponse:
+        """消费应用层流式事件，转发 delta 并拼装完整 LLMResponse。"""
+        started = perf_counter()
+        first_token_ms: int | None = None
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls: dict[int, dict[str, Any]] = {}
+        usage = LLMUsage()
+        finish_reason = FinishReason.STOP
+        iterator = self.deps.llm.stream(llm_request).__aiter__()
+        while True:
+            remaining = max(0.01, (deadline - utcnow()).total_seconds())
+            try:
+                event = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as exc:
+                raise AgentRuntimeError(
+                    agent_error(
+                        AgentErrorCode.TIMEOUT,
+                        "流式调用超过回合 deadline",
+                        retryable=True,
+                    )
+                ) from exc
+            if cancel_event.is_set():
+                raise AgentRuntimeError(
+                    agent_error(AgentErrorCode.CANCELLED, "运行已取消")
+                )
+            if utcnow() >= deadline:
+                raise AgentRuntimeError(
+                    agent_error(AgentErrorCode.TIMEOUT, "流式调用超时", retryable=True)
+                )
+            if event.type in {"text_delta", "thinking_delta"}:
+                if first_token_ms is None:
+                    first_token_ms = int((perf_counter() - started) * 1000)
+                if event.type == "text_delta":
+                    text_parts.append(event.text)
+                else:
+                    thinking_parts.append(event.text)
+                await publisher.emit(
+                    AgentEventType.ASSISTANT_DELTA,
+                    {
+                        "channel": "thinking"
+                        if event.type == "thinking_delta"
+                        else "text",
+                        "text": event.text,
+                        "index": event.index,
+                    },
+                    message_id=assistant_id,
+                )
+            elif event.type == "tool_call_start":
+                tool_calls[event.index] = {
+                    "call_id": event.call_id or f"call_{event.index}",
+                    "name": event.name or "",
+                    "arguments": {},
+                    "raw_arguments": None,
+                }
+            elif event.type == "tool_call_delta":
+                item = tool_calls.setdefault(
+                    event.index,
+                    {
+                        "call_id": event.call_id or f"call_{event.index}",
+                        "name": event.name or "",
+                        "arguments": {},
+                        "raw_arguments": None,
+                    },
+                )
+                item["raw_arguments"] = (
+                    (item["raw_arguments"] or "") + (event.arguments_delta or "")
+                )
+            elif event.type == "tool_call_end":
+                item = tool_calls.setdefault(
+                    event.index,
+                    {
+                        "call_id": event.call_id or f"call_{event.index}",
+                        "name": event.name or "",
+                        "arguments": {},
+                        "raw_arguments": None,
+                    },
+                )
+                item["arguments"] = dict(event.arguments or {})
+                item["raw_arguments"] = event.raw_arguments or item["raw_arguments"]
+            elif event.type == "usage" and event.usage is not None:
+                usage = event.usage
+            elif event.type == "end":
+                finish_reason = event.finish_reason or finish_reason
+                if event.usage is not None:
+                    usage = event.usage
+            elif event.type == "error":
+                raise AgentRuntimeError(
+                    agent_error(
+                        AgentErrorCode.MODEL_UNAVAILABLE,
+                        "模型流式调用失败",
+                        retryable=True,
+                        details={
+                            "model_id": llm_request.model_id,
+                            "error_code": event.error_code,
+                        },
+                        cause=event.error_message,
+                    )
+                )
+
+        content_parts: list = []
+        if text_parts:
+            content_parts.append(TextPart(text="".join(text_parts)))
+        if thinking_parts:
+            content_parts.append(ThinkingPart(text="".join(thinking_parts)))
+        calls = [
+            LLMToolCall(
+                call_id=item["call_id"],
+                name=item["name"],
+                arguments=item["arguments"],
+                raw_arguments=item["raw_arguments"],
+                index=index,
+            )
+            for index, item in sorted(tool_calls.items())
+        ]
+        latency_ms = int((perf_counter() - started) * 1000)
+        return LLMResponse(
+            request_id=llm_request.request_id,
+            provider=self.deps.model_id,
+            model=llm_request.model_id,
+            message=LLMMessage(
+                role="assistant",
+                content=content_parts,
+                tool_calls=calls,
+            ),
+            finish_reason=finish_reason,
+            usage=usage,
+            latency_ms=latency_ms,
+            first_token_ms=first_token_ms,
+            phase=LLMStreamPhase.COMPLETED,
+        )
+
     def _assistant_message(
         self,
         response: LLMResponse,
@@ -891,6 +1329,7 @@ class AgentLoop:
         conversation_id: UUID,
         deadline,
         publisher: AgentEventPublisher,
+        cancel_event: asyncio.Event,
     ) -> list[ToolMessage]:
         """执行一轮工具并转换成 ToolMessage；失败也返回占位消息。"""
         if self.deps.tools is None:
@@ -928,6 +1367,7 @@ class AgentLoop:
             tool_name="",
             trace_id=request.request_id,
             deadline=deadline,
+            cancel_token=cancel_event,
             services=self.deps.services,
         )
         try:

@@ -29,6 +29,7 @@ from agent.runtime.errors import AgentRuntimeError, agent_error
 from agent.runtime.events import AgentEventBuffer, AgentEventPublisher
 from agent.runtime.loop import AgentLoop
 from agent.runtime.ports import AgentDependencies
+from agent.runtime.background import BackgroundTaskRunner
 from config.agent import AgentConfig
 from utils.ids import new_run_id, new_turn_id
 from utils.time import utcnow
@@ -67,6 +68,13 @@ class Agent:
         self._loop = AgentLoop(config, dependencies)
         self._runs: dict[str, _ActiveRun] = {}
         self._cancel_tasks: set[asyncio.Task] = set()
+        self.background_tasks = (
+            dependencies.background_tasks
+            if dependencies.background_tasks is not None
+            else BackgroundTaskRunner()
+        )
+        # runtime 端口与 facade 必须使用同一个 runner，避免 close 漏掉任务。
+        dependencies.background_tasks = self.background_tasks
         self._closed = False
 
     async def run(self, request: AgentRequest) -> AgentResult:
@@ -153,6 +161,7 @@ class Agent:
             return
         active.cancel_reason = reason
         active.cancel_event.set()
+        await self.background_tasks.cancel_run(run_id)
         # 先给主循环一个收尾窗口；超过 cancel_grace_s 仍不结束则强制取消 task。
         if active.task is not None and not active.task.done():
             task = asyncio.create_task(
@@ -227,6 +236,7 @@ class Agent:
                 await asyncio.gather(*pending, return_exceptions=True)
         if self._cancel_tasks:
             await asyncio.gather(*list(self._cancel_tasks), return_exceptions=True)
+        await self.background_tasks.close(self.config.cancel_grace_s)
 
     # ——————————————————— 内部 ———————————————————
 

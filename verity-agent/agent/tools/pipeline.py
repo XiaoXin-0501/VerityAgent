@@ -95,6 +95,17 @@ class ToolPipeline:
         """执行一次工具调用；任何失败都转成 ToolResult。"""
         started = perf_counter()
         started_at = utcnow()
+        if self._cancel_requested(context):
+            return self._result(
+                ToolResult.cancelled(
+                    call_id=call.call_id,
+                    tool_name=call.name,
+                    started_at=started_at,
+                    ended_at=utcnow(),
+                ),
+                started,
+                attempts=0,
+            )
         try:
             return await self._execute(call, context, started, started_at)
         except asyncio.CancelledError:
@@ -866,6 +877,15 @@ class ToolPipeline:
 
     # ——————————————————— 小工具 ———————————————————
 
+    @staticmethod
+    def _cancel_requested(context: ToolContext) -> bool:
+        """检查运行期取消信号；不同实现只需提供 is_set()。"""
+        token = context.cancel_token
+        if token is None:
+            return False
+        checker = getattr(token, "is_set", None)
+        return bool(callable(checker) and checker())
+
     def _write_allowed(self, tool: RegisteredTool) -> tuple[bool, str | None]:
         spec = tool.spec
         if spec.side_effect is ToolSideEffect.READ:
@@ -906,8 +926,12 @@ class ToolPipeline:
             exclude_fields=policy.exclude_fields,
         )
         payload: dict[str, Any] = {"arguments": stable}
-        if tool.spec.resource_permission_template:
-            # 资源级工具的结果与权限相关，key 必须带权限摘要，避免跨用户泄露
+        if (
+            tool.spec.resource_permission_template
+            or tool.spec.metadata.get("cache_permission_scoped")
+        ):
+            # 结果与权限相关（如 RAG 检索按 KB 权限过滤）时，key 必须带权限摘要，
+            # 避免跨用户/跨权限命中旧结果。
             payload["permissions"] = sorted(context.permissions)
         return make_key(
             RedisKeyPrefix.TOOL_CACHE,

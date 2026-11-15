@@ -322,6 +322,15 @@ class RetrieverConfig(ConfigModel):
     # 过短 query 不改写
     query_rewrite_min_query_tokens: int = Field(default=3, ge=1)
 
+    # 是否启用规则意图识别（lookup/compare/summarize/howto）
+    intent_rule_enabled: bool = True
+    # 规则无法判断时是否调用 LLM 兜底分类
+    intent_llm_enabled: bool = True
+    # 意图分类应用模型 id；为空使用默认 chat 模型
+    intent_model_id: str | None = None
+    # 意图分类 LLM 超时（秒）；超时保留规则结果
+    intent_timeout_s: float = Field(default=5.0, gt=0)
+
     # 是否启用图检索扩展；默认关闭（D-55）
     graph_expansion_enabled: bool = False
     # 图扩展最大跳数；v1 只允许 1

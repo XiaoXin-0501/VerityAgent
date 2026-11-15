@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from agent.tools.enums import ToolKind
 from agent.tools.models import ToolContext, ToolResult, ToolSelection
 from agent.tools.pipeline import ToolPipeline
 from agent.tools.policies import ToolRoutingPolicy
 from agent.tools.registry import ToolRegistry
+from agent.tools.selection import activate_group
 from config.tools import ToolsConfig
 
 __all__ = ["PipelineToolAdapter"]
@@ -28,6 +30,26 @@ class PipelineToolAdapter:
     def select(self, permissions: frozenset[str]) -> ToolSelection:
         """按权限生成一次运行的暴露工具集合。"""
         return self.registry.for_permissions(permissions, self.routing)
+
+    def activate_group(
+        self,
+        selection: ToolSelection,
+        router_name: str,
+        permissions: frozenset[str],
+    ) -> ToolSelection:
+        """router 工具调用后展开组内工具；非 router 返回原 selection。"""
+        registered = self.registry.get(router_name)
+        if registered is None or registered.spec.kind is not ToolKind.ROUTER:
+            return selection
+        group_name = registered.spec.router_group
+        if not group_name:
+            return selection
+        return activate_group(
+            self.registry.snapshot(),
+            selection,
+            group_name,
+            permissions,
+        )
 
     async def execute_batch(
         self,

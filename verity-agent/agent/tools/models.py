@@ -632,6 +632,8 @@ class CircuitBreakerRecord(_Model):
     state: ToolCircuitState = ToolCircuitState.CLOSED
     failure_count: int = 0
     success_count: int = 0
+    # 当前窗口总调用数；用于 failure_rate_threshold，成功/失败都累加
+    total_count: int = 0
     window_start: datetime = Field(default_factory=utcnow)
     opened_at: datetime | None = None
     next_probe_at: datetime | None = None

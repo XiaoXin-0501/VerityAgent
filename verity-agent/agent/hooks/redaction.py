@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Iterable, Mapping
 
 from config.hooks import RedactionConfig
-from utils.serialization import to_jsonable
+from utils.serialization import json_dumps, to_jsonable
 
 __all__ = ["RedactionPolicy"]
 
@@ -48,7 +47,7 @@ class RedactionPolicy:
 
     def payload_summary(self, payload: Any, *, max_bytes: int = 2048) -> str:
         data = self.redact_value(to_jsonable(payload))
-        text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        text = json_dumps(data)
         if len(text.encode("utf-8")) > max_bytes:
             text = text.encode("utf-8")[:max_bytes].decode("utf-8", "ignore") + "…"
         return text

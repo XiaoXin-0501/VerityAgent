@@ -9,8 +9,6 @@ Provider 是“连接池单位”而不是“模型单位”：相同
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
 from config.model import ModelConfig
@@ -35,6 +33,8 @@ from provider.model_specs import model_spec_from_config
 from provider.reranker.cohere import BgeRerankProvider, CohereRerankProvider
 from provider.reranker.dashscope import DashScopeRerankProvider
 from provider.registry import ProviderRegistry
+from utils.hashing import short_digest
+from utils.serialization import canonical_json
 
 __all__ = ["build_provider", "build_registry"]
 
@@ -61,7 +61,7 @@ def _connection_key(model: ModelConfig) -> tuple[Any, ...]:
         model.timeout_s,
         model.max_retries,
         tuple(sorted(model.headers.items())),
-        json.dumps(model.metadata, sort_keys=True, ensure_ascii=False, default=str),
+        canonical_json(model.metadata),
     )
 
 
@@ -192,7 +192,7 @@ def _group_name(model: ModelConfig, key: tuple[Any, ...], used: set[str]) -> str
     base = _vendor(model)
     if base not in used:
         return base
-    digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:8]
+    digest = short_digest(canonical_json(key), 8)
     name = f"{base}:{digest}"
     suffix = 1
     while name in used:

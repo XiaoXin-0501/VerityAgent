@@ -15,7 +15,6 @@ manifest 忘记更新导致运行时才报错。
 
 from __future__ import annotations
 
-import hashlib
 import re
 import string
 from typing import Any, Mapping
@@ -23,6 +22,7 @@ from typing import Any, Mapping
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from exception import PromptError, PromptErrorCode
+from utils.hashing import sha256_text
 
 __all__ = ["PromptVariable", "PromptTemplate", "RenderedPrompt"]
 
@@ -115,9 +115,7 @@ class PromptTemplate(_Model):
             )
 
         if not self.checksum:
-            object.__setattr__(
-                self, "checksum", hashlib.sha256(self.body.encode()).hexdigest()
-            )
+            object.__setattr__(self, "checksum", sha256_text(self.body))
         return self
 
     def render(

@@ -42,6 +42,7 @@ from .retriever.cache import RetrievalCache
 from .retriever.default import DefaultRetrievalPipeline
 from .retriever.graph_neo4j import Neo4jGraphExpander
 from .retriever.metadata import PgRetrievalMetadataStore, RetrievalMetadataStore
+from .retriever.query_llm import ChatIntentClassifier, ChatQueryRewriter
 from .retriever.rerank_provider import ProviderReranker
 from .retriever.weaviate import WeaviateHybridRecaller, WeaviateNeighborExpander
 
@@ -239,6 +240,8 @@ def build_default_retrieval_pipeline(
     domain_profile_name: str | None = None,
     embedding_dimensions: int | None = None,
     embedding_version: str = "v1",
+    query_rewrite_model: Any | None = None,
+    intent_model: Any | None = None,
     max_query_chars: int = 2000,
 ) -> DefaultRetrievalPipeline:
     """装配默认检索流水线。
@@ -281,6 +284,29 @@ def build_default_retrieval_pipeline(
     profile = domain_profile
     if profile is None and domain_profile_name:
         profile = load_domain_profile(domain_profile_name)
+    query_rewriter = None
+    if cfg.query_rewrite_enabled and query_rewrite_model is not None:
+        query_rewriter = ChatQueryRewriter(
+            query_rewrite_model,
+            model_id=(
+                cfg.query_rewrite_model_id
+                or getattr(getattr(query_rewrite_model, "spec", None), "id", "rewrite")
+            ),
+            max_variants=cfg.query_rewrite_max_variants,
+            timeout_s=cfg.query_rewrite_timeout_s,
+            cache=cache,
+        )
+    intent_classifier = None
+    if cfg.intent_llm_enabled and intent_model is not None:
+        intent_classifier = ChatIntentClassifier(
+            intent_model,
+            model_id=(
+                cfg.intent_model_id
+                or getattr(getattr(intent_model, "spec", None), "id", "intent")
+            ),
+            timeout_s=cfg.intent_timeout_s,
+            cache=cache,
+        )
     return DefaultRetrievalPipeline(
         cfg,
         recaller=recaller,
@@ -294,6 +320,8 @@ def build_default_retrieval_pipeline(
         metadata_store=metadata_store or PgRetrievalMetadataStore(),
         cache=cache,
         domain_profile=profile,
+        query_rewriter=query_rewriter,
+        intent_classifier=intent_classifier,
         max_query_chars=max_query_chars,
     )
 

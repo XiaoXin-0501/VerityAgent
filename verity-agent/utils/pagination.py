@@ -17,6 +17,8 @@ from exception import ValidationError
 __all__ = [
     "Page",
     "PageRequest",
+    "DEFAULT_LIMIT",
+    "MAX_LIMIT",
     "normalize_limit",
     "encode_cursor",
     "decode_cursor",
@@ -28,17 +30,22 @@ MAX_LIMIT = 200
 
 @dataclass(frozen=True, slots=True)
 class PageRequest:
+    """API 层的 limit/cursor 入参。"""
+
     limit: int = DEFAULT_LIMIT
     cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Page[T]:
+    """一页结果与下一页游标。"""
+
     items: list[T]
     next_cursor: str | None = None
 
 
 def normalize_limit(limit: int, *, default: int = DEFAULT_LIMIT, maximum: int = MAX_LIMIT) -> int:
+    """把 limit 规范到 (0, maximum]；非正数使用默认值。"""
     if not isinstance(limit, int) or isinstance(limit, bool):
         raise ValidationError("limit 必须是整数")
     if limit <= 0:
@@ -47,11 +54,13 @@ def normalize_limit(limit: int, *, default: int = DEFAULT_LIMIT, maximum: int = 
 
 
 def encode_cursor(payload: dict[str, Any]) -> str:
+    """把游标 payload 编码成 base64url，去掉 padding。"""
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def decode_cursor(cursor: str) -> dict[str, Any]:
+    """解码游标；格式非法统一转 ValidationError。"""
     try:
         padding = "=" * (-len(cursor) % 4)
         raw = base64.urlsafe_b64decode(cursor + padding)

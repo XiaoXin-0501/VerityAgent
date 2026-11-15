@@ -16,7 +16,6 @@ v1 的“进程内后台任务”只是默认接线：生产可以关闭 ``run_i
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from uuid import UUID, uuid4
 
@@ -41,6 +40,7 @@ from rag.shared.models import (
     IndexingWarning,
 )
 from utils.hashing import sha256_bytes
+from utils.serialization import json_dumps
 from utils.time import utcnow
 
 from .conversion import build_parse_manifest, drafts_to_chunks
@@ -654,10 +654,7 @@ class DefaultIndexingPipeline:
         try:
             await self.repository.mark_failed(
                 job.doc_id,
-                error=json.dumps(
-                    error.model_dump(mode="json"),
-                    ensure_ascii=False,
-                ),
+                error=json_dumps(error.model_dump(mode="json")),
                 worker_id=self.worker_id,
                 retry_backoff_s=self.config.index_retry_backoff_s,
                 max_attempts=self.config.index_max_attempts,

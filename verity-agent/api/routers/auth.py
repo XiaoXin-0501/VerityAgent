@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -26,6 +26,7 @@ from exception import AuthenticationError, PermissionDeniedError
 from store.pg.models.enums import UserStatus
 from store.pg.models.user import User
 from store.pg.repositories import PermissionRepository, UserRepository
+from utils.time import utcnow
 
 router = APIRouter(prefix="/auth", tags=["用户"])
 
@@ -85,7 +86,7 @@ def _auth_secret() -> str:
 
 
 def create_access_token(user: User) -> tuple[str, int]:
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     expires_in = settings.auth.access_token_expire_minutes * 60
     payload: dict[str, Any] = {
         "sub": str(user.id),

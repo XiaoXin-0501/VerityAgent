@@ -13,13 +13,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from config import settings
-from exception import RedisError
+from exception import ConfigurationError, RedisError
 from agent.bootstrap import build_default_agent
 from agent.adapters.hooks import DispatcherHookAdapter
 from agent.hooks.builtin.factory import build_dispatcher
 from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 from provider.factory import build_registry
 from prompt import build_prompt_registry
+from rag.bootstrap import build_default_retriever
 from store.minio import close_minio, init_minio
 from store.neo4j import (
     check_schema as check_graph_schema,
@@ -55,12 +56,113 @@ async def _optional_store(name: str, required: bool, action) -> bool:
         return False
 
 
+def _resolve_model(
+    registry,
+    model_id: str | None,
+    *,
+    fallback: str | None = None,
+    kind: str | None = None,
+):
+    """按应用模型 id 解析句柄；缺失/禁用/类型不符时返回 None。"""
+    target = model_id or fallback
+    if not target:
+        return None
+    try:
+        model = registry.get_model_by_id(target)
+    except ConfigurationError as exc:
+        logger.warning("RAG 模型不可用: %s (%s)", target, exc)
+        return None
+    actual = getattr(getattr(model, "spec", None), "kind", None)
+    actual_value = getattr(actual, "value", actual)
+    if kind is not None and actual_value is not None and actual_value != kind:
+        logger.warning("RAG 模型类型不符: %s (期望 %s, 实际 %s)", target, kind, actual_value)
+        return None
+    return model
+
+
+def _default_chat_model_id() -> str | None:
+    """返回默认 chat 模型 id；未配置时取第一个启用的 chat 模型。"""
+    if settings.llm.default_model_id:
+        return settings.llm.default_model_id
+    return next(
+        (
+            item.id
+            for item in settings.models
+            if item.enabled and item.kind.value == "chat"
+        ),
+        None,
+    )
+
+
+async def _build_rag_retriever(registry):
+    """按 Settings 构造 RAG Retriever；缺少 embedding/向量库时返回 None。"""
+    cfg = settings.rag
+    if not settings.weaviate.enabled:
+        logger.info("Weaviate 未启用，跳过 RAG Retriever 装配")
+        return None
+    embedding_id = cfg.indexer.embedding_model_id
+    if not embedding_id:
+        logger.warning("未配置 RAG embedding 模型，跳过 RAG Retriever 装配")
+        return None
+    try:
+        embedding_model = registry.get_model_by_id(embedding_id)
+    except ConfigurationError as exc:
+        logger.warning("RAG embedding 模型不可用: %s", exc)
+        return None
+    default_chat = _default_chat_model_id()
+    rerank_model = (
+        _resolve_model(registry, cfg.retriever.rerank_model_id, kind="rerank")
+        if cfg.retriever.rerank_enabled
+        else None
+    )
+    query_rewrite_model = (
+        _resolve_model(
+            registry,
+            cfg.retriever.query_rewrite_model_id,
+            fallback=default_chat,
+            kind="chat",
+        )
+        if cfg.retriever.query_rewrite_enabled
+        else None
+    )
+    intent_model = (
+        _resolve_model(
+            registry,
+            cfg.retriever.intent_model_id,
+            fallback=default_chat,
+            kind="chat",
+        )
+        if cfg.retriever.intent_llm_enabled
+        else None
+    )
+    retriever = await build_default_retriever(
+        cfg.retriever,
+        embedding_model=embedding_model,
+        rerank_model=rerank_model,
+        query_rewrite_model=query_rewrite_model,
+        intent_model=intent_model,
+        domain_profile_name=cfg.indexer.domain_profile,
+        embedding_dimensions=cfg.indexer.embedding_dimensions,
+        embedding_version=cfg.indexer.embedding_version,
+        max_query_chars=cfg.max_query_chars,
+    )
+    logger.info(
+        "RAG Retriever 就绪: embedding=%s rerank=%s rewrite=%s intent=%s",
+        embedding_id,
+        cfg.retriever.rerank_model_id,
+        cfg.retriever.query_rewrite_enabled,
+        cfg.retriever.intent_llm_enabled,
+    )
+    return retriever
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """启动/关闭全部基础设施；任一步失败也按相反顺序释放已建资源。"""
     registry = None
     hook_dispatcher = None
     agent = None
+    rag_retriever = None
     redis_ready = False
     try:
         await init_pg()
@@ -126,12 +228,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.prompt_registry = build_prompt_registry(settings.prompts)
         await registry.init_all()
         app.state.provider_registry = registry
+        rag_retriever = None
+        try:
+            rag_retriever = await _build_rag_retriever(registry)
+        except Exception as exc:  # noqa: BLE001 - RAG 装配失败不阻断普通对话
+            logger.warning("RAG Retriever 装配失败，降级为无知识库工具: %s", exc)
+        app.state.rag_retriever = rag_retriever
         hook_dispatcher = build_dispatcher(
             settings.hooks,
             conversation_repository=ConversationRepository(),
         )
         app.state.hook_dispatcher = hook_dispatcher
-        tool_registry = build_tool_registry()
+        tool_registry = build_tool_registry(retriever=rag_retriever)
         app.state.tool_registry = tool_registry
         tool_pipeline = build_tool_pipeline(tool_registry, settings.tools)
         app.state.tool_pipeline = tool_pipeline
@@ -152,6 +260,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if agent is not None:
             await agent.close()
+        if rag_retriever is not None:
+            await rag_retriever.close()
         if registry is not None:
             await registry.close_all()
         if hook_dispatcher is not None:

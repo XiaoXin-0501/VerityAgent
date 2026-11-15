@@ -21,9 +21,10 @@ from store.pg.models.enums import (
 from store.pg.repositories import (
     ConversationMessageRepository,
     ConversationRepository,
+    UserMessageRepository,
 )
 
-__all__ = ["PgLeaseAdapter", "PgMessageAdapter"]
+__all__ = ["PgLeaseAdapter", "PgMessageAdapter", "PgMemoryQueueAdapter"]
 
 
 class PgLeaseAdapter:
@@ -145,3 +146,34 @@ class PgMessageAdapter:
         """按 seq_no 升序读取最近消息，作为 v1 消息窗口。"""
         rows = await self.repository.get_recent(conversation_id, limit=limit)
         return [decode_stored_row(row.model_dump()) for row in rows]
+
+
+class PgMemoryQueueAdapter:
+    """UserMessageRepository -> Agent MemoryQueuePort。"""
+
+    def __init__(
+        self,
+        repository: UserMessageRepository | None = None,
+    ) -> None:
+        """保存长期记忆暂存队列仓储。"""
+        self.repository = repository or UserMessageRepository()
+
+    async def enqueue_user_message(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        message_id: UUID,
+        content: dict,
+    ) -> None:
+        """幂等入队；同一 message_id 重复入队由仓储保证。"""
+        await self.repository.enqueue(
+            user_id,
+            conversation_id,
+            message_id,
+            content,
+        )
+
+    async def mark_ready(self, conversation_id: UUID) -> None:
+        """回合终态后置 ready_at，供长期记忆 worker 领取。"""
+        await self.repository.mark_ready(conversation_id)

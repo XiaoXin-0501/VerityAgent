@@ -14,6 +14,7 @@ _BUCKETS = 10_000
 
 
 def stable_sample(key: str, rate: float) -> bool:
+    """按 key 的稳定哈希做确定性采样；rate<=0/>=1 直接返回。"""
     if rate >= 1.0:
         return True
     if rate <= 0.0:

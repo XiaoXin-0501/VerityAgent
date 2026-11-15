@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
-from agent.llm import FilePart, LLMRequest, LLMResponse
+from collections.abc import AsyncIterator
+
+from agent.llm import FilePart, LLMRequest, LLMResponse, LLMStreamEvent
 from agent.message.models import (
     AssistantMessage,
     StoredMessage,
@@ -26,6 +28,9 @@ __all__ = [
     "ToolPort",
     "HookPort",
     "AttachmentPort",
+    "MemoryQueuePort",
+    "MemoryPort",
+    "RagPort",
     "AgentDependencies",
 ]
 
@@ -101,12 +106,25 @@ class LLMPort(Protocol):
         """非流式调用；失败抛异常，由 loop 转成 AgentError。"""
         ...
 
+    def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamEvent]:
+        """流式调用；实现方返回应用层统一事件。"""
+        ...
+
 
 class ToolPort(Protocol):
     """工具选择与批量执行端口。"""
 
     def select(self, permissions: frozenset[str]) -> ToolSelection:
         """按权限生成本次暴露的工具集合。"""
+        ...
+
+    def activate_group(
+        self,
+        selection: ToolSelection,
+        router_name: str,
+        permissions: frozenset[str],
+    ) -> ToolSelection:
+        """router 调用后展开组内工具；不支持路由的端口可不实现。"""
         ...
 
     async def execute_batch(
@@ -142,6 +160,64 @@ class AttachmentPort(Protocol):
         ...
 
 
+class MemoryQueuePort(Protocol):
+    """长期记忆队列的最小写入端口；实际抽取由独立 worker 完成。"""
+
+    async def enqueue_user_message(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        message_id: UUID,
+        content: dict,
+    ) -> None:
+        """回合终态后把用户消息放入待抽取队列（幂等）。"""
+        ...
+
+    async def mark_ready(self, conversation_id: UUID) -> None:
+        """把该会话未就绪的暂存行标为可抽取。"""
+        ...
+
+
+class MemoryPort(Protocol):
+    """读取用户长期画像/会话摘要的最小端口；不做事实检索/写入。"""
+
+    async def load_profile(
+        self,
+        user_id: UUID,
+        *,
+        token_budget: int | None = None,
+    ) -> str | None:
+        """返回可注入 system 的画像文本；无画像返回 None。"""
+        ...
+
+    async def load_session_summary(
+        self,
+        conversation_id: UUID,
+        *,
+        token_budget: int | None = None,
+    ) -> str | None:
+        """返回可注入 system 的会话摘要文本；无摘要返回 None。"""
+        ...
+
+
+class RagPort(Protocol):
+    """INJECTED RAG 只读检索端口；返回 RAG 领域结果，由 Agent 渲染成 section。"""
+
+    async def retrieve(
+        self,
+        *,
+        query: str,
+        kb_ids: list[UUID],
+        user_id: UUID,
+        permissions: frozenset[str],
+        top_k: int | None = None,
+        trace_id: str | None = None,
+    ) -> Any:
+        """执行检索；权限过滤由 RAG 流水线负责。"""
+        ...
+
+
 @dataclass(slots=True)
 class AgentDependencies:
     """Agent 运行依赖；只放端口和稳定配置，不放全局单例。"""
@@ -160,6 +236,16 @@ class AgentDependencies:
     hooks: HookPort | None = None
     # 附件解析；为空表示仅支持已带 url/text 的附件
     attachments: AttachmentPort | None = None
+    # 长期记忆队列入队/就绪标记；为空表示不启用记忆抽取链路
+    memory_queue: MemoryQueuePort | None = None
+    # 长期画像读取；为空表示不注入 memory section
+    memory: MemoryPort | None = None
+    # Context 组装器；为空时 loop 直接使用 system + 最近消息
+    context: Any = None
+    # INJECTED RAG；为空表示只走工具模式
+    rag: RagPort | None = None
+    # 后台任务运行器；为空时 Agent 自己创建一个进程内 runner
+    background_tasks: Any = None
     # 可选系统提示词；ContextAssembler 尚未接入时的最小替代
     system_prompt: str | None = None
     # 读取最近消息条数；后续由 ContextBudgetPlanner 取代

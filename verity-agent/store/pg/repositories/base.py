@@ -9,11 +9,8 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import date, datetime
-from decimal import Decimal
 from enum import Enum
 from string import hexdigits
 from typing import Any, TypeVar, cast
@@ -37,6 +34,7 @@ from exception import (
     PGUniqueViolationError,
     ValidationError,
 )
+from utils.serialization import json_dumps
 
 from ..connection import Row, get_pg
 
@@ -84,30 +82,11 @@ def translate_pg_error(exc: psycopg.Error) -> PGError:
 
 # ——————————————————— JSONB / 类型适配 ———————————————————
 
-def _json_default(value: Any) -> Any:
-    if isinstance(value, BaseModel):
-        return value.model_dump(mode="json", by_alias=True)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, Decimal):
-        return float(value)
-    raise TypeError(f"无法序列化为 JSON 的类型: {type(value).__name__}")
-
-
 def to_jsonb(value: Any) -> Jsonb:
     """把 Pydantic 模型 / dict / list 包装成 psycopg 可写入 JSONB 的参数。"""
-    if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json", by_alias=True)
-    return Jsonb(
-        value,
-        dumps=lambda obj: json.dumps(
-            obj, ensure_ascii=False, separators=(",", ":"), default=_json_default
-        ),
-    )
+    # utils.serialization 已统一处理 Pydantic/datetime/UUID/Enum/Decimal，
+    # 这里不再维护第二套 default= 转换。
+    return Jsonb(value, dumps=json_dumps)
 
 
 def normalize_message_content(content: Any) -> dict[str, Any]:
