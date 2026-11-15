@@ -256,7 +256,7 @@
     },
     "memory.compression.system": {
       "file": "memory/compression.system.md",
-      "version": 1,
+      "version": 2,
       "description": "会话摘要压缩 system prompt",
       "purpose": "memory.compression",
       "static": true,

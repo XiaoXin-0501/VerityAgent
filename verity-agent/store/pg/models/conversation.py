@@ -32,6 +32,8 @@ class SummaryTopic(DBJsonModel):
     topic_id: UUID = Field(default_factory=uuid4)
     name: str
     summary: str
+    # 指向 conversation_messages.id；与 fact/constraint 一样可回溯原始消息
+    source_msg_ids: list[UUID] = Field(default_factory=list)
     mention_count: int = Field(default=1, ge=1)
     last_mentioned_at: datetime = Field(default_factory=utcnow)
 
@@ -56,9 +58,13 @@ class SummaryConstraint(DBJsonModel):
 
 
 class SessionSummary(DBJsonModel):
-    """conversation_summaries.summary_json 的固定三层结构。"""
+    """conversation_summaries.summary_json 的固定三层结构。
 
-    version: Literal[1] = 1
+    v2 增加 ``SummaryTopic.source_msg_ids``；读取时继续兼容 v1（字段缺失
+    使用空数组），新写入默认 v2。
+    """
+
+    version: Literal[1, 2] = 2
     topics: list[SummaryTopic] = Field(default_factory=list)
     facts: list[SummaryFact] = Field(default_factory=list)
     constraints: list[SummaryConstraint] = Field(default_factory=list)

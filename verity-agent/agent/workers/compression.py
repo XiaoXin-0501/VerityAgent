@@ -38,6 +38,43 @@ __all__ = ["CompressionService"]
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_source_ids(
+    payload: dict[str, Any],
+    allowed_ids: set[UUID],
+) -> dict[str, Any]:
+    """把模型输出的 source_msg_ids 收敛到输入消息/旧摘要范围内。
+
+    模型可能返回不存在的 UUID 或非 UUID 字符串；直接交给 Pydantic 会让整次
+    压缩失败，因此逐项过滤并去重，保留顺序。
+    """
+    # 新摘要统一写成 v2；模型复制旧摘要的 version=1 时不跟随。
+    payload["version"] = 2
+    for key in ("topics", "facts", "constraints"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("source_msg_ids")
+            if not isinstance(raw, list):
+                item["source_msg_ids"] = []
+                continue
+            cleaned: list[str] = []
+            for value in raw:
+                try:
+                    message_id = UUID(str(value))
+                except (TypeError, ValueError):
+                    continue
+                if message_id not in allowed_ids:
+                    continue
+                text = str(message_id)
+                if text not in cleaned:
+                    cleaned.append(text)
+            item["source_msg_ids"] = cleaned
+    return payload
+
+
 class CompressionService:
     """回合后异步压缩会话摘要。"""
 
@@ -106,11 +143,12 @@ class CompressionService:
         })
         try:
             old = current.summary_json if current is not None else SessionSummary()
+            allowed_ids = self._allowed_source_ids(old, compressible)
             payload = {
                 "current_summary": old.model_dump(mode="json", by_alias=True),
                 "new_messages": self._messages_text(compressible),
             }
-            summary = await self._summarize(payload)
+            summary = await self._summarize(payload, allowed_ids=allowed_ids)
             await self.summaries.upsert(
                 conversation_id,
                 summary,
@@ -132,8 +170,13 @@ class CompressionService:
             })
             return False
 
-    async def _summarize(self, payload: dict[str, Any]) -> SessionSummary:
-        """调用 LLM 并校验 SessionSummary。"""
+    async def _summarize(
+        self,
+        payload: dict[str, Any],
+        *,
+        allowed_ids: set[UUID],
+    ) -> SessionSummary:
+        """调用 LLM、过滤非法来源 id 并校验 SessionSummary。"""
         request = ChatModelRequest(
             model=self.model_id,
             messages=[
@@ -160,16 +203,34 @@ class CompressionService:
             timeout=self.config.compression_timeout_s,
         )
         return SessionSummary.model_validate(
-            parse_json_object(_response_text(response))
+            _sanitize_source_ids(
+                parse_json_object(_response_text(response)),
+                allowed_ids,
+            )
         )
 
+    @staticmethod
+    def _allowed_source_ids(
+        old: SessionSummary,
+        rows: list[Any],
+    ) -> set[UUID]:
+        """允许的来源 id：本次待压缩消息 + 旧摘要已引用的消息。"""
+        allowed = {
+            row.id for row in rows if getattr(row, "id", None) is not None
+        }
+        for item in (*old.topics, *old.facts, *old.constraints):
+            allowed.update(item.source_msg_ids)
+        return allowed
+
     def _messages_text(self, rows: list[Any]) -> str:
-        """把待压缩消息渲染成角色 + 文本，并按输入预算截断。"""
+        """渲染消息并带上 id/seq，供模型填写 source_msg_ids。"""
         lines: list[str] = []
         for row in rows:
             text = extract_content_text(row.content)
             if text:
-                lines.append(f"[{row.seq_no}] {row.role.value}: {text}")
+                lines.append(
+                    f"[msg:{row.id} seq:{row.seq_no}] {row.role.value}: {text}"
+                )
         value = "\n".join(lines)
         if estimate_tokens(value) > self.config.compression_max_input_tokens:
             value = truncate_to_tokens(
