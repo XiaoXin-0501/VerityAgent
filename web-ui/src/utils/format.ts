@@ -34,6 +34,38 @@ export function formatTokens(value: number | null | undefined): string {
   return `${(value / 1_000_000).toFixed(1)}M`
 }
 
+export function formatBytes(value: number | null | undefined): string {
+  if (!value || value <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+  const size = value / 1024 ** index
+  return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index] ?? 'B'}`
+}
+
+export function documentStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: '待入库',
+    processing: '入库中',
+    completed: '已入库',
+    failed: '入库失败',
+    deleting: '删除中',
+    deleted: '已删除',
+  }
+  return labels[status] ?? status
+}
+
+export function indexingStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    queued: '排队中',
+    running: '执行中',
+    succeeded: '成功',
+    failed: '失败',
+    cancelled: '已取消',
+    dead: '已终止',
+  }
+  return labels[status] ?? status
+}
+
 export function statusLabel(status: string): string {
   const labels: Record<string, string> = {
     idle: '空闲',

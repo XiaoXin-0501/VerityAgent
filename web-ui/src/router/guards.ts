@@ -35,6 +35,11 @@ export function setupRouterGuards(router: Router): void {
       }
     }
 
+    if (to.meta.requiresAdmin && userStore.userInfo?.role !== 'admin') {
+      ElMessage.warning('需要管理员权限')
+      return { name: 'home' }
+    }
+
     return true
   })
 }

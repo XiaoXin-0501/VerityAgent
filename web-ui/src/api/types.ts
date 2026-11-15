@@ -248,3 +248,104 @@ export interface CancelRunResult {
   run_id: string
   status: string
 }
+
+// ——————————————————— 知识库管理（管理员） ———————————————————
+
+export interface KnowledgeBase {
+  id: string
+  name: string
+  description: string | null
+  required_permission_code: string
+  embedding_model_id: string
+  embedding_dimensions: number
+  embedding_version: string
+  index_version: number
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export interface KnowledgeBaseListResult {
+  items: KnowledgeBase[]
+  next_cursor: string | null
+}
+
+export interface CreateKnowledgeBaseParams {
+  name: string
+  description?: string | null
+  required_permission_code: string
+}
+
+export type DocumentStatus =
+  | 'pending'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'deleting'
+  | 'deleted'
+
+export interface KnowledgeDocument {
+  id: string
+  kb_id: string
+  original_filename: string
+  description: string | null
+  extension: string
+  size_bytes: number
+  sha256: string | null
+  status: DocumentStatus
+  token_count: number | null
+  chunk_count: number | null
+  index_job_id: string | null
+  index_stage: string | null
+  index_progress: number | null
+  index_error: string | null
+  created_at: string
+  updated_at: string
+  parsed_at: string | null
+}
+
+export interface DocumentListResult {
+  items: KnowledgeDocument[]
+  next_cursor: string | null
+}
+
+export type IndexingStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'dead'
+
+export interface IndexJob {
+  job_id: string
+  kb_id: string
+  doc_id: string
+  mode: string
+  status: IndexingStatus
+  stage: string
+  progress: number
+  attempts: number
+  error: { code?: string; message?: string; details?: Record<string, unknown> } | null
+  warnings: Array<{ code: string; message: string }>
+  index_version_before: number
+  index_version_after: number
+  counts: Record<string, number>
+  created_at: string
+  started_at: string | null
+  ended_at: string | null
+}
+
+export interface UploadDocumentResult {
+  document: KnowledgeDocument
+  job: IndexJob
+}
+
+export interface KnowledgeOptions {
+  enabled_doc_types: string[]
+  max_file_bytes: number
+  default_permission_code: string
+  embedding_model_id: string | null
+  embedding_dimensions: number
+  embedding_version: string
+}

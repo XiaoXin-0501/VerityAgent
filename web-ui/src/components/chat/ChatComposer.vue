@@ -26,8 +26,6 @@
         <el-button
           v-if="streaming"
           class="composer__stop"
-          type="danger"
-          plain
           size="small"
           :loading="cancelling"
           @click="emit('cancel')"
@@ -38,7 +36,6 @@
 
         <el-button
           class="composer__send"
-          type="primary"
           circle
           :disabled="!canSend"
           :loading="sending"
@@ -106,19 +103,20 @@ function handleSend(): void {
 
 <style scoped>
 .composer {
+  position: relative;
   flex: 0 0 auto;
-  padding: var(--app-space-sm) var(--app-space-lg) var(--app-space-lg);
-  background-color: var(--app-bg-chat);
+  padding: var(--app-space-md) var(--app-space-xl) var(--app-space-lg);
+  background: var(--app-composer-fade);
 }
 
 .composer__box {
   max-width: var(--app-chat-max-width);
-  padding: var(--app-space-sm);
+  padding: var(--app-space-sm) var(--app-space-sm) var(--app-space-xs);
   margin: 0 auto;
   background-color: var(--app-bg-card);
   border: 1px solid var(--app-border-color);
-  border-radius: var(--app-radius-lg);
-  box-shadow: var(--app-shadow-card);
+  border-radius: var(--app-radius-xl);
+  box-shadow: var(--app-shadow-float);
   transition:
     border-color var(--app-transition-fast),
     box-shadow var(--app-transition-fast);
@@ -151,6 +149,7 @@ function handleSend(): void {
 .composer__actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--app-space-sm);
   padding: var(--app-space-2xs) var(--app-space-2xs) 0;
 }
@@ -161,19 +160,47 @@ function handleSend(): void {
   color: var(--app-text-muted);
 }
 
+.composer__hint {
+  margin-right: auto;
+}
+
 .composer__count {
-  margin-left: auto;
   font-variant-numeric: tabular-nums;
+}
+
+.composer__stop.el-button {
+  color: var(--app-text-secondary);
+  background-color: transparent;
+  border-color: var(--app-border-color);
+}
+
+.composer__stop.el-button:hover {
+  color: var(--app-color-danger);
+  background-color: var(--app-color-danger-soft);
+  border-color: var(--app-color-danger-soft);
 }
 
 .composer__stop span {
   margin-left: var(--app-space-2xs);
 }
 
-.composer__send {
+.composer__send.el-button {
   flex: 0 0 auto;
   width: 36px;
   height: 36px;
+  color: var(--app-color-primary);
+  background-color: var(--app-color-primary-soft);
+  border-color: transparent;
+}
+
+.composer__send.el-button:hover:not(.is-disabled) {
+  color: var(--app-text-on-primary);
+  background-color: var(--app-color-primary);
+}
+
+.composer__send.el-button.is-disabled {
+  color: var(--app-text-muted);
+  background-color: var(--app-bg-subtle);
 }
 
 @media (max-width: 900px) {

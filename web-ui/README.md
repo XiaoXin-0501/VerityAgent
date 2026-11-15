@@ -37,24 +37,28 @@ uv run python -m api.server
 | `VITE_CONVERSATION_TITLE_MAX_LENGTH` | `30` | 首条消息生成会话标题长度 |
 | `VITE_MAX_MESSAGE_CHARS` | `200000` | 单条消息最大字符数，对齐后端 `MessageConfig` |
 | `VITE_RUN_STORAGE_PREFIX` | `verity-agent-run:` | 会话当前 run_id 的 sessionStorage 前缀；刷新后可恢复 SSE |
+| `VITE_INDEX_JOB_POLL_INTERVAL_MS` | `2000` | 入库/删除任务轮询间隔 |
+| `VITE_INDEX_JOB_POLL_MAX_ATTEMPTS` | `120` | 任务轮询最大次数 |
+| `VITE_DEFAULT_KB_PERMISSION_CODE` | `kb:read` | 新建知识库默认权限码 |
 
 ## 目录
 
 ```text
 src/
 ├── api/                 # DTO 与服务端接口（与 FastAPI 字段一致）
-│   └── modules/         # auth / conversations / runs
+│   └── modules/         # auth / conversations / runs / knowledge
 ├── assets/styles/       # 设计变量、reset、全局样式
 ├── components/
 │   ├── chat/            # 会话侧栏、消息、Markdown、工具卡片、输入框
+│   ├── layout/          # 品牌标识、用户菜单
 │   └── common/          # 主题切换等通用组件
 ├── composables/         # useTheme
 ├── config/              # Vite env -> 运行期配置
 ├── layouts/             # 应用壳
-├── router/              # 路由与登录守卫
+├── router/              # 路由与登录/管理员守卫
 ├── stores/              # user / conversations / chat
 ├── utils/               # 请求、SSE、Markdown、格式化、幂等 id
-└── views/               # login / home(ChatView)
+└── views/               # login / home(ChatView) / admin(KnowledgeBaseView)
 ```
 
 ## 后端对接
@@ -67,6 +71,18 @@ src/
 | 发送消息 | `POST /api/v1/conversations/{id}/messages`（`stream=true`） |
 | 订阅生成 | `GET /api/v1/runs/{run_id}/events`（Bearer + `Last-Event-ID`） |
 | 取消生成 | `POST /api/v1/runs/{run_id}/cancel` |
+| 管理员：知识库 | `GET/POST /api/v1/knowledge-bases` |
+| 管理员：文档 | `GET/POST/DELETE /api/v1/knowledge-bases/{kb_id}/documents...` |
+| 管理员：入库任务 | `GET /api/v1/index-jobs/{job_id}` |
+
+知识库管理页仅 `role=admin` 可见：创建知识库、上传/删除文档、轮询入库进度。
+向量模型/维度由服务端 `RAG__INDEXER__*` 决定，前端不传。
+
+> 默认种子账号 `xiaoxin` 启动时会被同步为 `admin`；已有库在 dev/test
+> 启动 `init_schema` 时会更新角色。生产环境不会自动改表，可手工执行：
+> `UPDATE users SET role='admin' WHERE username='xiaoxin';`
+
+## 目录
 
 SSE 使用 `fetch` + `ReadableStream`，因为原生 `EventSource` 不能携带
 `Authorization` 头。事件 `data` 是完整 `AgentEvent` 信封，前端从

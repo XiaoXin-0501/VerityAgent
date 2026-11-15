@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from config import settings
 from exception import AuthenticationError, PermissionDeniedError
-from store.pg.models.enums import UserStatus
+from store.pg.models.enums import UserRole, UserStatus
 from store.pg.models.user import User
 from store.pg.repositories import PermissionRepository, UserRepository
 from utils.time import utcnow
@@ -179,6 +179,16 @@ def require_permission(permission_code: str):
         return user
 
     return checker
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """管理员接口依赖：只允许 role=admin 的用户访问知识库管理面。"""
+    if user.role is not UserRole.ADMIN:
+        raise PermissionDeniedError(
+            "需要管理员权限",
+            details={"required_role": UserRole.ADMIN.value},
+        )
+    return user
 
 
 # ——————————————————— 接口 ———————————————————

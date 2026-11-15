@@ -11,12 +11,15 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AppLogo: typeof import('./../components/layout/AppLogo.vue')['default']
+    BrandMark: typeof import('./../components/layout/BrandMark.vue')['default']
     ChatComposer: typeof import('./../components/chat/ChatComposer.vue')['default']
     ChatHeader: typeof import('./../components/chat/ChatHeader.vue')['default']
     ConversationSidebar: typeof import('./../components/chat/ConversationSidebar.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElButton: typeof import('element-plus/es')['ElButton']
     ElConfigProvider: typeof import('element-plus/es')['ElConfigProvider']
+    ElDialog: typeof import('element-plus/es')['ElDialog']
     ElDropdown: typeof import('element-plus/es')['ElDropdown']
     ElDropdownItem: typeof import('element-plus/es')['ElDropdownItem']
     ElDropdownMenu: typeof import('element-plus/es')['ElDropdownMenu']
@@ -24,9 +27,13 @@ declare module 'vue' {
     ElFormItem: typeof import('element-plus/es')['ElFormItem']
     ElIcon: typeof import('element-plus/es')['ElIcon']
     ElInput: typeof import('element-plus/es')['ElInput']
+    ElProgress: typeof import('element-plus/es')['ElProgress']
     ElSkeleton: typeof import('element-plus/es')['ElSkeleton']
+    ElTable: typeof import('element-plus/es')['ElTable']
+    ElTableColumn: typeof import('element-plus/es')['ElTableColumn']
     ElTag: typeof import('element-plus/es')['ElTag']
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
+    ElUpload: typeof import('element-plus/es')['ElUpload']
     LiveToolPanel: typeof import('./../components/chat/LiveToolPanel.vue')['default']
     MessageItem: typeof import('./../components/chat/MessageItem.vue')['default']
     MessageList: typeof import('./../components/chat/MessageList.vue')['default']
@@ -35,5 +42,9 @@ declare module 'vue' {
     ThemeToggle: typeof import('./../components/common/ThemeToggle.vue')['default']
     ThinkingBlock: typeof import('./../components/chat/ThinkingBlock.vue')['default']
     ToolCallList: typeof import('./../components/chat/ToolCallList.vue')['default']
+    UserMenu: typeof import('./../components/layout/UserMenu.vue')['default']
+  }
+  export interface GlobalDirectives {
+    vLoading: typeof import('element-plus/es')['ElLoadingDirective']
   }
 }

@@ -18,6 +18,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/home/ChatView.vue'),
         meta: { title: '对话', requiresAuth: true },
       },
+      {
+        path: 'knowledge-bases',
+        name: 'knowledge-bases',
+        component: () => import('@/views/admin/KnowledgeBaseView.vue'),
+        meta: { title: '知识库管理', requiresAuth: true, requiresAdmin: true },
+      },
     ],
   },
   {

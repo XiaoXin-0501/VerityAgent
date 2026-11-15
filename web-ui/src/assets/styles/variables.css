@@ -7,10 +7,10 @@
   color-scheme: light;
 
   /* —— 品牌色 —— */
-  --app-color-primary: #4f6ef7;
-  --app-color-primary-hover: #6b84ff;
-  --app-color-primary-active: #3d59d6;
-  --app-color-primary-soft: rgba(79, 110, 247, 0.12);
+  --app-color-primary: #5667d8;
+  --app-color-primary-hover: #6b7ce8;
+  --app-color-primary-active: #4656bf;
+  --app-color-primary-soft: rgba(86, 103, 216, 0.12);
   --app-color-primary-contrast: #ffffff;
   --app-color-success: #16a34a;
   --app-color-success-soft: rgba(22, 163, 74, 0.12);
@@ -40,7 +40,13 @@
   --app-bg-active: #e7ebfa;
   --app-bg-sidebar: #f7f8fc;
   --app-bg-chat: #f9fafc;
-  --app-bg-user-bubble: #4f6ef7;
+  --app-bg-glass: rgba(255, 255, 255, 0.82);
+  --app-chat-background:
+    radial-gradient(1100px 620px at 72% -12%, var(--app-color-primary-soft), transparent 62%),
+    radial-gradient(900px 520px at 8% 108%, var(--app-color-success-soft), transparent 58%),
+    var(--app-bg-chat);
+  --app-bg-user-bubble: #eaefff;
+  --app-user-bubble-text: #1f2937;
   --app-bg-assistant-bubble: #ffffff;
   --app-bg-tool: #f7f8fc;
   --app-bg-code: #111827;
@@ -72,7 +78,7 @@
   /* —— 阴影 —— */
   --app-shadow-card: 0 12px 32px rgba(31, 41, 55, 0.08);
   --app-shadow-float: 0 18px 48px rgba(31, 41, 55, 0.14);
-  --app-shadow-focus: 0 0 0 3px rgba(79, 110, 247, 0.18);
+  --app-shadow-focus: 0 0 0 3px rgba(86, 103, 216, 0.16);
   --app-shadow-bubble: 0 4px 18px rgba(31, 41, 55, 0.06);
 
   /* —— 字体 —— */
@@ -88,16 +94,26 @@
   --app-font-size-2xl: 28px;
   --app-line-height-base: 1.7;
   --app-line-height-tight: 1.35;
+  --app-chat-font-size: 15px;
+  --app-chat-line-height: 1.78;
 
   /* —— 布局尺寸 —— */
-  --app-layout-header-height: 60px;
+  --app-layout-header-height: 56px;
   --app-layout-max-width: 1200px;
   --app-login-card-width: 400px;
-  --app-sidebar-width: 288px;
-  --app-chat-max-width: 920px;
+  --app-sidebar-width: 264px;
+  --app-chat-max-width: 820px;
   --app-composer-max-height: 220px;
-  --app-message-avatar-size: 34px;
+  --app-message-avatar-size: 30px;
   --app-scrollbar-size: 8px;
+
+  /* —— 品牌渐变 / 遮罩 —— */
+  --app-brand-gradient: linear-gradient(135deg, var(--app-color-primary), var(--app-color-success));
+  --app-composer-fade: linear-gradient(
+    to top,
+    var(--app-bg-chat) 55%,
+    transparent 100%
+  );
 
   /* —— 动效 —— */
   --app-transition-fast: 140ms ease;
@@ -105,17 +121,17 @@
 
   /* —— 页面背景 —— */
   --app-login-background:
-    radial-gradient(circle at 15% 20%, rgba(79, 110, 247, 0.18), transparent 45%),
+    radial-gradient(circle at 15% 20%, rgba(86, 103, 216, 0.16), transparent 45%),
     radial-gradient(circle at 85% 80%, rgba(34, 197, 94, 0.12), transparent 40%), var(--app-bg-page);
 }
 
 [data-theme='dark'] {
   color-scheme: dark;
 
-  --app-color-primary: #7c92ff;
-  --app-color-primary-hover: #93a5ff;
-  --app-color-primary-active: #6279e6;
-  --app-color-primary-soft: rgba(124, 146, 255, 0.18);
+  --app-color-primary: #8394e8;
+  --app-color-primary-hover: #98a7f2;
+  --app-color-primary-active: #6c7cd4;
+  --app-color-primary-soft: rgba(131, 148, 232, 0.18);
   --app-color-primary-contrast: #0b1020;
   --app-color-success: #4ade80;
   --app-color-success-soft: rgba(74, 222, 128, 0.16);
@@ -143,7 +159,13 @@
   --app-bg-active: #25314a;
   --app-bg-sidebar: #0f1626;
   --app-bg-chat: #0b1020;
-  --app-bg-user-bubble: #3d59d6;
+  --app-bg-glass: rgba(17, 24, 39, 0.82);
+  --app-chat-background:
+    radial-gradient(1100px 620px at 72% -12%, var(--app-color-primary-soft), transparent 62%),
+    radial-gradient(900px 520px at 8% 108%, var(--app-color-success-soft), transparent 58%),
+    var(--app-bg-chat);
+  --app-bg-user-bubble: #1c2744;
+  --app-user-bubble-text: #e5e7eb;
   --app-bg-assistant-bubble: #111827;
   --app-bg-tool: #151d2e;
   --app-bg-code: #05080f;
@@ -155,11 +177,11 @@
 
   --app-shadow-card: 0 12px 32px rgba(0, 0, 0, 0.32);
   --app-shadow-float: 0 18px 48px rgba(0, 0, 0, 0.45);
-  --app-shadow-focus: 0 0 0 3px rgba(124, 146, 255, 0.24);
+  --app-shadow-focus: 0 0 0 3px rgba(131, 148, 232, 0.22);
   --app-shadow-bubble: 0 4px 18px rgba(0, 0, 0, 0.22);
 
   --app-login-background:
-    radial-gradient(circle at 15% 20%, rgba(124, 146, 255, 0.16), transparent 45%),
+    radial-gradient(circle at 15% 20%, rgba(131, 148, 232, 0.16), transparent 45%),
     radial-gradient(circle at 85% 80%, rgba(74, 222, 128, 0.1), transparent 40%), var(--app-bg-page);
 }
 

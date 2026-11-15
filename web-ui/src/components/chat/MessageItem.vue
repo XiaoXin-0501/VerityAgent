@@ -1,10 +1,7 @@
 <template>
   <article class="message" :class="[`message--${message.role}`, { 'message--streaming': isStreaming }]">
-    <div v-if="message.role !== 'tool'" class="message__avatar" aria-hidden="true">
-      <el-icon :size="18">
-        <UserFilled v-if="message.role === 'user'" />
-        <Service v-else />
-      </el-icon>
+    <div v-if="message.role === 'assistant'" class="message__avatar">
+      <AppLogo size="xs" />
     </div>
 
     <div class="message__body">
@@ -123,11 +120,10 @@ import {
   CopyDocument,
   Document,
   Picture,
-  Service,
   Tools,
-  UserFilled,
 } from '@element-plus/icons-vue'
 
+import AppLogo from '@/components/layout/AppLogo.vue'
 import type { Artifact, ChatMessage, FileRef, ImageRef } from '@/api/types'
 import { appConfig } from '@/config'
 import { formatDateTime, statusLabel } from '@/utils/format'
@@ -166,14 +162,15 @@ async function copyContent(): Promise<void> {
 <style scoped>
 .message {
   display: flex;
-  gap: var(--app-space-sm);
+  gap: var(--app-space-md);
   width: 100%;
   max-width: var(--app-chat-max-width);
-  margin: 0 auto var(--app-space-lg);
+  margin: 0 auto var(--app-space-xl);
 }
 
 .message--user {
   flex-direction: row-reverse;
+  margin-bottom: var(--app-space-lg);
 }
 
 .message--tool {
@@ -187,16 +184,7 @@ async function copyContent(): Promise<void> {
   flex: 0 0 auto;
   width: var(--app-message-avatar-size);
   height: var(--app-message-avatar-size);
-  color: var(--app-text-secondary);
-  background-color: var(--app-bg-subtle);
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius-pill);
-}
-
-.message--user .message__avatar {
-  color: var(--app-text-on-primary);
-  background-color: var(--app-color-primary);
-  border-color: transparent;
+  margin-top: 2px;
 }
 
 .message__body {
@@ -204,11 +192,12 @@ async function copyContent(): Promise<void> {
   flex-direction: column;
   gap: var(--app-space-xs);
   min-width: 0;
-  max-width: min(78%, 760px);
+  max-width: 100%;
 }
 
 .message--user .message__body {
   align-items: flex-end;
+  max-width: min(76%, 680px);
 }
 
 .message--tool .message__body {
@@ -219,6 +208,7 @@ async function copyContent(): Promise<void> {
   display: flex;
   align-items: center;
   gap: var(--app-space-sm);
+  margin-bottom: var(--app-space-2xs);
   font-size: var(--app-font-size-xs);
   color: var(--app-text-muted);
 }
@@ -235,25 +225,28 @@ async function copyContent(): Promise<void> {
 }
 
 .message__bubble {
-  padding: var(--app-space-md) var(--app-space-lg);
-  font-size: var(--app-font-size-base);
-  line-height: var(--app-line-height-base);
-  border-radius: var(--app-radius-lg);
+  font-size: var(--app-chat-font-size);
+  line-height: var(--app-chat-line-height);
 }
 
 .message__bubble--user {
-  color: var(--app-text-on-primary);
+  padding: var(--app-space-sm) var(--app-space-md);
+  color: var(--app-user-bubble-text);
   white-space: pre-wrap;
   word-break: break-word;
   background-color: var(--app-bg-user-bubble);
-  border-bottom-right-radius: var(--app-radius-xs);
+  border: 1px solid var(--app-border-color-light);
+  border-radius: var(--app-radius-lg) var(--app-radius-lg) var(--app-radius-xs)
+    var(--app-radius-lg);
 }
 
 .message__bubble--assistant {
-  background-color: var(--app-bg-assistant-bubble);
-  border: 1px solid var(--app-border-color-light);
-  border-bottom-left-radius: var(--app-radius-xs);
-  box-shadow: var(--app-shadow-bubble);
+  padding: 0;
+  color: var(--app-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .message__foot {
@@ -296,6 +289,12 @@ async function copyContent(): Promise<void> {
 .message:hover .message__copy,
 .message__copy:focus-visible {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .message__copy {
+    opacity: 1;
+  }
 }
 
 .message__typing {

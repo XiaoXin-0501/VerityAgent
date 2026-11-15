@@ -8,5 +8,7 @@ declare module 'vue-router' {
     public?: boolean
     /** 需要登录（默认受保护，保留字段便于扩展） */
     requiresAuth?: boolean
+    /** 仅管理员可访问 */
+    requiresAdmin?: boolean
   }
 }

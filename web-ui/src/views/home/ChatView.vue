@@ -16,10 +16,7 @@
       <ChatHeader
         :conversation="conversationStore.activeConversation"
         :run-status="chat.runStatus"
-        :streaming="chat.streaming"
-        :cancelling="chat.cancelling"
         :usage="chat.usage"
-        @cancel="chat.cancel()"
         @refresh="handleRefresh"
         @toggle-sidebar="sidebarOpen = !sidebarOpen"
       />
@@ -33,6 +30,7 @@
         :error="chat.error"
         :warnings="chat.visibleWarnings"
         :run-status="chat.runStatus"
+        @suggest="draft = $event"
       />
 
       <ChatComposer
@@ -160,7 +158,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  background-color: var(--app-bg-chat);
+  background: var(--app-chat-background);
 }
 
 .chat-page__sidebar {
@@ -185,7 +183,7 @@ onBeforeUnmount(() => {
 @media (max-width: 900px) {
   .chat-page__sidebar {
     position: fixed;
-    top: var(--app-layout-header-height);
+    top: 0;
     bottom: 0;
     left: 0;
     z-index: 30;
@@ -201,7 +199,7 @@ onBeforeUnmount(() => {
 
   .chat-page__overlay {
     position: fixed;
-    inset: var(--app-layout-header-height) 0 0 0;
+    inset: 0;
     z-index: 20;
     display: block;
     background-color: var(--app-bg-overlay);

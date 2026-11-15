@@ -26,6 +26,11 @@ interface ImportMetaEnv {
   readonly VITE_MAX_MESSAGE_CHARS?: string
   /** 会话当前 run_id 的 sessionStorage 前缀 */
   readonly VITE_RUN_STORAGE_PREFIX?: string
+  /** 知识库入库任务轮询间隔 / 最大次数 */
+  readonly VITE_INDEX_JOB_POLL_INTERVAL_MS?: string
+  readonly VITE_INDEX_JOB_POLL_MAX_ATTEMPTS?: string
+  /** 新建知识库默认权限码 */
+  readonly VITE_DEFAULT_KB_PERMISSION_CODE?: string
 }
 
 interface ImportMeta {

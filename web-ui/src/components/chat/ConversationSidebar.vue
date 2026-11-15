@@ -1,34 +1,39 @@
 <template>
   <div class="conversation-sidebar">
+    <div class="conversation-sidebar__brand">
+      <BrandMark />
+      <el-tooltip content="刷新会话列表" placement="bottom">
+        <el-button
+          circle
+          text
+          :loading="loading"
+          aria-label="刷新会话列表"
+          @click="emit('refresh')"
+        >
+          <el-icon><Refresh /></el-icon>
+        </el-button>
+      </el-tooltip>
+    </div>
+
     <div class="conversation-sidebar__head">
-      <div class="conversation-sidebar__title-row">
-        <h2 class="conversation-sidebar__title">对话</h2>
-        <div class="conversation-sidebar__actions">
-          <el-tooltip content="刷新会话列表" placement="bottom">
-            <el-button
-              circle
-              text
-              :loading="loading"
-              aria-label="刷新会话列表"
-              @click="emit('refresh')"
-            >
-              <el-icon><Refresh /></el-icon>
-            </el-button>
-          </el-tooltip>
-          <el-tooltip content="新建会话" placement="bottom">
-            <el-button
-              class="conversation-sidebar__new"
-              type="primary"
-              :loading="creating"
-              aria-label="新建会话"
-              @click="emit('create')"
-            >
-              <el-icon><Plus /></el-icon>
-              <span>新建</span>
-            </el-button>
-          </el-tooltip>
-        </div>
-      </div>
+      <el-button
+        class="sidebar-action conversation-sidebar__new"
+        :loading="creating"
+        aria-label="新建会话"
+        @click="emit('create')"
+      >
+        <el-icon><Plus /></el-icon>
+        <span>新建对话</span>
+      </el-button>
+
+      <el-button
+        v-if="isAdmin"
+        class="sidebar-action conversation-sidebar__admin"
+        @click="router.push({ name: 'knowledge-bases' })"
+      >
+        <el-icon><Collection /></el-icon>
+        <span>知识库管理</span>
+      </el-button>
 
       <el-input
         v-model="keyword"
@@ -54,31 +59,41 @@
         </el-button>
       </div>
 
-      <button
-        v-for="item in filtered"
-        :key="item.id"
-        type="button"
-        class="conversation-item"
-        :class="{ 'conversation-item--active': item.id === activeId }"
-        role="listitem"
-        :aria-current="item.id === activeId ? 'page' : undefined"
-        @click="emit('select', item.id)"
+      <div
+        v-for="group in groups"
+        :key="group.label"
+        class="conversation-group"
       >
-        <span class="conversation-item__icon">
-          <el-icon><ChatLineRound /></el-icon>
-        </span>
-        <span class="conversation-item__body">
-          <span class="conversation-item__title">{{ conversationTitle(item.title) }}</span>
-          <span class="conversation-item__meta">
-            <span>{{ formatRelative(item.last_message_at) || '暂无消息' }}</span>
-            <span v-if="item.turn_count">{{ item.turn_count }} 轮</span>
+        <div class="conversation-group__label">{{ group.label }}</div>
+        <button
+          v-for="item in group.items"
+          :key="item.id"
+          type="button"
+          class="conversation-item"
+          :class="{ 'conversation-item--active': item.id === activeId }"
+          role="listitem"
+          :aria-current="item.id === activeId ? 'page' : undefined"
+          @click="emit('select', item.id)"
+        >
+          <span class="conversation-item__icon">
+            <el-icon><ChatLineRound /></el-icon>
           </span>
-        </span>
-      </button>
+          <span class="conversation-item__body">
+            <span class="conversation-item__title">{{ conversationTitle(item.title) }}</span>
+            <span class="conversation-item__meta">
+              <span>{{ formatRelative(item.last_message_at) || '暂无消息' }}</span>
+              <span v-if="item.turn_count">{{ item.turn_count }} 轮</span>
+            </span>
+          </span>
+        </button>
+      </div>
     </div>
 
     <div class="conversation-sidebar__foot">
-      <span>共 {{ items.length }} 个会话</span>
+      <div class="conversation-sidebar__user">
+        <UserMenu />
+        <ThemeToggle />
+      </div>
     </div>
   </div>
 </template>
@@ -87,12 +102,17 @@
 import {
   ChatDotRound,
   ChatLineRound,
+  Collection,
   Plus,
   Refresh,
   Search,
 } from '@element-plus/icons-vue'
 
+import BrandMark from '@/components/layout/BrandMark.vue'
+import UserMenu from '@/components/layout/UserMenu.vue'
+import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import type { ConversationSummary } from '@/api/types'
+import { useUserStore } from '@/stores/user'
 import { conversationTitle, formatRelative } from '@/utils/format'
 
 const props = defineProps<{
@@ -109,6 +129,9 @@ const emit = defineEmits<{
 }>()
 
 const keyword = ref('')
+const userStore = useUserStore()
+const router = useRouter()
+const isAdmin = computed(() => userStore.userInfo?.role === 'admin')
 
 const filtered = computed(() => {
   const query = keyword.value.trim().toLowerCase()
@@ -116,6 +139,43 @@ const filtered = computed(() => {
   return props.items.filter((item) =>
     conversationTitle(item.title).toLowerCase().includes(query),
   )
+})
+
+interface ConversationGroup {
+  label: string
+  items: ConversationSummary[]
+}
+
+/** 按最近消息时间分组，贴近主流 Agent 的历史会话排版。 */
+const groups = computed<ConversationGroup[]>(() => {
+  const today: ConversationSummary[] = []
+  const yesterday: ConversationSummary[] = []
+  const lastWeek: ConversationSummary[] = []
+  const earlier: ConversationSummary[] = []
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+
+  for (const item of filtered.value) {
+    const time = item.last_message_at ? new Date(item.last_message_at).getTime() : 0
+    if (!time) {
+      earlier.push(item)
+    } else if (time >= startOfToday) {
+      today.push(item)
+    } else if (time >= startOfToday - 86_400_000) {
+      yesterday.push(item)
+    } else if (time >= startOfToday - 7 * 86_400_000) {
+      lastWeek.push(item)
+    } else {
+      earlier.push(item)
+    }
+  }
+
+  return [
+    { label: '今天', items: today },
+    { label: '昨天', items: yesterday },
+    { label: '近 7 天', items: lastWeek },
+    { label: '更早', items: earlier },
+  ].filter((group) => group.items.length > 0)
 })
 </script>
 
@@ -128,45 +188,63 @@ const filtered = computed(() => {
   border-right: 1px solid var(--app-border-color);
 }
 
-.conversation-sidebar__head {
-  padding: var(--app-space-md);
-  border-bottom: 1px solid var(--app-border-color-light);
-}
-
-.conversation-sidebar__title-row {
+.conversation-sidebar__brand {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--app-space-sm);
-  margin-bottom: var(--app-space-sm);
+  padding: var(--app-space-md) var(--app-space-md) var(--app-space-sm);
 }
 
-.conversation-sidebar__title {
-  font-size: var(--app-font-size-lg);
-  font-weight: 600;
-  color: var(--app-text-primary);
+.conversation-sidebar__head {
+  padding: var(--app-space-xs) var(--app-space-md) var(--app-space-sm);
 }
 
-.conversation-sidebar__actions {
+.sidebar-action.el-button {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: var(--app-space-2xs);
+  justify-content: center;
+  gap: var(--app-space-xs);
+  width: 100%;
+  height: 38px;
+  /* Element 的 `.el-button + .el-button` 会加 12px 左边距，导致两个按钮不齐。 */
+  margin: 0 0 var(--app-space-sm);
+  padding: 0 var(--app-space-md);
+  font-size: var(--app-font-size-base);
+  font-weight: 400;
+  line-height: 1;
+  color: var(--app-text-primary);
+  background-color: var(--app-bg-card);
+  border: 1px solid var(--app-border-color);
+  border-radius: var(--app-radius-md);
+  box-shadow: var(--app-shadow-bubble);
 }
 
-.conversation-sidebar__new {
-  height: 32px;
-  padding: 0 var(--app-space-sm);
-  border-radius: var(--app-radius-pill);
+.sidebar-action.el-button:hover {
+  color: var(--app-color-primary);
+  background-color: var(--app-color-primary-soft);
+  border-color: var(--app-color-primary-soft);
 }
 
-.conversation-sidebar__new span {
-  margin-left: var(--app-space-2xs);
-  font-size: var(--app-font-size-sm);
+.sidebar-action :deep(.el-icon) {
+  position: static;
+  margin: 0;
+  color: var(--app-color-primary);
+  transform: none;
+}
+
+.sidebar-action :deep(span) {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--app-space-xs);
+  margin-left: 0;
+  line-height: 1;
 }
 
 .conversation-sidebar__search :deep(.el-input__wrapper) {
   background-color: var(--app-bg-card);
-  border-radius: var(--app-radius-pill);
+  border-radius: var(--app-radius-md);
   box-shadow: 0 0 0 1px var(--app-border-color) inset;
 }
 
@@ -190,13 +268,27 @@ const filtered = computed(() => {
   text-align: center;
 }
 
+.conversation-group + .conversation-group {
+  margin-top: var(--app-space-md);
+}
+
+.conversation-group__label {
+  padding: 0 var(--app-space-sm) var(--app-space-2xs);
+  font-size: var(--app-font-size-xs);
+  font-weight: 500;
+  color: var(--app-text-muted);
+  letter-spacing: 0.02em;
+}
+
 .conversation-item {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: var(--app-space-sm);
   width: 100%;
   padding: var(--app-space-sm) var(--app-space-sm);
   margin-bottom: var(--app-space-2xs);
+  overflow: hidden;
   color: inherit;
   text-align: left;
   cursor: pointer;
@@ -205,16 +297,30 @@ const filtered = computed(() => {
   border-radius: var(--app-radius-md);
   transition:
     background-color var(--app-transition-fast),
-    border-color var(--app-transition-fast);
+    border-color var(--app-transition-fast),
+    transform var(--app-transition-fast);
 }
 
 .conversation-item:hover {
   background-color: var(--app-bg-hover);
+  transform: translateX(1px);
 }
 
 .conversation-item--active {
   background-color: var(--app-bg-active);
   border-color: var(--app-color-primary-soft);
+}
+
+.conversation-item--active::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 3px;
+  height: 60%;
+  content: '';
+  background-color: var(--app-color-primary);
+  border-radius: var(--app-radius-pill);
+  transform: translateY(-50%);
 }
 
 .conversation-item__icon {
@@ -253,9 +359,21 @@ const filtered = computed(() => {
 }
 
 .conversation-sidebar__foot {
-  padding: var(--app-space-sm) var(--app-space-md);
-  font-size: var(--app-font-size-xs);
-  color: var(--app-text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2xs);
+  padding: var(--app-space-sm);
   border-top: 1px solid var(--app-border-color-light);
+}
+
+.conversation-sidebar__user {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2xs);
+}
+
+.conversation-sidebar__user :deep(.user-menu-root) {
+  flex: 1;
+  min-width: 0;
 }
 </style>

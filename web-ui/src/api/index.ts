@@ -1,4 +1,5 @@
 export * from './modules/auth'
 export * from './modules/conversations'
+export * from './modules/knowledge'
 export * from './modules/runs'
 export type * from './types'

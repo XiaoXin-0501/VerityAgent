@@ -83,9 +83,9 @@ def _decision_payload(message: Any) -> dict[str, Any]:
         item.model_dump(mode="json")
         for item in getattr(message, "tool_calls", []) or []
     ]
+    # ToolMessage 的字段别名是 json，但 Pydantic 的 ``model.json`` 是方法；
+    # 只能取 ``json_data`` 字段，不能 getattr("json")，否则响应里会出现 bound method。
     json_data = getattr(message, "json_data", None)
-    if json_data is None:
-        json_data = getattr(message, "json", None)
     return {
         "id": str(getattr(message, "id", "")),
         "seq_no": None,
@@ -117,11 +117,17 @@ async def create_conversation(
     payload: CreateConversationRequest,
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """创建当前用户的会话。"""
-    conversation = await ConversationRepository().create(
-        user.id,
-        title=payload.title,
-    )
+    """创建会话；已有空会话时复用，避免堆积多个空对话。"""
+    repository = ConversationRepository()
+    conversation = await repository.find_empty_by_user(user.id)
+    if conversation is not None:
+        # 复用空会话时允许用新标题（例如首条消息生成的标题）。
+        if payload.title.strip() and payload.title != conversation.title:
+            conversation = await repository.update_title(
+                conversation.id, payload.title
+            )
+    else:
+        conversation = await repository.create(user.id, title=payload.title)
     return {
         "id": str(conversation.id),
         "title": conversation.title,
@@ -146,6 +152,15 @@ async def list_conversations(
         limit=limit,
         offset=offset,
     )
+    # 历史数据可能残留多个空会话；列表只展示最近一个，避免“无限空对话”观感。
+    visible: list[Any] = []
+    empty_seen = False
+    for item in items:
+        if item.turn_count == 0 and item.last_message_at is None:
+            if empty_seen:
+                continue
+            empty_seen = True
+        visible.append(item)
     next_cursor = (
         encode_cursor({"offset": offset + limit}) if len(items) == limit else None
     )
@@ -162,7 +177,7 @@ async def list_conversations(
                 ),
                 "turn_count": item.turn_count,
             }
-            for item in items
+            for item in visible
         ],
         "next_cursor": next_cursor,
     }

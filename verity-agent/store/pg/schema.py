@@ -21,11 +21,13 @@ from argon2 import PasswordHasher
 from psycopg import AsyncConnection
 
 from .connection import PGConnectionManager, Row, get_pg
+from .models.enums import UserRole
 
-# 仅用于开发/首次启动；生产环境必须改密或删除
-DEFAULT_USERS: tuple[tuple[str, str], ...] = (
-    ("xiaoxin", "123456"),
-    ("xiaobai", "123456"),
+# 仅用于开发/首次启动；生产环境必须改密或删除。
+# 角色以这里为准：xiaoxin 是管理员，xiaobai 是普通用户。
+DEFAULT_USERS: tuple[tuple[str, str, UserRole], ...] = (
+    ("xiaoxin", "123456", UserRole.ADMIN),
+    ("xiaobai", "123456", UserRole.USER),
 )
 
 _hasher = PasswordHasher()
@@ -410,15 +412,20 @@ async def init_schema(db: PGConnectionManager | None = None) -> None:
 
 
 async def seed_default_users(conn: AsyncConnection[Row]) -> None:
-    """插入默认账号；用户名已存在时保持原密码不动。"""
-    for username, password in DEFAULT_USERS:
+    """写入默认账号；已存在时保留密码，但同步默认角色。
+
+    默认账号只用于开发/首启；生产环境应改密或删除。角色同步让已有库中的
+    ``xiaoxin`` 在升级后也获得管理员权限。
+    """
+    for username, password, role in DEFAULT_USERS:
         await conn.execute(
             """
-            INSERT INTO users (username, password_hash)
-            VALUES (%s, %s)
-            ON CONFLICT (username) DO NOTHING
+            INSERT INTO users (username, password_hash, role)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (username) DO UPDATE
+            SET role = EXCLUDED.role
             """,
-            (username, _hasher.hash(password)),
+            (username, _hasher.hash(password), role.value),
         )
 
 

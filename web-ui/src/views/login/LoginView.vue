@@ -6,7 +6,7 @@
 
     <div class="login-card">
       <div class="login-card__brand">
-        <span class="login-card__mark" aria-hidden="true">V</span>
+        <AppLogo size="md" />
         <h1 class="login-card__title">{{ appConfig.appName }}</h1>
         <p class="login-card__subtitle">企业知识库智能助手</p>
       </div>
@@ -59,6 +59,7 @@ import { Lock, User } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
+import AppLogo from '@/components/layout/AppLogo.vue'
 import { appConfig } from '@/config'
 import { useUserStore } from '@/stores/user'
 
@@ -148,21 +149,8 @@ async function handleSubmit(): Promise<void> {
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: var(--app-space-2xs);
   margin-bottom: var(--app-space-xl);
-}
-
-.login-card__mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  margin-bottom: var(--app-space-sm);
-  font-size: var(--app-font-size-lg);
-  font-weight: 700;
-  color: var(--app-text-on-primary);
-  background: linear-gradient(135deg, var(--app-color-primary), var(--app-color-success));
-  border-radius: var(--app-radius-lg);
 }
 
 .login-card__title {

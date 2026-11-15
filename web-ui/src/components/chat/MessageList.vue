@@ -28,12 +28,23 @@
 
       <div v-else-if="!messages.length && !liveMessages.length && !streaming" class="message-list__empty">
         <div class="message-list__empty-icon">
-          <el-icon :size="34"><MagicStick /></el-icon>
+          <AppLogo size="lg" />
         </div>
         <h2 class="message-list__empty-title">开始新的对话</h2>
         <p class="message-list__empty-text">
           直接输入问题即可。助手会结合知识库、长期记忆和可用工具回答。
         </p>
+        <div class="message-list__suggestions">
+          <button
+            v-for="item in suggestions"
+            :key="item"
+            type="button"
+            class="message-list__suggestion"
+            @click="emit('suggest', item)"
+          >
+            {{ item }}
+          </button>
+        </div>
       </div>
 
       <MessageItem
@@ -72,11 +83,12 @@
 </template>
 
 <script setup lang="ts">
-import { ArrowDown, MagicStick } from '@element-plus/icons-vue'
+import { ArrowDown } from '@element-plus/icons-vue'
 
 import type { AgentError, AgentWarning, ChatMessage, RunStatus } from '@/api/types'
 import type { LiveAssistantMessage, LiveToolCall } from '@/stores/chat'
 import { statusLabel } from '@/utils/format'
+import AppLogo from '@/components/layout/AppLogo.vue'
 import LiveToolPanel from '@/components/chat/LiveToolPanel.vue'
 import MessageItem from '@/components/chat/MessageItem.vue'
 
@@ -90,6 +102,14 @@ const props = defineProps<{
   warnings: AgentWarning[]
   runStatus: RunStatus | 'idle'
 }>()
+
+const emit = defineEmits<{ suggest: [text: string] }>()
+
+const suggestions = [
+  '介绍一下你能做什么',
+  '帮我总结知识库里的重点',
+  '根据知识库回答一个专业问题',
+]
 
 const scrollRef = ref<HTMLElement | null>(null)
 const atBottom = ref(true)
@@ -161,13 +181,15 @@ onMounted(() => {
   position: relative;
   flex: 1;
   overflow-y: auto;
-  background-color: var(--app-bg-chat);
+  background: transparent;
 }
 
 .message-list__inner {
   display: flex;
   flex-direction: column;
-  padding: var(--app-space-lg) var(--app-space-lg) var(--app-space-xl);
+  max-width: calc(var(--app-chat-max-width) + var(--app-space-2xl) * 2);
+  padding: var(--app-space-xl) var(--app-space-xl) var(--app-space-2xl);
+  margin: 0 auto;
 }
 
 .message-list__alert {
@@ -206,12 +228,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 72px;
-  height: 72px;
   margin-bottom: var(--app-space-sm);
-  color: var(--app-color-primary);
-  background-color: var(--app-color-primary-soft);
-  border-radius: var(--app-radius-xl);
+  filter: drop-shadow(0 16px 32px var(--app-color-primary-soft));
 }
 
 .message-list__empty-title {
@@ -225,6 +243,35 @@ onMounted(() => {
   font-size: var(--app-font-size-base);
   line-height: var(--app-line-height-base);
   color: var(--app-text-secondary);
+}
+
+.message-list__suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--app-space-sm);
+  margin-top: var(--app-space-md);
+}
+
+.message-list__suggestion {
+  padding: var(--app-space-sm) var(--app-space-md);
+  font-size: var(--app-font-size-sm);
+  color: var(--app-text-regular);
+  cursor: pointer;
+  background-color: var(--app-bg-card);
+  border: 1px solid var(--app-border-color);
+  border-radius: var(--app-radius-pill);
+  box-shadow: var(--app-shadow-bubble);
+  transition:
+    color var(--app-transition-fast),
+    border-color var(--app-transition-fast),
+    transform var(--app-transition-fast);
+}
+
+.message-list__suggestion:hover {
+  color: var(--app-color-primary);
+  border-color: var(--app-color-primary);
+  transform: translateY(-1px);
 }
 
 .message-list__live {

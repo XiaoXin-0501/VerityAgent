@@ -37,4 +37,16 @@ export const appConfig = {
   ),
   maxMessageChars: positiveInt(import.meta.env.VITE_MAX_MESSAGE_CHARS, 200_000),
   runStoragePrefix: text(import.meta.env.VITE_RUN_STORAGE_PREFIX, 'verity-agent-run:'),
+  indexJobPollIntervalMs: positiveInt(
+    import.meta.env.VITE_INDEX_JOB_POLL_INTERVAL_MS,
+    2_000,
+  ),
+  indexJobPollMaxAttempts: positiveInt(
+    import.meta.env.VITE_INDEX_JOB_POLL_MAX_ATTEMPTS,
+    120,
+  ),
+  defaultKbPermissionCode: text(
+    import.meta.env.VITE_DEFAULT_KB_PERMISSION_CODE,
+    'kb:read',
+  ),
 } as const

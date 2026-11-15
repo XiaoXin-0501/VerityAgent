@@ -131,6 +131,30 @@ class ConversationRepository(BaseRepository):
             )
         return self._models(Conversation, rows)
 
+    async def find_empty_by_user(
+        self,
+        user_id: UUID | str,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> Conversation | None:
+        """取用户最近一个空会话（无消息、turn_count=0），用于复用新建。"""
+        async with self._transaction(conn) as c:
+            row = await self._fetch_one(
+                c,
+                """
+                SELECT * FROM conversations
+                WHERE user_id = %s
+                  AND deleted_at IS NULL
+                  AND status = 'active'
+                  AND turn_count = 0
+                  AND last_message_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (as_uuid(user_id),),
+            )
+        return self._model(Conversation, row)
+
     async def update_title(
         self,
         conversation_id: UUID | str,

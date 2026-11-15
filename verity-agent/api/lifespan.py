@@ -36,7 +36,7 @@ from agent.workers import (
 )
 from prompt import PromptId, build_prompt_registry
 from provider.factory import build_registry
-from rag.bootstrap import build_default_retriever
+from rag.bootstrap import build_default_indexer, build_default_retriever
 from rag.indexer.enrichment.domain import load_domain_profile
 from store.minio import close_minio, init_minio
 from store.neo4j import (
@@ -175,6 +175,28 @@ async def _build_rag_retriever(registry, prompt_registry):
         cfg.retriever.intent_llm_enabled,
     )
     return retriever
+
+
+async def _build_rag_indexer(registry, prompt_registry):
+    """按 Settings 构造 RAG Indexer；MinIO/Weaviate/embedding 缺失时返回 None。"""
+    cfg = settings.rag
+    if not settings.weaviate.enabled or not settings.minio.enabled:
+        logger.info("Weaviate/MinIO 未启用，跳过 RAG Indexer 装配")
+        return None
+    embedding_id = cfg.indexer.embedding_model_id
+    if not embedding_id:
+        logger.warning("未配置 RAG embedding 模型，跳过 RAG Indexer 装配")
+        return None
+    try:
+        embedding_model = registry.get_model_by_id(embedding_id)
+    except ConfigurationError as exc:
+        logger.warning("RAG embedding 模型不可用: %s", exc)
+        return None
+    return await build_default_indexer(
+        cfg.indexer,
+        embedding_model=embedding_model,
+        prompt_registry=prompt_registry,
+    )
 
 
 def _build_memory_worker(registry, hook_dispatcher, prompt_registry):
@@ -329,6 +351,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     hook_dispatcher = None
     agent = None
     rag_retriever = None
+    rag_indexer = None
     memory_worker = None
     memory_worker_task = None
     deletion_worker = None
@@ -421,6 +444,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:  # noqa: BLE001 - RAG 装配失败不阻断普通对话
             logger.warning("RAG Retriever 装配失败，降级为无知识库工具: %s", exc)
         app.state.rag_retriever = rag_retriever
+        try:
+            rag_indexer = await _build_rag_indexer(registry, prompts)
+        except Exception as exc:  # noqa: BLE001 - 管理面入库失败不阻断对话
+            logger.warning("RAG Indexer 装配失败，知识库管理不可用: %s", exc)
+        app.state.indexer = rag_indexer
         hook_dispatcher = build_dispatcher(
             settings.hooks,
             conversation_repository=ConversationRepository(),
@@ -522,6 +550,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
         if rag_retriever is not None:
             await rag_retriever.close()
+        if rag_indexer is not None:
+            await rag_indexer.close()
         if registry is not None:
             await registry.close_all()
         if hook_dispatcher is not None:
