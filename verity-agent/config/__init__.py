@@ -24,7 +24,7 @@ from pathlib import Path
 from pydantic import Field, model_validator
 
 from .agent import AgentConfig, AgentPolicy, AgentStreamConfig
-from .app import AppConfig, AuthConfig, ServerConfig
+from .app import AppConfig, AuthConfig, LoggingConfig, ServerConfig
 from .base import SOURCE_ROOT, EnvSettings
 from .hooks import (
     AuditHookConfig,
@@ -74,6 +74,7 @@ __all__ = [
     "AppConfig",
     "ServerConfig",
     "AuthConfig",
+    "LoggingConfig",
     # infrastructure
     "PGConfig",
     "RedisConfig",

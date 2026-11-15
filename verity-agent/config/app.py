@@ -8,7 +8,13 @@ from pydantic import Field, SecretStr, field_validator
 
 from .base import ConfigModel
 
-__all__ = ["Environment", "AppConfig", "ServerConfig", "AuthConfig"]
+__all__ = [
+    "Environment",
+    "AppConfig",
+    "ServerConfig",
+    "AuthConfig",
+    "LoggingConfig",
+]
 
 
 class Environment(StrEnum):
@@ -17,6 +23,31 @@ class Environment(StrEnum):
     DEV = "dev"
     TEST = "test"
     PROD = "prod"
+
+
+class LoggingConfig(ConfigModel):
+    """本地文件日志配置。
+
+    - 默认落盘到 Windows D 盘；路径可被 ``APP__LOG__DIRECTORY`` 覆盖；
+    - 使用标准库 ``RotatingFileHandler``，单文件超限后轮转；
+    - 多进程部署时标准库 handler 不保证跨进程安全，生产 worker=1 或改用
+      外部日志采集。
+    """
+
+    # 是否写本地文件；false 时只保留控制台
+    to_file: bool = True
+    # 日志目录；相对路径按 verity-agent 源码根目录解析
+    directory: str = "D:/verityAgent日志"
+    # 日志文件名
+    file_name: str = "verity-agent.log"
+    # 单文件大小上限（字节）；超过后轮转
+    max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
+    # 保留的历史文件数量
+    backup_count: int = Field(default=10, ge=1)
+    # 文件编码；Windows 中文路径/内容统一 UTF-8
+    encoding: str = "utf-8"
+    # 是否同时输出到控制台
+    console: bool = True
 
 
 class AppConfig(ConfigModel):
@@ -36,6 +67,17 @@ class AppConfig(ConfigModel):
     request_id_header: str = "X-Request-ID"
     # 日志级别：DEBUG / INFO / WARNING / ERROR
     log_level: str = "INFO"
+    # 本地文件日志目录/轮转/编码
+    log: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        """日志级别必须是标准 logging 级别。"""
+        text = value.strip().upper()
+        if text not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("app.log_level 必须是 DEBUG/INFO/WARNING/ERROR/CRITICAL")
+        return text
 
     @property
     def is_prod(self) -> bool:

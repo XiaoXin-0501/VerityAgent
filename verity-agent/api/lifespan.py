@@ -57,6 +57,8 @@ from store.weaviate import (
 )
 from utils.time import utcnow
 
+from .logging_setup import setup_logging, shutdown_logging
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["lifespan"]
@@ -315,6 +317,14 @@ def _build_agent_system_prompt(prompt_registry) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """启动/关闭全部基础设施；任一步失败也按相反顺序释放已建资源。"""
+    # 外部 uvicorn 直接加载 api.app:app 时也在这里安装文件日志 handler。
+    try:
+        app.state.log_file = setup_logging()
+    except Exception:  # noqa: BLE001 - 日志初始化失败不阻断启动
+        app.state.log_file = None
+        logger.warning("文件日志初始化失败，仅使用控制台", exc_info=True)
+    if app.state.log_file is not None:
+        logger.info("文件日志写入: %s", app.state.log_file)
     registry = None
     hook_dispatcher = None
     agent = None
@@ -523,3 +533,5 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if redis_ready:
             await close_redis()
         await close_pg()
+        # 最后刷新并关闭文件 handler，避免进程退出时丢失尾部日志。
+        shutdown_logging()

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 
 import uvicorn
@@ -18,6 +19,7 @@ import uvicorn
 from config import settings
 
 from .app import app
+from .logging_setup import setup_logging
 
 __all__ = ["app", "main"]
 
@@ -27,6 +29,9 @@ if sys.platform == "win32":
 
 def main() -> None:
     """启动 uvicorn；Windows 使用 Selector 事件循环且不启用 reload。"""
+    log_path = setup_logging()
+    if log_path is not None:
+        logging.getLogger(__name__).info("文件日志写入: %s", log_path)
     uvicorn.run(
         "api.app:app",
         host=settings.server.host,
@@ -35,6 +40,8 @@ def main() -> None:
         workers=None if settings.server.reload else settings.server.workers,
         root_path=settings.server.root_path,
         loop="none" if sys.platform == "win32" else "auto",
+        # 日志由 setup_logging 统一接管，避免 uvicorn 覆盖 handler。
+        log_config=None,
     )
 
 
