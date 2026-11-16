@@ -45,11 +45,6 @@ from utils.text import (
 )
 
 from .caching import ChunkCache, description_cache_key
-from .policy import (
-    IndexerPolicy,
-    get_indexer_policy,
-    normalize_heading_key,
-)
 
 __all__ = [
     "DescriptionExtraction",
@@ -57,11 +52,55 @@ __all__ = [
     "CallableDescriptionRefiner",
     "ChatDescriptionRefiner",
     "DocumentDescriptionExtractor",
+    "RELIABLE_DESCRIPTION_HEADINGS",
+    "normalize_heading_key",
 ]
 
 logger = logging.getLogger(__name__)
 
-# 可靠描述标题词表由索引策略管理（config/rag_policy.json），
+# 标题归一化：去空白与常见分隔标点，英文小写。
+# 可靠标题词表与运行时判断共用同一口径。
+_HEADING_PUNCTUATION = re.compile(r"[\s:：\-—_.]+")
+
+
+def normalize_heading_key(text: str) -> str:
+    """把标题归一成可比较的 key（去空白/标点、英文小写）。"""
+    return _HEADING_PUNCTUATION.sub("", text or "").lower()
+
+
+# 可直接采信为文档描述的“文档级”标题（内置词表）。
+RELIABLE_DESCRIPTION_HEADINGS = frozenset(
+    normalize_heading_key(item)
+    for item in (
+        "文档简介",
+        "文档说明",
+        "文档描述",
+        "内容简介",
+        "内容说明",
+        "内容概述",
+        "内容摘要",
+        "内容提要",
+        "简介",
+        "概述",
+        "摘要",
+        "执行摘要",
+        "提要",
+        "前言",
+        "序言",
+        "引言",
+        "导言",
+        "介绍",
+        "introduction",
+        "overview",
+        "summary",
+        "executive summary",
+        "abstract",
+        "preface",
+        "foreword",
+        "description",
+    )
+)
+
 # 这里只保留“像描述但不够可靠”的标题正则。
 
 # 可能的描述标题（如“企业简介”“课程简介”）：只作为 LLM 候选，不直接采信。
@@ -71,7 +110,7 @@ _CANDIDATE_HEADING_RE = re.compile(
 )
 
 # 摘要类标题优先级最高；前言/序言其次；Introduction 再次；候选标题最后。
-# 归一化 key 与 policy.DescriptionPolicy.reliable_headings 同一口径。
+# 归一化 key 与 RELIABLE_DESCRIPTION_HEADINGS 同一口径。
 _ABSTRACT_KEYS = frozenset(
     normalize_heading_key(item)
     for item in (
@@ -396,18 +435,18 @@ class ChatDescriptionRefiner:
         return result
 
 
-def _is_reliable_heading(text: str, policy: IndexerPolicy) -> bool:
-    """是否是可作为文档描述的可靠标题（词表来自索引策略）。"""
+def _is_reliable_heading(text: str) -> bool:
+    """是否是可作为文档描述的可靠标题。"""
     key = normalize_heading_key(text)
-    return key in policy.description.reliable_headings
+    return key in RELIABLE_DESCRIPTION_HEADINGS
 
 
-def _is_candidate_heading(text: str, policy: IndexerPolicy) -> bool:
+def _is_candidate_heading(text: str) -> bool:
     """是否是“像描述但不够可靠”的标题，例如企业简介/课程简介。"""
     value = (text or "").strip()
     if not value or len(value) > 24:
         return False
-    if _is_reliable_heading(value, policy):
+    if _is_reliable_heading(value):
         return True
     return bool(_CANDIDATE_HEADING_RE.match(value))
 
@@ -428,10 +467,7 @@ def _find_workbook_description(parsed: ParsedDocument) -> str | None:
     return None
 
 
-def _description_heading_priority(
-    text: str,
-    policy: IndexerPolicy,
-) -> int | None:
+def _description_heading_priority(text: str) -> int | None:
     """描述章节标题优先级：摘要 0、前言 1、Introduction 2、候选 3。"""
     key = normalize_heading_key(text)
     if not key:
@@ -442,9 +478,9 @@ def _description_heading_priority(
         return 1
     if key in _INTRODUCTION_KEYS:
         return 2
-    if key in policy.description.reliable_headings:
+    if key in RELIABLE_DESCRIPTION_HEADINGS:
         return 1
-    if key in _CANDIDATE_INLINE_KEYS or _is_candidate_heading(text, policy):
+    if key in _CANDIDATE_INLINE_KEYS or _is_candidate_heading(text):
         return 3
     return None
 
@@ -456,10 +492,7 @@ def _is_stop_section_text(text: str) -> bool:
     return normalize_heading_key(label) in _STOP_SECTION_KEYS
 
 
-def _split_inline_description(
-    text: str,
-    policy: IndexerPolicy,
-) -> tuple[str, str] | None:
+def _split_inline_description(text: str) -> tuple[str, str] | None:
     """拆出 ``前　言：正文`` / ``摘要: 正文`` 这类同段标签。
 
     只有标签属于可靠描述标题/候选描述标签才拆分，避免把普通句子里的冒号
@@ -469,15 +502,12 @@ def _split_inline_description(
     if match is None:
         return None
     label = match.group(1).strip()
-    if _description_heading_priority(label, policy) is None:
+    if _description_heading_priority(label) is None:
         return None
     return label, match.group(2)
 
 
-def _find_document_title(
-    early: list[ContentBlock],
-    policy: IndexerPolicy,
-) -> str | None:
+def _find_document_title(early: list[ContentBlock]) -> str | None:
     """找文章大标题：第一个非栏目标题、非章节编号、非描述标题的标题块。
 
     PDF 首页常有 ``CASE REPORT OPEN ACCESS``（level 5）、``作者：``、
@@ -493,7 +523,7 @@ def _find_document_title(
         key = normalize_heading_key(text)
         if key in _TITLE_REJECT_KEYS:
             continue
-        if _description_heading_priority(text, policy) is not None:
+        if _description_heading_priority(text) is not None:
             continue
         if _NUMBERED_HEADING_RE.match(text):
             continue
@@ -593,7 +623,6 @@ def _collect_section_body(
 
 def _find_description_section(
     early: list[ContentBlock],
-    policy: IndexerPolicy,
     max_chars: int,
 ) -> _DescriptionSection | None:
     """在开头附近选择最合适的摘要/前言章节。
@@ -608,7 +637,7 @@ def _find_description_section(
         if not text:
             continue
         if block.block_type is BlockType.HEADING:
-            priority = _description_heading_priority(text, policy)
+            priority = _description_heading_priority(text)
             if priority is None:
                 continue
             body = _collect_section_body(
@@ -629,18 +658,18 @@ def _find_description_section(
             continue
         if block.block_type not in {BlockType.PARAGRAPH, BlockType.LIST}:
             continue
-        split = _split_inline_description(text, policy)
+        split = _split_inline_description(text)
         if split is None:
             # 某些解析器把“摘要”“前言”单独识别成普通段落而不是 heading；
             # 只有整段就是描述标题时才向下收集，避免普通句子误触发。
-            priority = _description_heading_priority(text, policy)
+            priority = _description_heading_priority(text)
             if priority is None or len(text) > 12:
                 continue
             label = text
             prefix = ""
         else:
             label, prefix = split
-            priority = _description_heading_priority(label, policy)
+            priority = _description_heading_priority(label)
         if priority is None:
             continue
         body = _collect_section_body(
@@ -667,7 +696,6 @@ def _find_description_section(
 def _extract_from_blocks(
     blocks: list[ContentBlock],
     config: IndexerConfig,
-    policy: IndexerPolicy,
 ) -> _RuleExtraction:
     """从开头附近组合“大标题 + 摘要/前言”或提取候选。
 
@@ -693,10 +721,9 @@ def _extract_from_blocks(
     if not early:
         return _RuleExtraction()
 
-    title = _find_document_title(early, policy)
+    title = _find_document_title(early)
     section = _find_description_section(
         early,
-        policy,
         config.description_max_chars,
     )
     candidate_cap = max(2000, config.description_max_chars * 4)
@@ -770,13 +797,10 @@ class DocumentDescriptionExtractor:
         self,
         config: IndexerConfig,
         refiner: DescriptionRefiner | None = None,
-        *,
-        policy: IndexerPolicy | None = None,
     ) -> None:
-        """保存配置、可选的 LLM refiner 与索引策略。"""
+        """保存配置与可选的 LLM refiner。"""
         self.config = config
         self.refiner = refiner
-        self.policy = policy or get_indexer_policy()
 
     async def extract(
         self,
@@ -813,11 +837,7 @@ class DocumentDescriptionExtractor:
             )
 
         # 3) 内容规则：大标题 + 摘要/前言组合优先，标题本身可替代文件名。
-        rule = _extract_from_blocks(
-            parsed.blocks,
-            self.config,
-            self.policy,
-        )
+        rule = _extract_from_blocks(parsed.blocks, self.config)
         if rule.text and rule.reliable:
             return DescriptionExtraction(
                 text=rule.text,

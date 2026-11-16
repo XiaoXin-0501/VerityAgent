@@ -7,10 +7,37 @@ from __future__ import annotations
 
 from config.rag import DedupPolicyConfig, QualityPolicyConfig
 from utils.hashing import sha256_text
-from rag.shared.enums import IndexingWarningCode
+from rag.shared.enums import IndexingWarningCode, QualityFlag
 from rag.shared.models import ChunkDraft, NoiseReport
 
-__all__ = ["QualityGate", "deduplicate_chunks"]
+__all__ = [
+    "QUALITY_PENALTIES",
+    "QualityGate",
+    "deduplicate_chunks",
+    "quality_score",
+]
+
+# 质量标记 → 扣分（内置表）。
+# 未声明的 flag 按 0 分处理，向前兼容新增枚举。
+QUALITY_PENALTIES: dict[QualityFlag, float] = {
+    QualityFlag.LOW_OCR: 0.25,
+    QualityFlag.LOW_TABLE: 0.2,
+    QualityFlag.LOW_TEXT_COVERAGE: 0.3,
+    QualityFlag.DUPLICATE: 0.5,
+    QualityFlag.TRUNCATED: 0.1,
+    QualityFlag.BOILERPLATE: 0.5,
+    QualityFlag.CODE_PARSE_FALLBACK: 0.1,
+    QualityFlag.EMBEDDING_TRUNCATED: 0.05,
+}
+
+
+def quality_score(flags: set[QualityFlag]) -> float:
+    """把质量标记折算成 0~1 分：``clamp(1 - Σ扣分, 0, 1)``。
+
+    多个标记叠加扣分，不取最大值；结果保留 4 位小数，保证稳定。
+    """
+    total = sum(QUALITY_PENALTIES.get(flag, 0.0) for flag in flags)
+    return round(max(0.0, min(1.0, 1.0 - total)), 4)
 
 
 class QualityGate:

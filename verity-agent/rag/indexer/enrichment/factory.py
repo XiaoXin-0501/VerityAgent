@@ -26,7 +26,6 @@ from .domain.loader import load_domain_profile
 from .domain.models import DomainProfile
 from .graph import GraphExtractor, RelationExtractor, RuleGraphExtractor
 from .llm_graph import HybridGraphExtractor, LLMGraphExtractor
-from ..policy import IndexerPolicy
 
 __all__ = ["GRAPH_EXTRACTION_MODES", "build_graph_extractor"]
 
@@ -43,13 +42,12 @@ def build_graph_extractor(
     chat_model: Any | None = None,
     relation_extractor: RelationExtractor | None = None,
     prompts: PromptRegistry | None = None,
-    indexer_policy: IndexerPolicy | None = None,
 ) -> GraphExtractor:
     """按 ``config.graph_extraction_mode`` 构造抽取器。
 
     ``profile`` / ``chat_model`` 允许调用方预先加载/复用，避免每个流水线
     重复读 JSON、重复创建模型句柄；``prompts`` 允许注入外部覆盖目录构建的
-    Prompt 注册表；``indexer_policy`` 提供通用停用词等索引策略。
+    Prompt 注册表。
     """
     mode = (config.graph_extraction_mode or "lexicon").strip().lower()
     if mode not in GRAPH_EXTRACTION_MODES:
@@ -62,7 +60,6 @@ def build_graph_extractor(
         return RuleGraphExtractor(
             config,
             relation_extractor=relation_extractor,
-            policy=indexer_policy,
         )
 
     domain = profile or load_domain_profile(
@@ -74,7 +71,6 @@ def build_graph_extractor(
         config,
         domain,
         relation_extractor=relation_extractor,
-        policy=indexer_policy,
     )
     if mode == "lexicon":
         return lexicon
@@ -95,7 +91,6 @@ def build_graph_extractor(
         # llm 模式自己持有词典兜底；hybrid 由外层合并，不需要重复兜底。
         fallback=lexicon if mode == "llm" else None,
         prompts=prompts,
-        policy=indexer_policy,
     )
     if mode == "llm":
         return llm

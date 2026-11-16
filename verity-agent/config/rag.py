@@ -172,9 +172,6 @@ class IndexerConfig(ConfigModel):
     code_summary_model_id: str | None = None
     # 图抽取 LLM 模型 id（mode=llm/hybrid 时使用）
     graph_model_id: str | None = None
-    # 索引策略文件（质量扣分/描述标题/关联提示词/通用停用词/阶段进度）；
-    # 为空使用内置 config/rag_policy.json；相对路径按 verity-agent 解析
-    indexer_policy_path: str | None = None
     # 是否启用大表/歧义表的 LLM 摘要
     table_summary_llm_enabled: bool = False
     # 是否启用代码 LLM 摘要；默认只用签名/docstring

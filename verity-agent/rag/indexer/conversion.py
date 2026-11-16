@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-from rag.shared.enums import QualityFlag
 from rag.shared.ids import chunk_hash
 from rag.shared.models import (
     Chunk,
@@ -17,22 +16,9 @@ from rag.shared.models import (
 )
 from utils.time import utcnow
 
-from .policy import IndexerPolicy, get_indexer_policy
+from .quality import quality_score
 
 __all__ = ["drafts_to_chunks", "build_parse_manifest", "quality_score"]
-
-
-def quality_score(
-    flags: set[QualityFlag],
-    *,
-    policy: IndexerPolicy | None = None,
-) -> float:
-    """把质量标记折算成 0~1 分（1.0 最可信）。
-
-    公式和扣分表由 :class:`IndexerPolicy` 管理；这里保留函数入口，
-    兼容旧调用方与测试。策略文件见 ``config/rag_policy.json``。
-    """
-    return (policy or get_indexer_policy()).quality.score(flags)
 
 
 def drafts_to_chunks(
@@ -41,19 +27,17 @@ def drafts_to_chunks(
     parsed: ParsedDocument,
     index_version: int,
     chunking_version: str,
-    policy: IndexerPolicy | None = None,
 ) -> list[Chunk]:
     """把切片草稿转成可写 Weaviate 的 ``Chunk``。
 
     - ``chunk_hash`` 基于正文而不是 embedding_text，保证同内容可复现；
-    - ``quality_score`` 由 ``draft.quality_flags`` 与索引策略叠加扣分得到，
+    - ``quality_score`` 由 ``draft.quality_flags`` 与质量扣分表叠加得到，
       只做检索降权，不在这里丢弃内容；
     - ``semantic_description`` 只由表格/代码切片器写入，纯文本 chunk 为空；
     - ``doc_type/parser_id/chunking_version/index_version`` 来自本次入库；
     - 标题与完整路径写入模型，最终由 ``chunk_properties`` 落
       Weaviate ``heading`` / ``heading_path``（D-76）。
     """
-    effective = policy or get_indexer_policy()
     created_at = utcnow()
     return [
         Chunk(
@@ -70,7 +54,7 @@ def drafts_to_chunks(
             heading_path=list(draft.heading_path),
             semantic_description=draft.semantic_description,
             language=draft.language,
-            quality_score=effective.quality.score(draft.quality_flags),
+            quality_score=quality_score(draft.quality_flags),
             chunk_hash=chunk_hash(draft.text),
             doc_type=parsed.profile.doc_type.value,
             parser_id=parsed.parser_id,

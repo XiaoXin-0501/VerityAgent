@@ -23,9 +23,8 @@ from config.rag import IndexerConfig
 from rag.shared.enums import BlockType
 from rag.shared.models import Chunk, GraphRelation, ChunkGraphExtraction
 
-from ..policy import IndexerPolicy, get_indexer_policy
-
 __all__ = [
+    "GENERIC_STOPWORDS",
     "GRAPH_TEXT_BLOCK_TYPES",
     "GraphExtractor",
     "RelationExtractor",
@@ -44,8 +43,72 @@ GRAPH_TEXT_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.LIST})
 # 只保留名词性词性：普通名词/专名/动名词/动名词短语/形容词性名词/英文
 _KEYWORD_POS = frozenset({"n", "nr", "ns", "nt", "nz", "vn", "an", "eng"})
 
-# 通用停用词由 IndexerPolicy.graph.generic_stopwords 管理
-# （config/rag_policy.json），领域停用词在 DomainProfile.stopwords。
+# 通用停用词（内置词表）；领域停用词在
+# DomainProfile.stopwords，由领域抽取器合并使用。
+GENERIC_STOPWORDS = frozenset(
+    {
+        "这个",
+        "那个",
+        "这些",
+        "那些",
+        "可以",
+        "需要",
+        "使用",
+        "通过",
+        "进行",
+        "以及",
+        "或者",
+        "但是",
+        "因为",
+        "所以",
+        "如果",
+        "然后",
+        "我们",
+        "你们",
+        "他们",
+        "自己",
+        "一个",
+        "一些",
+        "什么",
+        "怎么",
+        "如何",
+        "其中",
+        "对于",
+        "关于",
+        "the",
+        "and",
+        "for",
+        "with",
+        "this",
+        "that",
+        "from",
+        "into",
+        "are",
+        "was",
+        "were",
+        "will",
+        "can",
+        "not",
+        "you",
+        "your",
+        "our",
+        "its",
+        "has",
+        "have",
+        "had",
+        "but",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "is",
+        "as",
+        "by",
+        "be",
+        "it",
+    }
+)
 
 # 英文技术词（API、RAG、BGE-M3、C++ 等）；jieba 不一定能完整切出。
 _ASCII_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+#.\-]{1,31}")
@@ -145,7 +208,7 @@ def extract_keywords(
     3. 去重（大小写不敏感）后按词频降序，频次相同按长度降序、首次出现升序，
        保证同一输入每次结果一致。
 
-    ``stopwords`` 为空时使用 ``IndexerPolicy.graph.generic_stopwords``；
+    ``stopwords`` 为空时使用模块内置 ``GENERIC_STOPWORDS``；
     传入集合时以传入值为准（领域实现会合并通用词与领域词）。
     ``postokenizer`` 供领域实现传入带用户词典的私有分词器。
     """
@@ -158,7 +221,7 @@ def extract_keywords(
         postokenizer = pseg
 
     if stopwords is None:
-        stopwords = get_indexer_policy().graph.generic_stopwords
+        stopwords = GENERIC_STOPWORDS
     extra_stopwords = frozenset(stopwords)
     counts: Counter[str] = Counter()
     first_seen: dict[str, int] = {}
@@ -276,12 +339,10 @@ class RuleGraphExtractor:
         config: IndexerConfig,
         *,
         relation_extractor: RelationExtractor | None = None,
-        policy: IndexerPolicy | None = None,
     ) -> None:
-        """保存配置、可选关系抽取器与索引策略。"""
+        """保存配置与可选关系抽取器。"""
         self.config = config
         self.relation_extractor = relation_extractor
-        self.policy = policy or get_indexer_policy()
 
     async def extract(self, chunk: Chunk) -> ChunkGraphExtraction:
         """抽取关键词；关系为空或由注入的抽取器提供。
@@ -297,7 +358,7 @@ class RuleGraphExtractor:
         keywords = extract_keywords(
             text,
             top_k=self.config.graph_max_keywords_per_chunk,
-            stopwords=self.policy.graph.generic_stopwords,
+            stopwords=GENERIC_STOPWORDS,
         )
         relations: list[GraphRelation] = []
         if self.relation_extractor is not None:

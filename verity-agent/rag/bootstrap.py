@@ -23,7 +23,6 @@ from .indexer import (
     DefaultIndexingPipeline,
     EmbeddingService,
     GraphExtractor,
-    IndexerPolicy,
     InMemoryJobStore,
     IndexingRepository,
     JobStore,
@@ -35,7 +34,6 @@ from .indexer import (
     WeaviateChunkStore,
     build_default_chunk_cache,
     build_graph_extractor,
-    get_indexer_policy,
     load_domain_profile,
 )
 from .retriever.cache import RetrievalCache
@@ -96,7 +94,6 @@ def build_default_indexing_pipeline(
     graph_extractor: GraphExtractor | None = None,
     graph_chat_model: Any | None = None,
     prompt_registry: PromptRegistry | None = None,
-    indexer_policy: IndexerPolicy | None = None,
     table_summary_chat_model: Any | None = None,
     code_summary_chat_model: Any | None = None,
     description_chat_model: Any | None = None,
@@ -117,8 +114,6 @@ def build_default_indexing_pipeline(
     ``IndexerConfig.graph_extraction_mode`` 构建。``graph_chat_model`` 只在
     ``llm/hybrid`` 模式下使用，未注入时自动降级为领域词典。
     ``prompt_registry`` 用于外部覆盖 Prompt 模板；为空时使用内置模板。
-    ``indexer_policy`` 用于覆盖质量扣分/描述标题/阶段进度；为空时使用内置
-    ``config/rag_policy.json``。
 
     表格/代码语义描述：显式注入 ``table_describer`` / ``code_describer`` 优先；
     否则在对应 LLM 开关打开且注入 chat model 时构造 ChatDescriber，用于
@@ -130,9 +125,6 @@ def build_default_indexing_pipeline(
     ``ChatDescriptionRefiner``，用于压缩“标题+长摘要/前言”或精炼弱候选。
     """
     cfg = config or IndexerConfig()
-    policy = indexer_policy or get_indexer_policy(
-        cfg.indexer_policy_path
-    )
     prompts = prompt_registry
     # 默认使用带熔断的 Redis 缓存；Redis 不可用时自动降级为 miss，不阻塞入库。
     rag_cache = cache
@@ -154,7 +146,6 @@ def build_default_indexing_pipeline(
         ingestion=TextIngestionPipeline(
             cfg,
             description_refiner=description_refiner,
-            policy=policy,
             table_describer=table_describer,
             code_describer=code_describer,
         ),
@@ -180,9 +171,7 @@ def build_default_indexing_pipeline(
             cfg,
             chat_model=graph_chat_model,
             prompts=prompt_registry,
-            indexer_policy=policy,
         ),
-        policy=policy,
         worker_id=worker_id,
         run_in_background=run_in_background,
     )

@@ -37,6 +37,7 @@ from .domain.extractor import (
 )
 from .domain.models import DomainProfile
 from .graph import (
+    GENERIC_STOPWORDS,
     GraphExtractor,
     _is_valid_keyword,
     _normalize_keyword,
@@ -44,8 +45,6 @@ from .graph import (
     graph_nearest_heading,
     graph_source_text,
 )
-from ..policy import IndexerPolicy, get_indexer_policy
-
 __all__ = ["HybridGraphExtractor", "LLMGraphExtractor"]
 
 logger = logging.getLogger(__name__)
@@ -92,9 +91,8 @@ class LLMGraphExtractor:
         model_id: str | None = None,
         fallback: GraphExtractor | None = None,
         prompts: PromptRegistry | None = None,
-        policy: IndexerPolicy | None = None,
     ) -> None:
-        """保存模型句柄、领域画像、Prompt 注册表与索引策略。"""
+        """保存模型句柄、领域画像与 Prompt 注册表。"""
         self.config = config
         self.profile = profile
         self.chat_model = chat_model
@@ -106,7 +104,6 @@ class LLMGraphExtractor:
         )
         self.fallback = fallback
         self.prompts = prompts or get_default_prompt_registry()
-        self.policy = policy or get_indexer_policy()
 
     async def extract(self, chunk: Chunk) -> ChunkGraphExtraction:
         """抽取单个 chunk；失败时使用 fallback，没有 fallback 返回空结果。"""
@@ -247,7 +244,7 @@ class LLMGraphExtractor:
                 or _normalize_keyword(entity.name)
             )
             if not _is_valid_entity_name(
-                name, self.policy.graph.generic_stopwords
+                name, GENERIC_STOPWORDS
             ) or self.profile.is_stopword(name):
                 continue
             key = name.lower()
@@ -270,9 +267,9 @@ class LLMGraphExtractor:
             )
             relation = (item.relation or "").strip().lower()
             if not _is_valid_entity_name(
-                subject, self.policy.graph.generic_stopwords
+                subject, GENERIC_STOPWORDS
             ) or not _is_valid_entity_name(
-                obj, self.policy.graph.generic_stopwords
+                obj, GENERIC_STOPWORDS
             ):
                 continue
             if self.profile.is_stopword(subject) or self.profile.is_stopword(obj):

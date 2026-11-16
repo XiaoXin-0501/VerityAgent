@@ -24,17 +24,6 @@ from .enrichment import (
 from .indexing_pipeline import DefaultIndexingPipeline
 from .job import InMemoryJobStore, JobStore, to_job_view
 from .pipeline import IndexingPipeline
-from .policy import (
-    AssociationPolicy,
-    DescriptionPolicy,
-    GraphPolicy,
-    IndexerPolicy,
-    QualityPenaltyPolicy,
-    StageProgressPolicy,
-    get_indexer_policy,
-    load_indexer_policy,
-    normalize_heading_key,
-)
 from .repository import IndexingRepository, PgIndexingRepository
 from .stores import (
     GraphIndexStore,
@@ -69,15 +58,6 @@ __all__ = [
     "ChatTableDescriber",
     "ChatCodeDescriber",
     "ChatDescriptionRefiner",
-    "IndexerPolicy",
-    "QualityPenaltyPolicy",
-    "DescriptionPolicy",
-    "AssociationPolicy",
-    "GraphPolicy",
-    "StageProgressPolicy",
-    "get_indexer_policy",
-    "load_indexer_policy",
-    "normalize_heading_key",
     "GraphExtractor",
     "RuleGraphExtractor",
     "DomainGraphExtractor",

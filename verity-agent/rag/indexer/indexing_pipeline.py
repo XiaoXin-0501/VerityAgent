@@ -35,11 +35,13 @@ from rag.shared.enums import (
 )
 from rag.shared.models import (
     DocumentSource,
+    IndexDocumentRequest,
     IndexingError,
     IndexingJob,
     IndexingJobView,
     IndexingWarning,
 )
+from store.pg.models.knowledge import Document
 from utils.hashing import sha256_bytes
 from utils.serialization import json_dumps
 from utils.time import utcnow
@@ -48,7 +50,6 @@ from .conversion import build_parse_manifest, drafts_to_chunks
 from .embedding import EmbeddingResult, EmbeddingService
 from .enrichment import GraphExtractor, build_graph_extractor
 from .job import InMemoryJobStore, JobStore, TERMINAL_STATUSES, to_job_view
-from .policy import IndexerPolicy, get_indexer_policy
 from .repository import IndexingRepository
 from .stores import (
     GraphIndexStore,
@@ -58,9 +59,28 @@ from .stores import (
 )
 from .text_pipeline import TextIngestionPipeline
 
-__all__ = ["DefaultIndexingPipeline"]
+__all__ = ["DefaultIndexingPipeline", "STAGE_PROGRESS"]
 
 logger = logging.getLogger(__name__)
+
+# 入库/删除阶段进度（内置表）；只用于 job view / PG 投影。
+STAGE_PROGRESS: dict[IndexingStage, float] = {
+    IndexingStage.FETCHING: 0.05,
+    IndexingStage.PARSING: 0.15,
+    IndexingStage.CHUNKING: 0.3,
+    IndexingStage.DEDUPING: 0.35,
+    IndexingStage.DESCRIBING: 0.4,
+    IndexingStage.ENRICHING: 0.45,
+    IndexingStage.EMBEDDING: 0.55,
+    IndexingStage.VECTOR_UPSERT: 0.7,
+    IndexingStage.GRAPH_UPSERT: 0.82,
+    IndexingStage.COMMITTING: 0.92,
+    IndexingStage.DONE: 1.0,
+    IndexingStage.DELETING_PG: 0.1,
+    IndexingStage.DELETING_VECTOR: 0.35,
+    IndexingStage.DELETING_GRAPH: 0.55,
+    IndexingStage.DELETING_OBJECT: 0.75,
+}
 
 
 class _Cancelled(Exception):
@@ -83,7 +103,6 @@ class DefaultIndexingPipeline:
         repository: IndexingRepository | None = None,
         job_store: JobStore | None = None,
         graph_extractor: GraphExtractor | None = None,
-        policy: IndexerPolicy | None = None,
         worker_id: str = "rag-indexer",
         run_in_background: bool = True,
     ) -> None:
@@ -97,12 +116,8 @@ class DefaultIndexingPipeline:
         self.source_store = source_store
         self.repository = repository
         self.job_store = job_store or InMemoryJobStore()
-        self.policy = policy or get_indexer_policy(
-            self.config.indexer_policy_path
-        )
         self.graph_extractor = graph_extractor or build_graph_extractor(
-            self.config,
-            indexer_policy=self.policy,
+            self.config
         )
         self.worker_id = worker_id
         self.run_in_background = run_in_background
@@ -111,20 +126,20 @@ class DefaultIndexingPipeline:
 
     # ——————————————————— 公共接口 ———————————————————
 
-    async def submit(self, request) -> IndexingJobView:
+    async def submit(self, request: IndexDocumentRequest) -> IndexingJobView:
         """创建入库 job；后台模式下立即返回 QUEUED/RUNNING 视图。"""
         return await self._create_and_run(
             request,
             background=self.run_in_background,
         )
 
-    async def execute(self, request) -> IndexingJobView:
+    async def execute(self, request: IndexDocumentRequest) -> IndexingJobView:
         """同步执行入库，供 PG worker 使用；不创建进程内后台任务。"""
         return await self._create_and_run(request, background=False)
 
     async def _create_and_run(
         self,
-        request,
+        request: IndexDocumentRequest,
         *,
         background: bool,
     ) -> IndexingJobView:
@@ -135,16 +150,18 @@ class DefaultIndexingPipeline:
                 "删除请使用 Indexer.delete(doc_id)",
             )
         document = await self._get_document(request.doc_id)
-        if document is not None and document.kb_id != request.kb_id:
-            raise RagError(
-                RagErrorCode.INVALID_REQUEST,
-                "doc_id 与 kb_id 不匹配",
-                details={
+        if document is not None:
+            if document.kb_id != request.kb_id:
+                mismatch: dict[str, Any] = {
                     "doc_id": str(request.doc_id),
                     "kb_id": str(request.kb_id),
                     "doc_kb_id": str(document.kb_id),
-                },
-            )
+                }
+                raise RagError(
+                    RagErrorCode.INVALID_REQUEST,
+                    "doc_id 与 kb_id 不匹配",
+                    details=mismatch,
+                )
         await self._ensure_mode_allowed(document, request.mode)
         # REINDEX 先 bump KB 版本，让重切片期间的旧检索缓存立即失效（D-78）。
         if request.mode is IndexMode.REINDEX and self.repository is not None:
@@ -249,7 +266,7 @@ class DefaultIndexingPipeline:
     async def _run_index(
         self,
         job: IndexingJob,
-        request,
+        request: IndexDocumentRequest,
         source: DocumentSource,
     ) -> None:
         """入库任务主流程；所有异常收敛为 FAILED/DEAD。"""
@@ -316,7 +333,7 @@ class DefaultIndexingPipeline:
     async def _index(
         self,
         job: IndexingJob,
-        request,
+        request: IndexDocumentRequest,
         source: DocumentSource,
     ) -> IndexingJob:
         """执行入库的所有阶段。"""
@@ -390,7 +407,6 @@ class DefaultIndexingPipeline:
             parsed=result.parsed,
             index_version=index_version,
             chunking_version=self.config.chunking_version,
-            policy=self.policy,
         )
 
         # 4) ENRICHING：图关键词/关系抽取（默认规则）。
@@ -536,9 +552,7 @@ class DefaultIndexingPipeline:
         job = await self._update(
             job,
             stage=stage,
-            progress=self.policy.staging.stage_progress.get(
-                stage, job.progress
-            ),
+            progress=STAGE_PROGRESS.get(stage, job.progress),
         )
         if self.repository is not None:
             await self.repository.update_progress(
@@ -689,7 +703,7 @@ class DefaultIndexingPipeline:
                 details={"expected": expected, "declared": declared},
             )
 
-    async def _get_document(self, doc_id: UUID):
+    async def _get_document(self, doc_id: UUID) -> Document | None:
         """读取 PG 文档；未注入 repository 时返回 None（测试场景）。"""
         if self.repository is None:
             return None
@@ -703,14 +717,18 @@ class DefaultIndexingPipeline:
         return document
 
     @staticmethod
-    def _document_status(document) -> str | None:
+    def _document_status(document: Document | None) -> str | None:
         """取文档状态的字符串值；测试投影可能没有 status。"""
         if document is None:
             return None
         status = getattr(document, "status", None)
         return getattr(status, "value", status)
 
-    async def _ensure_mode_allowed(self, document, mode: IndexMode) -> None:
+    async def _ensure_mode_allowed(
+        self,
+        document: Document | None,
+        mode: IndexMode,
+    ) -> None:
         """CREATE 不允许覆盖已有索引；UPDATE/REINDEX 可以。"""
         if document is None or mode is not IndexMode.CREATE:
             return
@@ -721,7 +739,7 @@ class DefaultIndexingPipeline:
                 details={"doc_id": str(document.id)},
             )
 
-    async def _ensure_processing(self, document) -> None:
+    async def _ensure_processing(self, document: Document | None) -> None:
         """入库前把文档置 processing，并确保当前 worker 持有租约。
 
         worker 通过 ``claim_index_jobs`` 领取时锁字段已经写好；直接调用
@@ -751,7 +769,7 @@ class DefaultIndexingPipeline:
     @staticmethod
     def _with_description_override(
         source: DocumentSource,
-        request,
+        request: IndexDocumentRequest,
     ) -> DocumentSource:
         """把人工描述合并进 source.metadata，复用描述提取优先级。"""
         override = (request.description_override or "").strip()

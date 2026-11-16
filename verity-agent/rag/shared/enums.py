@@ -96,7 +96,7 @@ class QualityFlag(StrEnum):
     """内容质量缺陷标记。
 
     标记只描述“哪里可能不可靠”，不决定是否丢弃；丢弃/合并由 QualityGate/
-    DedupPolicy 决定，保留下来时由 `IndexerPolicy.quality.penalties` 折算成
+    DedupPolicy 决定，保留下来时由 `quality.py` 的内置扣分表折算成
     chunk.quality_score 供检索降权。
     """
 

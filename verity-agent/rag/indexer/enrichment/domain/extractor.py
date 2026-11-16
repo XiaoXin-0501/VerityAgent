@@ -26,6 +26,7 @@ from rag.shared.models import Chunk, ChunkGraphExtraction, GraphRelation
 from utils.text import split_sentences
 
 from ..graph import (
+    GENERIC_STOPWORDS,
     RelationExtractor,
     _normalize_keyword,
     extract_keywords,
@@ -34,7 +35,6 @@ from ..graph import (
     graph_source_text,
     merge_relation_whitelist,
 )
-from ...policy import IndexerPolicy, get_indexer_policy
 from .models import DomainMatch, DomainProfile
 
 __all__ = [
@@ -137,9 +137,8 @@ class DomainGraphExtractor:
         profile: DomainProfile,
         *,
         relation_extractor: RelationExtractor | None = None,
-        policy: IndexerPolicy | None = None,
     ) -> None:
-        """保存配置/画像/策略，并构建私有 jieba 分词器。
+        """保存配置/画像，并构建私有 jieba 分词器。
 
         使用 ``jieba.Tokenizer`` 而不是全局 jieba，避免不同领域/实例之间
         互相污染用户词典。
@@ -153,11 +152,8 @@ class DomainGraphExtractor:
                 profile,
                 max_relations=config.graph_max_relations_per_chunk,
             )
-        self.policy = policy or get_indexer_policy()
         # 通用停用词与领域停用词合并，避免通用词表只在一处生效。
-        self._stopwords = frozenset(self.policy.graph.generic_stopwords) | (
-            profile.stopword_keys
-        )
+        self._stopwords = GENERIC_STOPWORDS | profile.stopword_keys
         self._postokenizer = _build_postokenizer(profile)
 
     def extract_keywords(self, text: str, *, heading: str = "") -> list[str]:

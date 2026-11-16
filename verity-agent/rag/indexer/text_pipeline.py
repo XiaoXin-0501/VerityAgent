@@ -30,7 +30,6 @@ from .chunkers import (
 from .description import DescriptionRefiner, DocumentDescriptionExtractor
 from .parsers import build_parser_registry, detect_profile
 from .parsers.base import DocumentParser
-from .policy import IndexerPolicy, get_indexer_policy
 from .quality import QualityGate, deduplicate_chunks
 
 __all__ = ["TextIngestionResult", "TextIngestionPipeline"]
@@ -56,11 +55,10 @@ class TextIngestionPipeline:
         parser_registry: ParserRegistry | None = None,
         chunker_registry: ChunkerRegistry | None = None,
         description_refiner: DescriptionRefiner | None = None,
-        policy: IndexerPolicy | None = None,
         table_describer: TableDescriber | None = None,
         code_describer: CodeDescriber | None = None,
     ) -> None:
-        """保存配置与注册表；未注入时按配置构建默认 parser/chunker 与策略。"""
+        """保存配置与注册表；未注入时按配置构建默认 parser/chunker。"""
         self.config = config or IndexerConfig()
         self.parsers = parser_registry or build_parser_registry(self.config)
         self.chunkers = chunker_registry or build_chunker_registry(
@@ -68,18 +66,13 @@ class TextIngestionPipeline:
             table_describer=table_describer,
             code_describer=code_describer,
         )
-        self.policy = policy or get_indexer_policy(
-            self.config.indexer_policy_path
-        )
         self.section_chunker = SectionAwareChunker(
             self.config,
             self.chunkers,
-            policy=self.policy,
         )
         self.descriptions = DocumentDescriptionExtractor(
             self.config,
             description_refiner,
-            policy=self.policy,
         )
 
     async def process(
