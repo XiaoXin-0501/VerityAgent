@@ -101,6 +101,9 @@
                 <el-tag size="small" effect="plain" type="info">
                   权限：{{ selectedKb.required_permission_code }}
                 </el-tag>
+                <el-tag size="small" effect="plain" type="success">
+                  领域：{{ selectedKb.domain_profile || '全局默认' }}
+                </el-tag>
                 <el-tag size="small" effect="plain" type="info">
                   {{ selectedKb.embedding_model_id }} · {{ selectedKb.embedding_dimensions }} 维
                 </el-tag>
@@ -240,6 +243,24 @@
         <el-form-item label="访问权限码" required>
           <el-input v-model="createForm.required_permission_code" placeholder="kb:read" />
           <p class="kb-form-hint">对话检索时按用户真实拥有的权限码校验。</p>
+        </el-form-item>
+        <el-form-item label="领域画像">
+          <el-select
+            v-model="createForm.domain_profile"
+            clearable
+            placeholder="使用全局默认领域"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="profile in availableDomainProfiles"
+              :key="profile"
+              :label="profile"
+              :value="profile"
+            />
+          </el-select>
+          <p class="kb-form-hint">
+            入库建图时使用该领域词典与示例；修改后需重建索引。
+          </p>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -427,6 +448,7 @@ const createForm = reactive({
   name: '',
   description: '',
   required_permission_code: appConfig.defaultKbPermissionCode,
+  domain_profile: '',
 })
 const uploadFile = ref<File | null>(null)
 const uploadDescription = ref('')
@@ -439,6 +461,10 @@ let disposed = false
 
 const selectedKb = computed(
   () => knowledgeBases.value.find((item) => item.id === selectedId.value) ?? null,
+)
+
+const availableDomainProfiles = computed(
+  () => options.value?.domain_profiles ?? [],
 )
 
 const acceptedExtensions = computed(() => {
@@ -526,6 +552,7 @@ function openCreate(): void {
   createForm.description = ''
   createForm.required_permission_code =
     options.value?.default_permission_code ?? appConfig.defaultKbPermissionCode
+  createForm.domain_profile = options.value?.default_domain_profile ?? ''
   createVisible.value = true
 }
 
@@ -546,6 +573,7 @@ async function submitCreate(): Promise<void> {
       name,
       description: createForm.description.trim() || null,
       required_permission_code: permission,
+      domain_profile: createForm.domain_profile || null,
     })
     knowledgeBases.value = [kb, ...knowledgeBases.value]
     selectedId.value = kb.id

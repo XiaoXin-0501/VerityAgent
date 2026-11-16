@@ -50,6 +50,7 @@ ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS index_version BIG
 ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS embedding_model_id VARCHAR(100) NOT NULL DEFAULT 'unset';
 ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS embedding_dimensions INTEGER NOT NULL DEFAULT 1024;
 ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS embedding_version VARCHAR(50) NOT NULL DEFAULT 'v1';
+ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS domain_profile VARCHAR(100);
 ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS delete_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE IF EXISTS knowledge_bases ADD COLUMN IF NOT EXISTS delete_error TEXT;
@@ -188,6 +189,8 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     name                     VARCHAR(200) NOT NULL,
     description              TEXT,
     required_permission_code VARCHAR(100) NOT NULL,
+    -- 领域画像名；NULL 表示使用 IndexerConfig.domain_profile
+    domain_profile           VARCHAR(100),
     index_version            BIGINT NOT NULL DEFAULT 0 CHECK (index_version >= 0),
     embedding_model_id       VARCHAR(100) NOT NULL,
     embedding_dimensions     INTEGER NOT NULL CHECK (embedding_dimensions > 0),

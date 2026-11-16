@@ -4,8 +4,9 @@
 
 1. **领域实体命中**：``DomainProfile`` 中最长优先的词典匹配；实体类型权重、
    词频、是否出现在标题路径都会参与打分；
-2. **通用名词补充**：jieba 词性过滤，仅补充领域词典没有覆盖的概念；
-   可用 ``graph_include_generic_terms`` / ``profile.include_generic_terms`` 关闭；
+2. **英文/技术术语补充**：保守 ASCII 正则，不再使用中文分词；仅补充领域词典
+   没有覆盖的技术词，可用 ``graph_include_generic_terms`` /
+   ``profile.include_generic_terms`` 关闭；
 3. **可选关系抽取**：仍通过注入的 ``RelationExtractor`` 扩展（默认不抽），
    返回值统一经领域关系白名单过滤。
 
@@ -26,6 +27,7 @@ from rag.shared.models import Chunk, ChunkGraphExtraction, GraphRelation
 from utils.text import split_sentences
 
 from ..graph import (
+    GENERIC_KEYWORD_BLACKLIST,
     GENERIC_STOPWORDS,
     RelationExtractor,
     _normalize_keyword,
@@ -34,6 +36,7 @@ from ..graph import (
     graph_nearest_heading,
     graph_source_text,
     merge_relation_whitelist,
+    normalize_blocked_terms,
 )
 from .models import DomainMatch, DomainProfile
 
@@ -138,11 +141,7 @@ class DomainGraphExtractor:
         *,
         relation_extractor: RelationExtractor | None = None,
     ) -> None:
-        """保存配置/画像，并构建私有 jieba 分词器。
-
-        使用 ``jieba.Tokenizer`` 而不是全局 jieba，避免不同领域/实例之间
-        互相污染用户词典。
-        """
+        """保存配置/画像；不加载分词器，中文概念只来自领域词典。"""
         self.config = config
         self.profile = profile
         self.relation_extractor = relation_extractor
@@ -154,10 +153,15 @@ class DomainGraphExtractor:
             )
         # 通用停用词与领域停用词合并，避免通用词表只在一处生效。
         self._stopwords = GENERIC_STOPWORDS | profile.stopword_keys
-        self._postokenizer = _build_postokenizer(profile)
+        # 黑名单与停用词语义分开：命中后明确禁止进入图节点。
+        self.blacklist = (
+            GENERIC_KEYWORD_BLACKLIST
+            | normalize_blocked_terms(config.graph_keyword_blacklist)
+            | profile.blacklist_keys
+        )
 
     def extract_keywords(self, text: str, *, heading: str = "") -> list[str]:
-        """按“领域实体优先、通用名词补充”的规则返回关键词。"""
+        """按“领域实体优先、英文/技术术语补充”的规则返回关键词。"""
         if self.config.graph_extraction_mode == "off" or not text:
             return []
 
@@ -172,12 +176,12 @@ class DomainGraphExtractor:
         if not include_generic:
             return [name for name, _score in domain_terms][:top_k]
 
-        # 通用词多取一些候选，过滤掉被测到的领域实体覆盖的片段后再补位。
+        # 技术术语多取一些候选，过滤掉已被领域实体覆盖的片段后再补位。
         candidates = extract_keywords(
             text,
             top_k=top_k * self.profile.generic_candidate_factor,
             stopwords=self._stopwords,
-            postokenizer=self._postokenizer,
+            blacklist=self.blacklist,
         )
         matched_keys = {_normalize_keyword(item.surface).lower() for item in matches}
         generic = [
@@ -258,7 +262,12 @@ class DomainGraphExtractor:
 
         scored: list[tuple[str, float]] = []
         for name, entry in stats.items():
-            if name.lower() in self._stopwords or self.profile.is_stopword(name):
+            if (
+                name.lower() in self._stopwords
+                or name.lower() in self.blacklist
+                or self.profile.is_stopword(name)
+                or self.profile.is_blacklisted(name)
+            ):
                 continue
             weight = float(entry["weight"])
             count = int(entry["count"])
@@ -272,7 +281,7 @@ class DomainGraphExtractor:
         return scored
 
     def _is_generic_term(self, term: str, matched_keys: set[str]) -> bool:
-        """过滤与领域实体重复/被覆盖的通用词。
+        """过滤与领域实体重复/被覆盖的补充术语。
 
         - 本身是领域词（如未命中的别名）→ 不重复补；
         - 是某个已命中实体的子串（如“糖尿病”之于“2型糖尿病”）→ 噪声；
@@ -283,26 +292,9 @@ class DomainGraphExtractor:
             return False
         if self.profile.canonicalize(term) is not None:
             return False
-        if self.profile.is_stopword(term):
+        if self.profile.is_stopword(term) or key in self.blacklist:
             return False
         return not any(key != item and key in item for item in matched_keys)
-
-
-def _build_postokenizer(profile: DomainProfile):
-    """构建带领域用户词典的私有 POS 分词器。
-
-    领域词加进分词器后，通用关键词不会被切成“糖尿/病”这类碎片；
-    词频给高值，保证分词器优先保留完整词。
-    """
-    import jieba
-    import jieba.posseg as pseg
-
-    tokenizer = jieba.Tokenizer()
-    for entity in profile.entities:
-        tokenizer.add_word(entity.name, freq=100_000)
-        for alias in entity.aliases:
-            tokenizer.add_word(alias, freq=100_000)
-    return pseg.POSTokenizer(tokenizer)
 
 
 def _first_index(stats: dict[str, _EntityStat], name: str) -> int:

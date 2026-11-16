@@ -3,7 +3,7 @@
 工厂是“配置 → 实现”的唯一入口：
 
 - ``rule``：不加载领域画像，兼容旧行为；
-- ``lexicon``（默认）：加载领域画像，词典为主、jieba 补充；
+- ``lexicon``：加载领域画像，词典命中 + 英文/技术术语补充；
 - ``llm``：领域提示词 + 模型，失败降级到词典；
 - ``hybrid``：词典与 LLM 合并；
 - ``off``：返回不做事的抽取器，由流水线跳过建图阶段。
@@ -49,13 +49,20 @@ def build_graph_extractor(
     重复读 JSON、重复创建模型句柄；``prompts`` 允许注入外部覆盖目录构建的
     Prompt 注册表。
     """
-    mode = (config.graph_extraction_mode or "lexicon").strip().lower()
+    mode = (config.graph_extraction_mode or "hybrid").strip().lower()
     if mode not in GRAPH_EXTRACTION_MODES:
         raise RagError(
             RagErrorCode.INVALID_CONFIG,
             f"不支持的图抽取模式: {config.graph_extraction_mode}",
             details={"mode": config.graph_extraction_mode},
         )
+    if mode in {"llm", "hybrid"} and not config.graph_llm_enabled:
+        logger.warning(
+            "graph_extraction_mode=%s 但 graph_llm_enabled=false，"
+            "降级为领域词典抽取",
+            mode,
+        )
+        mode = "lexicon"
     if mode in {"off", "rule"}:
         return RuleGraphExtractor(
             config,

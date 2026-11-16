@@ -20,6 +20,10 @@ class IndexingRepository(Protocol):
         """读取文档元数据（含 index_version/status）。"""
         ...
 
+    async def get_knowledge_base(self, kb_id) -> Any | None:
+        """读取知识库元数据（含 domain_profile）；缺失时返回 None。"""
+        ...
+
     async def mark_processing(self, doc_id) -> None:
         """入库开始：pending/failed/completed → processing。"""
         ...
@@ -103,6 +107,10 @@ class PgIndexingRepository:
     async def get_document(self, doc_id) -> Any | None:
         """读取未删除文档。"""
         return await self.documents.get(doc_id)
+
+    async def get_knowledge_base(self, kb_id) -> Any | None:
+        """读取未删除知识库；用于按 KB 选择领域画像。"""
+        return await self.knowledge_bases.get(kb_id)
 
     async def mark_processing(self, doc_id) -> None:
         """置 processing；状态机允许 pending/failed/completed → processing。"""

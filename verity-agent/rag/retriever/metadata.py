@@ -49,6 +49,13 @@ class RetrievalMetadataStore(Protocol):
         """批量返回知识库所需的权限码（PG ``required_permission_code``）。"""
         ...
 
+    async def get_kb_domain_profiles(
+        self,
+        kb_ids: list[UUID],
+    ) -> dict[UUID, str | None]:
+        """批量返回知识库绑定的领域画像名；NULL 表示使用全局默认。"""
+        ...
+
 
 class PgRetrievalMetadataStore:
     """基于 PostgreSQL 的检索元数据适配器；直接走连接池，不拼业务 SQL 到 Retriever。"""
@@ -148,4 +155,28 @@ class PgRetrievalMetadataStore:
             UUID(str(row["id"])): str(row["required_permission_code"])
             for row in rows
             if row["required_permission_code"]
+        }
+
+    async def get_kb_domain_profiles(
+        self,
+        kb_ids: list[UUID],
+    ) -> dict[UUID, str | None]:
+        """批量读取 knowledge_bases.domain_profile；NULL 原样返回。"""
+        if not kb_ids:
+            return {}
+        async with get_pg().transaction() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT id, domain_profile
+                FROM knowledge_bases
+                WHERE id = ANY(%s) AND deleted_at IS NULL
+                """,
+                (kb_ids,),
+            )
+            rows = await cursor.fetchall()
+        return {
+            UUID(str(row["id"])): (
+                str(row["domain_profile"]) if row["domain_profile"] else None
+            )
+            for row in rows
         }

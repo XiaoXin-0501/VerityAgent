@@ -27,6 +27,7 @@ from exception import (
     UnavailableError,
     ValidationError,
 )
+from rag.indexer.enrichment.domain import BUILTIN_DOMAIN_DIR, load_domain_profile
 from rag.public import DocumentSource, IndexDocumentRequest
 from store.minio import MinioStorage
 from store.minio.paths import kb_source_key, sanitize_extension
@@ -64,12 +65,15 @@ class CreateKnowledgeBaseRequest(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     # 访问该库所需权限码；为空使用 RAG__DEFAULT_KB_PERMISSION_CODE
     required_permission_code: str | None = Field(default=None, max_length=100)
+    # 该库绑定的领域画像（如 medical / pet_medical）；为空使用全局默认
+    domain_profile: str | None = Field(default=None, max_length=100)
 
 
 class UpdateKnowledgeBaseStatusRequest(BaseModel):
-    """启用/停用知识库。"""
+    """启用/停用知识库；可选切换领域画像（切换后需 REINDEX）。"""
 
     status: Literal["active", "disabled"]
+    domain_profile: str | None = Field(default=None, max_length=100)
 
 
 class DeleteKnowledgeBaseRequest(BaseModel):
@@ -93,6 +97,7 @@ def _kb_payload(kb: KnowledgeBase) -> dict[str, Any]:
         "name": kb.name,
         "description": kb.description,
         "required_permission_code": kb.required_permission_code,
+        "domain_profile": kb.domain_profile,
         "embedding_model_id": kb.embedding_model_id,
         "embedding_dimensions": kb.embedding_dimensions,
         "embedding_version": kb.embedding_version,
@@ -134,6 +139,30 @@ async def _require_kb(kb_id: UUID) -> KnowledgeBase:
     return kb
 
 
+def _available_domain_profiles() -> list[str]:
+    """列出内置/自定义目录中的领域画像名，供管理端选择。"""
+    names = {item.stem for item in BUILTIN_DOMAIN_DIR.glob("*.json")}
+    custom_dir = settings.rag.indexer.domain_profile_dir
+    if custom_dir:
+        names.update(item.stem for item in Path(custom_dir).expanduser().glob("*.json"))
+    custom_path = settings.rag.indexer.domain_profile_path
+    if custom_path:
+        names.add(Path(custom_path).stem)
+    return sorted(names)
+
+
+def _validate_domain_profile(name: str | None) -> str | None:
+    """校验并归一领域画像名；为空返回 None（使用全局默认）。"""
+    value = (name or "").strip()
+    if not value:
+        return None
+    load_domain_profile(
+        value,
+        directory=settings.rag.indexer.domain_profile_dir,
+    )
+    return value
+
+
 def _validate_extension(extension: str) -> str:
     """校验扩展名在 Indexer 启用的文档类型内。"""
     doc_type = _DOC_TYPE_BY_EXTENSION.get(extension)
@@ -161,6 +190,8 @@ async def get_knowledge_options(
         "enabled_doc_types": list(cfg.enabled_doc_types),
         "max_file_bytes": settings.message.max_file_bytes,
         "default_permission_code": settings.rag.default_kb_permission_code,
+        "domain_profiles": _available_domain_profiles(),
+        "default_domain_profile": cfg.domain_profile,
         "embedding_model_id": cfg.embedding_model_id,
         "embedding_dimensions": cfg.embedding_dimensions,
         "embedding_version": cfg.embedding_version,
@@ -186,6 +217,7 @@ async def create_knowledge_base(
         payload.name,
         permission_code,
         description=payload.description,
+        domain_profile=_validate_domain_profile(payload.domain_profile),
         embedding_model_id=cfg.embedding_model_id,
         embedding_dimensions=cfg.embedding_dimensions,
         embedding_version=cfg.embedding_version,
@@ -213,10 +245,12 @@ async def update_knowledge_base_status(
 ) -> dict[str, Any]:
     """启用/停用知识库；停用后检索不可见，文档与索引保留。"""
     await _require_kb(kb_id)
-    kb = await KnowledgeBaseRepository().update(
-        kb_id,
-        status=KnowledgeBaseStatus(payload.status),
-    )
+    updates: dict[str, Any] = {"status": KnowledgeBaseStatus(payload.status)}
+    if "domain_profile" in payload.model_fields_set:
+        updates["domain_profile"] = _validate_domain_profile(
+            payload.domain_profile
+        )
+    kb = await KnowledgeBaseRepository().update(kb_id, **updates)
     return _kb_payload(kb)
 
 

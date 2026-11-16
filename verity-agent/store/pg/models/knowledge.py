@@ -17,6 +17,8 @@ class KnowledgeBase(DBModel):
     description: str | None = None
     # 访问该库所需权限码，查询时必须真实校验用户是否拥有
     required_permission_code: str
+    # 该库绑定的领域画像名；NULL 回退到 IndexerConfig.domain_profile
+    domain_profile: str | None = None
     # KB 级缓存令牌；入库/重切片/删除时递增（D-54）
     index_version: int = 0
     # 整库重灌依据（D-57）

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -48,7 +49,11 @@ from utils.time import utcnow
 
 from .conversion import build_parse_manifest, drafts_to_chunks
 from .embedding import EmbeddingResult, EmbeddingService
-from .enrichment import GraphExtractor, build_graph_extractor
+from .enrichment import (
+    GraphExtractor,
+    build_graph_extractor,
+    load_domain_profile,
+)
 from .job import InMemoryJobStore, JobStore, TERMINAL_STATUSES, to_job_view
 from .repository import IndexingRepository
 from .stores import (
@@ -103,6 +108,9 @@ class DefaultIndexingPipeline:
         repository: IndexingRepository | None = None,
         job_store: JobStore | None = None,
         graph_extractor: GraphExtractor | None = None,
+        graph_chat_model: Any | None = None,
+        prompt_registry: Any | None = None,
+        relation_extractor: Any | None = None,
         worker_id: str = "rag-indexer",
         run_in_background: bool = True,
     ) -> None:
@@ -116,9 +124,12 @@ class DefaultIndexingPipeline:
         self.source_store = source_store
         self.repository = repository
         self.job_store = job_store or InMemoryJobStore()
-        self.graph_extractor = graph_extractor or build_graph_extractor(
-            self.config
-        )
+        # 显式注入时所有 KB 共用；否则按 KB 的 domain_profile 懒加载并缓存。
+        self._graph_extractor_override = graph_extractor
+        self._graph_chat_model = graph_chat_model
+        self._prompt_registry = prompt_registry
+        self._relation_extractor = relation_extractor
+        self._graph_extractors: dict[str, GraphExtractor] = {}
         self.worker_id = worker_id
         self.run_in_background = run_in_background
         self._tasks: dict[str, asyncio.Task] = {}
@@ -418,8 +429,10 @@ class DefaultIndexingPipeline:
         job = await self._set_stage(job, IndexingStage.ENRICHING)
         extractions = {}
         if build_graph and self.config.graph_extraction_mode != "off":
+            domain_profile = await self._get_kb_domain_profile(request.kb_id)
+            graph_extractor = self._graph_extractor_for(domain_profile)
             for chunk in chunks:
-                extractions[chunk.chunk_id] = await self.graph_extractor.extract(
+                extractions[chunk.chunk_id] = await graph_extractor.extract(
                     chunk
                 )
         elif build_graph:
@@ -702,6 +715,46 @@ class DefaultIndexingPipeline:
                 "embedding 模型声明维度与配置不一致",
                 details={"expected": expected, "declared": declared},
             )
+
+    async def _get_kb_domain_profile(self, kb_id: UUID) -> str | None:
+        """读取 KB 绑定的领域画像名；未配置/仓库不支持时回退全局配置。"""
+        if self.repository is None:
+            return None
+        getter = getattr(self.repository, "get_knowledge_base", None)
+        if not callable(getter):
+            return None
+        # 仓库协议可选扩展；运行时按存在性探测。
+        kb = await getter(kb_id)  # pyright: ignore[reportGeneralTypeIssues]
+        return getattr(kb, "domain_profile", None)
+
+    def _graph_extractor_for(self, domain_profile: str | None) -> GraphExtractor:
+        """按 KB 的领域画像选择抽取器；同画像实例复用。"""
+        if self._graph_extractor_override is not None:
+            return self._graph_extractor_override
+        name = (domain_profile or self.config.domain_profile or "pet_medical").strip()
+        cached = self._graph_extractors.get(name)
+        if cached is not None:
+            return cached
+        configured_path = self.config.domain_profile_path
+        profile_path = (
+            configured_path
+            if configured_path and Path(configured_path).stem == name
+            else None
+        )
+        profile = load_domain_profile(
+            name,
+            path=profile_path,
+            directory=self.config.domain_profile_dir,
+        )
+        extractor = build_graph_extractor(
+            self.config,
+            profile=profile,
+            chat_model=self._graph_chat_model,
+            prompts=self._prompt_registry,
+            relation_extractor=self._relation_extractor,
+        )
+        self._graph_extractors[name] = extractor
+        return extractor
 
     async def _get_document(self, doc_id: UUID) -> Document | None:
         """读取 PG 文档；未注入 repository 时返回 None（测试场景）。"""

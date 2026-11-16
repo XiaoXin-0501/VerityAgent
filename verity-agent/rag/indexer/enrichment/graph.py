@@ -2,12 +2,14 @@
 
 v1 提供三类实现：
 
-- ``RuleGraphExtractor``：通用 jieba 规则，不认识任何领域知识；
-- ``DomainGraphExtractor``（``domain/extractor.py``）：领域词典 + jieba 补充；
-- ``LLMGraphExtractor``（``llm_graph.py``）：领域提示词驱动，可选降级到词典。
+- ``RuleGraphExtractor``：英文/技术术语正则，不认识任何领域知识；
+- ``DomainGraphExtractor``（``domain/extractor.py``）：领域词典命中 +
+  英文/技术术语补充；
+- ``LLMGraphExtractor``（``llm_graph.py``）：领域提示词驱动，可降级到词典。
 
-本模块只保留与领域无关的公共能力：通用分词、关系过滤、白名单合并，
-以及“图抽取只看标题 + 正文”的准入规则。
+中文分词引入的碎片和泛化词噪音较大，图抽取不再使用 jieba；中文领域概念
+由 LLM 或领域词典负责。本模块只保留与领域无关的公共能力：技术术语正则、
+关系过滤、白名单合并，以及“图抽取只看标题 + 正文”的准入规则。
 
 设计对应《RAG 模块数据结构设计》§7.3。
 """
@@ -24,6 +26,7 @@ from rag.shared.enums import BlockType
 from rag.shared.models import Chunk, GraphRelation, ChunkGraphExtraction
 
 __all__ = [
+    "GENERIC_KEYWORD_BLACKLIST",
     "GENERIC_STOPWORDS",
     "GRAPH_TEXT_BLOCK_TYPES",
     "GraphExtractor",
@@ -34,14 +37,12 @@ __all__ = [
     "graph_nearest_heading",
     "graph_source_text",
     "merge_relation_whitelist",
+    "normalize_blocked_terms",
 ]
 
 # 只有纯正文/列表参与图关键词与关系抽取；表格、代码、图注、公式等
 # 语义密度低，抽取结果噪声大，且会污染概念/关系图。
 GRAPH_TEXT_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.LIST})
-
-# 只保留名词性词性：普通名词/专名/动名词/动名词短语/形容词性名词/英文
-_KEYWORD_POS = frozenset({"n", "nr", "ns", "nt", "nz", "vn", "an", "eng"})
 
 # 通用停用词（内置词表）；领域停用词在
 # DomainProfile.stopwords，由领域抽取器合并使用。
@@ -110,7 +111,89 @@ GENERIC_STOPWORDS = frozenset(
     }
 )
 
-# 英文技术词（API、RAG、BGE-M3、C++ 等）；jieba 不一定能完整切出。
+# 通用关键词黑名单（版式/文献信息/泛化词）；命中后不进入图节点。
+# 领域画像可追加 ``keyword_blacklist``，部署可追加
+# ``RAG__INDEXER__GRAPH_KEYWORD_BLACKLIST``。
+GENERIC_KEYWORD_BLACKLIST = frozenset(
+    {
+        "摘要",
+        "前言",
+        "引言",
+        "结论",
+        "讨论",
+        "方法",
+        "材料",
+        "结果",
+        "参考文献",
+        "附录",
+        "致谢",
+        "目录",
+        "章节",
+        "本文",
+        "本节",
+        "本章",
+        "全文",
+        "如下",
+        "上述",
+        "以下",
+        "例如",
+        "比如",
+        "如图",
+        "如表",
+        "上图",
+        "下图",
+        "上表",
+        "下表",
+        "表格",
+        "图表",
+        "公式",
+        "注释",
+        "备注",
+        "来源",
+        "版权",
+        "作者",
+        "单位",
+        "通讯作者",
+        "基金项目",
+        "收稿日期",
+        "修回日期",
+        "病例",
+        "患者",
+        "doi",
+        "http",
+        "https",
+        "www",
+        "copyright",
+        "abstract",
+        "introduction",
+        "results",
+        "methods",
+        "discussion",
+        "materials",
+        "background",
+        "keywords",
+        "conclusion",
+        "references",
+        "appendix",
+        "figure",
+        "table",
+        "section",
+        "chapter",
+        "funding",
+        "acknowledgements",
+        "et",
+        "al",
+        "ibid",
+    }
+)
+
+# 图/表编号、章节编号、页码等版式标签不是领域概念。
+_LABEL_RE = re.compile(
+    r"^(?:图|表|figure|table|fig\.?|tab\.?)\s*\d+(?:[-.]\d+)*$",
+    re.IGNORECASE,
+)
+
+# 英文技术词（API、RAG、BGE-M3、C++ 等）；用保守正则避免中文分词碎片。
 _ASCII_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+#.\-]{1,31}")
 _NUMERIC_RE = re.compile(r"^[\d\W_]+$", re.UNICODE)
 # 8 位以上纯十六进制串（uuid 片段/内容哈希）不作为关键词。
@@ -132,6 +215,15 @@ RelationExtractor = Callable[
 ]
 
 
+def normalize_blocked_terms(values: Iterable[str]) -> frozenset[str]:
+    """归一化黑名单/停用词：去空白、小写、丢弃空值。"""
+    return frozenset(
+        _normalize_keyword(item).lower()
+        for item in values
+        if item and _normalize_keyword(item)
+    )
+
+
 def _normalize_keyword(value: str) -> str:
     """关键词归一化：去空白、英文小写、去掉包裹标点。"""
     text = (value or "").strip().strip(".,;:!?()[]{}<>\"'`“”‘’《》")
@@ -142,14 +234,22 @@ def _normalize_keyword(value: str) -> str:
     return text
 
 
-def _is_valid_keyword(value: str, *, stopwords: Iterable[str] = ()) -> bool:
-    """过滤空值、纯数字/符号、单字、停用词和明显噪音。
+def _is_valid_keyword(
+    value: str,
+    *,
+    stopwords: Iterable[str] = (),
+    blacklist: Iterable[str] = (),
+) -> bool:
+    """过滤空值、纯数字/符号、单字、停用词、黑名单和明显噪音。
 
-    ``stopwords`` 传入已归一化的停用词（通用词 + 领域词），由调用方提供。
+    ``stopwords`` / ``blacklist`` 传入已归一化的集合（通用词 + 领域词），
+    由调用方提供；两者分开是为了让“无检索价值”和“明确禁止入图”的语义
+    在配置层可区分。
     """
-    if not value or value.lower() in stopwords:
+    key = (value or "").strip().lower()
+    if not key or key in stopwords or key in blacklist:
         return False
-    if _NUMERIC_RE.match(value):
+    if _NUMERIC_RE.match(value) or _LABEL_RE.match(value):
         return False
     # URL/邮箱/长哈希不是可检索概念。
     if "@" in value or "://" in value or _HASH_RE.match(value):
@@ -198,64 +298,36 @@ def extract_keywords(
     *,
     top_k: int = 10,
     stopwords: Iterable[str] | None = None,
-    postokenizer=None,
+    blacklist: Iterable[str] = (),
 ) -> list[str]:
-    """从文本抽取关键词，按词频、长度和首次出现顺序稳定排序。
+    """抽取英文/技术术语关键词，按词频、长度和首次出现顺序稳定排序。
 
-    策略：
-    1. jieba 精确模式分词，保留名词性词性；
-    2. 额外用正则捞英文/技术术语，避免分词器把 ``BGE-M3`` 切碎；
-    3. 去重（大小写不敏感）后按词频降序，频次相同按长度降序、首次出现升序，
-       保证同一输入每次结果一致。
-
-    ``stopwords`` 为空时使用模块内置 ``GENERIC_STOPWORDS``；
-    传入集合时以传入值为准（领域实现会合并通用词与领域词）。
-    ``postokenizer`` 供领域实现传入带用户词典的私有分词器。
+    图节点质量优先：不再使用 jieba 中文分词（碎片/泛化词噪音大），中文领域
+    概念交给 LLM 或领域词典。这里只保留保守的 ASCII 技术词正则；``stopwords``
+    为空时使用模块内置 ``GENERIC_STOPWORDS``，``blacklist`` 为明确禁止入图的词。
     """
     if not text or top_k <= 0:
         return []
 
-    if postokenizer is None:
-        import jieba.posseg as pseg
-
-        postokenizer = pseg
-
     if stopwords is None:
         stopwords = GENERIC_STOPWORDS
     extra_stopwords = frozenset(stopwords)
+    blocked = frozenset(blacklist)
     counts: Counter[str] = Counter()
     first_seen: dict[str, int] = {}
     display: dict[str, str] = {}
 
-    # 先捞完整英文/技术词，供后面过滤被切碎的片段（BGE / M3 → BGE-M3）。
-    ascii_terms = {
-        _normalize_keyword(match.group(0)).lower()
-        for match in _ASCII_TERM_RE.finditer(text)
-    }
-
-    def add(raw: str, *, from_ascii: bool = False) -> None:
-        """归一化后计入词频；英文技术词保留原始大小写用于展示。"""
-        value = _normalize_keyword(raw)
-        if not _is_valid_keyword(value, stopwords=extra_stopwords):
-            return
-        key = value.lower()
-        # jieba 可能把 "BGE-M3" 拆成 bge/m3；已有完整术语时丢掉子串。
-        if (
-            not from_ascii
-            and re.fullmatch(r"[a-z0-9_+#.\-]+", key)
-            and any(key != term and key in term for term in ascii_terms)
+    for match in _ASCII_TERM_RE.finditer(text):
+        value = _normalize_keyword(match.group(0))
+        if not _is_valid_keyword(
+            value, stopwords=extra_stopwords, blacklist=blocked
         ):
-            return
+            continue
+        key = value.lower()
         if key not in display:
             display[key] = value
             first_seen[key] = len(first_seen)
         counts[key] += 1
-
-    for term in ascii_terms:
-        add(term, from_ascii=True)
-    for token in postokenizer.cut(text):
-        if token.flag in _KEYWORD_POS:
-            add(token.word)
 
     ordered = sorted(
         counts,
@@ -332,7 +404,7 @@ def filter_relations(
 
 
 class RuleGraphExtractor:
-    """规则图抽取器：关键词靠 jieba，关系靠可选注入（默认空）。"""
+    """规则图抽取器：关键词靠英文/技术术语正则，关系靠可选注入（默认空）。"""
 
     def __init__(
         self,
@@ -343,6 +415,9 @@ class RuleGraphExtractor:
         """保存配置与可选关系抽取器。"""
         self.config = config
         self.relation_extractor = relation_extractor
+        self.blacklist = GENERIC_KEYWORD_BLACKLIST | normalize_blocked_terms(
+            config.graph_keyword_blacklist
+        )
 
     async def extract(self, chunk: Chunk) -> ChunkGraphExtraction:
         """抽取关键词；关系为空或由注入的抽取器提供。
@@ -359,6 +434,7 @@ class RuleGraphExtractor:
             text,
             top_k=self.config.graph_max_keywords_per_chunk,
             stopwords=GENERIC_STOPWORDS,
+            blacklist=self.blacklist,
         )
         relations: list[GraphRelation] = []
         if self.relation_extractor is not None:

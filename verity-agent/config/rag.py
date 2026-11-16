@@ -202,9 +202,15 @@ class IndexerConfig(ConfigModel):
     domain_profile_path: str | None = None
     # 图抽取模式：
     # rule=纯通用规则；lexicon=领域词典 + 通用词；llm=LLM（失败降级词典）；
-    # hybrid=LLM + 词典合并；off=关闭
-    graph_extraction_mode: str = "lexicon"
-    # 领域词之外是否补充通用名词关键词
+    # hybrid=LLM 为主 + 词典辅助；off=关闭
+    graph_extraction_mode: str = "hybrid"
+    # LLM 图抽取总开关；关闭时 llm/hybrid 自动降级为 lexicon
+    graph_llm_enabled: bool = True
+    # 运维侧追加的关键词黑名单；与内置黑名单、领域画像黑名单取并集
+    graph_keyword_blacklist: list[str] = Field(default_factory=list)
+    # 注入 LLM 提示词的领域词典参考条数；避免上下文过大
+    graph_llm_dictionary_hint_size: int = Field(default=60, ge=0)
+    # 领域词之外是否补充英文/技术术语关键词（不使用中文分词）
     graph_include_generic_terms: bool = True
     # 每个 chunk 最多写入多少关键词
     graph_max_keywords_per_chunk: int = Field(default=10, ge=1)

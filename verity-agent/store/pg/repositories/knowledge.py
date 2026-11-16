@@ -46,10 +46,11 @@ class KnowledgeBaseRepository(BaseRepository):
         embedding_dimensions: int,
         embedding_version: str = "v1",
         description: str | None = None,
+        domain_profile: str | None = None,
         status: KnowledgeBaseStatus = KnowledgeBaseStatus.ACTIVE,
         conn: AsyncConnection[Row] | None = None,
     ) -> KnowledgeBase:
-        """创建知识库并记录其向量模型与权限要求。"""
+        """创建知识库并记录其向量模型、领域画像与权限要求。"""
         name = require_text(name, "name")
         required_permission_code = require_text(
             required_permission_code, "required_permission_code"
@@ -64,15 +65,17 @@ class KnowledgeBaseRepository(BaseRepository):
                 """
                 INSERT INTO knowledge_bases
                     (name, description, required_permission_code,
+                     domain_profile,
                      embedding_model_id, embedding_dimensions, embedding_version,
                      status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
                     name,
                     description,
                     required_permission_code,
+                    domain_profile,
                     embedding_model_id,
                     embedding_dimensions,
                     embedding_version,
@@ -136,6 +139,7 @@ class KnowledgeBaseRepository(BaseRepository):
         name: Any = _UNSET,
         description: Any = _UNSET,
         required_permission_code: Any = _UNSET,
+        domain_profile: Any = _UNSET,
         status: Any = _UNSET,
         conn: AsyncConnection[Row] | None = None,
     ) -> KnowledgeBase:
@@ -146,6 +150,7 @@ class KnowledgeBaseRepository(BaseRepository):
             ("name", name),
             ("description", description),
             ("required_permission_code", required_permission_code),
+            ("domain_profile", domain_profile),
             ("status", status),
         ):
             if value is not _UNSET:

@@ -8,7 +8,6 @@ dependencies = [
     "cohere>=5.20,<6.0",
     "fastapi[standard]==0.141.1",
     "httpx>=0.27,<1.0",
-    "jieba>=0.42",
     "jsonschema>=4.0,<5.0",
     "minio>=7.2.0,<8.0.0",
     "neo4j>=5.0,<6.0",

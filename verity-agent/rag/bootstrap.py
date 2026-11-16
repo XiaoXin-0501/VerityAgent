@@ -33,7 +33,6 @@ from .indexer import (
     TextIngestionPipeline,
     WeaviateChunkStore,
     build_default_chunk_cache,
-    build_graph_extractor,
     load_domain_profile,
 )
 from .retriever.cache import RetrievalCache
@@ -166,12 +165,9 @@ def build_default_indexing_pipeline(
         source_store=source_store or MinioSourceStore(),
         repository=repository or PgIndexingRepository(),
         job_store=job_store or InMemoryJobStore(),
-        graph_extractor=graph_extractor
-        or build_graph_extractor(
-            cfg,
-            chat_model=graph_chat_model,
-            prompts=prompt_registry,
-        ),
+        graph_extractor=graph_extractor,
+        graph_chat_model=graph_chat_model,
+        prompt_registry=prompt_registry,
         worker_id=worker_id,
         run_in_background=run_in_background,
     )
@@ -227,6 +223,7 @@ def build_default_retrieval_pipeline(
     cache: RetrievalCache | None = None,
     domain_profile: Any | None = None,
     domain_profile_name: str | None = None,
+    domain_profile_resolver: Any | None = None,
     embedding_dimensions: int | None = None,
     embedding_version: str = "v1",
     query_rewrite_model: Any | None = None,
@@ -245,7 +242,8 @@ def build_default_retrieval_pipeline(
     - ``embedding_version`` 应传入库时 ``IndexerConfig.embedding_version``，
       用于 query embedding 缓存失效；
     - ``domain_profile`` 为空且 ``domain_profile_name`` 非空时加载对应领域
-      画像，用于 query → 图 seed 实体链接；图扩展默认关闭，不额外查询图；
+      画像，用于 query → 图 seed 实体链接；``domain_profile_resolver`` 用于
+      按 KB 绑定的画像名按需加载；图扩展默认关闭，不额外查询图；
     - ``prompt_registry`` 用于 query 改写/意图分类模板的外部覆盖。
     """
     cfg = config or RetrieverConfig()
@@ -313,6 +311,7 @@ def build_default_retrieval_pipeline(
         metadata_store=metadata_store or PgRetrievalMetadataStore(),
         cache=cache,
         domain_profile=profile,
+        domain_profile_resolver=domain_profile_resolver,
         query_rewriter=query_rewriter,
         intent_classifier=intent_classifier,
         max_query_chars=max_query_chars,

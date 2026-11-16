@@ -256,6 +256,7 @@ export interface KnowledgeBase {
   name: string
   description: string | null
   required_permission_code: string
+  domain_profile: string | null
   embedding_model_id: string
   embedding_dimensions: number
   embedding_version: string
@@ -274,6 +275,7 @@ export interface CreateKnowledgeBaseParams {
   name: string
   description?: string | null
   required_permission_code: string
+  domain_profile?: string | null
 }
 
 export type DocumentStatus =
@@ -345,6 +347,8 @@ export interface KnowledgeOptions {
   enabled_doc_types: string[]
   max_file_bytes: number
   default_permission_code: string
+  domain_profiles: string[]
+  default_domain_profile: string
   embedding_model_id: string | null
   embedding_dimensions: number
   embedding_version: string

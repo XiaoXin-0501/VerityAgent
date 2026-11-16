@@ -43,7 +43,7 @@
     },
     "rag.graph.system": {
       "file": "rag/graph.system.md",
-      "version": 1,
+      "version": 2,
       "description": "垂直领域图抽取的 system prompt（领域内容通过变量注入）",
       "purpose": "rag.graph_extraction",
       "static": false,
@@ -70,7 +70,7 @@
           "name": "entity_guidance",
           "description": "实体抽取规则；由 DomainProfile.prompt.entity_guidance 注入",
           "required": false,
-          "default": "只抽取文本中明确出现的领域概念；使用文本中最完整的标准名称；不要把通用词当作实体。"
+          "default": "只抽取文本中明确出现的原子领域概念；优先使用文本中最完整的标准名；不要把通用词、整句、章节标题、图表编号、文献信息、数值或单位当作实体。"
         },
         {
           "name": "relation_guidance",
@@ -93,6 +93,30 @@
           "name": "max_relations",
           "description": "单 chunk 最多关系数",
           "required": true
+        },
+        {
+          "name": "dictionary_hint",
+          "description": "领域词典参考（标准名/类型/别名），仅辅助 LLM 归一",
+          "required": false,
+          "default": "（无）"
+        },
+        {
+          "name": "entity_examples",
+          "description": "好例子（每行一个），由 DomainProfile.prompt.entity_examples 注入",
+          "required": false,
+          "default": "- 犬细小病毒病（disease）：完整的疾病标准名\n- 阿司匹林（drug）：具体药物名"
+        },
+        {
+          "name": "noise_examples",
+          "description": "噪音例子（每行一个），由 DomainProfile.prompt.noise_examples 注入",
+          "required": false,
+          "default": "- 病例报告、患犬、检查结果、表1、图2、参考文献、如下、上述"
+        },
+        {
+          "name": "keyword_blacklist",
+          "description": "禁止输出的关键词黑名单（每行一个）",
+          "required": false,
+          "default": "（无）"
         }
       ]
     },

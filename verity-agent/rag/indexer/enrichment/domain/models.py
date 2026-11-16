@@ -126,6 +126,10 @@ class DomainPrompt(_Model):
     entity_guidance: str = ""
     relation_guidance: str = ""
     extra_instructions: list[str] = Field(default_factory=list)
+    # 好例子：每行一个“实体名（类型）：说明”，帮助 LLM 理解粒度
+    entity_examples: list[str] = Field(default_factory=list)
+    # 噪音例子：每行一类不应进入图节点的文本
+    noise_examples: list[str] = Field(default_factory=list)
 
 
 class DomainProfile(_Model):
@@ -143,14 +147,16 @@ class DomainProfile(_Model):
     entity_types: list[DomainEntityType] = Field(default_factory=list)
     entities: list[DomainEntity] = Field(default_factory=list)
     stopwords: list[str] = Field(default_factory=list)
+    # 领域黑名单：明确禁止进入图的关键词/泛化词/版式词
+    keyword_blacklist: list[str] = Field(default_factory=list)
     relations: list[DomainRelationType] = Field(default_factory=list)
     # 词典模式关系规则；未配置时 lexicon 模式只抽关键词
     relation_rules: list[DomainRelationRule] = Field(default_factory=list)
     prompt: DomainPrompt = Field(default_factory=DomainPrompt)
 
-    # 领域词命中不足时是否补充通用名词关键词（由配置再叠加开关）
+    # 领域词命中不足时是否补充英文/技术术语（由配置再叠加开关；不使用中文分词）
     include_generic_terms: bool = True
-    # 补充通用关键词的候选倍数；最终仍受 graph_max_keywords_per_chunk 限制
+    # 补充技术术语的候选倍数；最终仍受 graph_max_keywords_per_chunk 限制
     generic_candidate_factor: int = Field(default=2, ge=1)
 
     # 运行期索引：别名键 → (标准名, 类型, 权重)
@@ -160,6 +166,7 @@ class DomainProfile(_Model):
     # 运行期索引：全部原始别名（用于构建最长优先匹配正则）
     _surfaces: list[str] = PrivateAttr(default_factory=list)
     _stopword_keys: frozenset[str] = PrivateAttr(default_factory=frozenset)
+    _blacklist_keys: frozenset[str] = PrivateAttr(default_factory=frozenset)
     _entity_type_names: frozenset[str] = PrivateAttr(default_factory=frozenset)
     _relation_names: frozenset[str] = PrivateAttr(default_factory=frozenset)
     _pattern: re.Pattern[str] | None = PrivateAttr(default=None)
@@ -239,11 +246,20 @@ class DomainProfile(_Model):
                 surfaces.append(surface)
 
         object.__setattr__(self, "_surfaces", surfaces)
+        blacklist_keys = frozenset(
+            _key(item) for item in self.keyword_blacklist if _key(item)
+        )
+        conflict = blacklist_keys & set(alias_owner)
+        if conflict:
+            raise ValueError(
+                f"实体别名不能同时出现在 keyword_blacklist: {sorted(conflict)}"
+            )
         object.__setattr__(
             self,
             "_stopword_keys",
             frozenset(_key(item) for item in self.stopwords if _key(item)),
         )
+        object.__setattr__(self, "_blacklist_keys", blacklist_keys)
         object.__setattr__(
             self, "_entity_type_names", frozenset(type_weights)
         )
@@ -280,6 +296,15 @@ class DomainProfile(_Model):
     def stopword_keys(self) -> frozenset[str]:
         """归一化后的领域停用词集合。"""
         return self._stopword_keys
+
+    @property
+    def blacklist_keys(self) -> frozenset[str]:
+        """归一化后的领域关键词黑名单。"""
+        return self._blacklist_keys
+
+    def is_blacklisted(self, value: str) -> bool:
+        """是否命中领域关键词黑名单。"""
+        return _key(value) in self._blacklist_keys
 
     # ——————————————————— 匹配与归一 ———————————————————
 
@@ -343,3 +368,12 @@ class DomainProfile(_Model):
             f"- {item.name}: {item.label or item.description}"
             for item in self.entity_types
         ]
+
+    def dictionary_prompt_lines(self, limit: int = 60) -> list[str]:
+        """LLM 提示词中的领域词典参考；只给有限条，避免挤占上下文。"""
+        lines: list[str] = []
+        for entity in self.entities[: max(0, limit)]:
+            aliases = "、".join(entity.aliases[:4])
+            suffix = f"；别名: {aliases}" if aliases else ""
+            lines.append(f"- {entity.name} ({entity.type}{suffix})")
+        return lines

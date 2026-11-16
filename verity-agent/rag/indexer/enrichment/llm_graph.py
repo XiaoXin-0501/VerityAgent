@@ -37,6 +37,7 @@ from .domain.extractor import (
 )
 from .domain.models import DomainProfile
 from .graph import (
+    GENERIC_KEYWORD_BLACKLIST,
     GENERIC_STOPWORDS,
     GraphExtractor,
     _is_valid_keyword,
@@ -44,6 +45,7 @@ from .graph import (
     filter_relations,
     graph_nearest_heading,
     graph_source_text,
+    normalize_blocked_terms,
 )
 __all__ = ["HybridGraphExtractor", "LLMGraphExtractor"]
 
@@ -104,6 +106,11 @@ class LLMGraphExtractor:
         )
         self.fallback = fallback
         self.prompts = prompts or get_default_prompt_registry()
+        self.blacklist = (
+            GENERIC_KEYWORD_BLACKLIST
+            | normalize_blocked_terms(config.graph_keyword_blacklist)
+            | profile.blacklist_keys
+        )
 
     async def extract(self, chunk: Chunk) -> ChunkGraphExtraction:
         """抽取单个 chunk；失败时使用 fallback，没有 fallback 返回空结果。"""
@@ -223,6 +230,22 @@ class LLMGraphExtractor:
             values["extra_instructions"] = "\n".join(
                 prompt.extra_instructions
             )
+        if prompt.entity_examples:
+            values["entity_examples"] = "\n".join(prompt.entity_examples)
+        if prompt.noise_examples:
+            values["noise_examples"] = "\n".join(prompt.noise_examples)
+        values["dictionary_hint"] = (
+            "\n".join(
+                self.profile.dictionary_prompt_lines(
+                    self.config.graph_llm_dictionary_hint_size
+                )
+            )
+            or "（无）"
+        )
+        values["keyword_blacklist"] = (
+            "\n".join(f"- {item}" for item in sorted(self.blacklist))
+            or "（无）"
+        )
         return self.prompts.render_text(
             PromptId.RAG_GRAPH_SYSTEM, **values
         )
@@ -243,9 +266,15 @@ class LLMGraphExtractor:
                 self.profile.canonicalize(entity.name)
                 or _normalize_keyword(entity.name)
             )
-            if not _is_valid_entity_name(
-                name, GENERIC_STOPWORDS
-            ) or self.profile.is_stopword(name):
+            if (
+                not _is_valid_entity_name(
+                    name,
+                    stopwords=GENERIC_STOPWORDS,
+                    blacklist=self.blacklist,
+                )
+                or self.profile.is_stopword(name)
+                or self.profile.is_blacklisted(name)
+            ):
                 continue
             key = name.lower()
             if key in seen:
@@ -267,12 +296,21 @@ class LLMGraphExtractor:
             )
             relation = (item.relation or "").strip().lower()
             if not _is_valid_entity_name(
-                subject, GENERIC_STOPWORDS
+                subject,
+                stopwords=GENERIC_STOPWORDS,
+                blacklist=self.blacklist,
             ) or not _is_valid_entity_name(
-                obj, GENERIC_STOPWORDS
+                obj,
+                stopwords=GENERIC_STOPWORDS,
+                blacklist=self.blacklist,
             ):
                 continue
-            if self.profile.is_stopword(subject) or self.profile.is_stopword(obj):
+            if (
+                self.profile.is_stopword(subject)
+                or self.profile.is_stopword(obj)
+                or self.profile.is_blacklisted(subject)
+                or self.profile.is_blacklisted(obj)
+            ):
                 continue
             if not relation:
                 continue
@@ -338,8 +376,8 @@ class HybridGraphExtractor:
         if llm_result is None:
             return lexicon_result
         keywords = merge_keywords(
-            lexicon_result.keywords,
             llm_result.keywords,
+            lexicon_result.keywords,
             top_k=self.config.graph_max_keywords_per_chunk,
         )
         return ChunkGraphExtraction(
@@ -355,12 +393,15 @@ class HybridGraphExtractor:
 def _is_valid_entity_name(
     value: str,
     stopwords: Iterable[str] = (),
+    blacklist: Iterable[str] = (),
 ) -> bool:
     """实体/关系端点的长度与内容校验；防止模型输出整句或超长噪声。"""
     return (
         bool(value)
         and len(value) <= 64
-        and _is_valid_keyword(value, stopwords=stopwords)
+        and _is_valid_keyword(
+            value, stopwords=stopwords, blacklist=blacklist
+        )
     )
 
 

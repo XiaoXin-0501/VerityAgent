@@ -25,7 +25,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -230,6 +230,7 @@ class DefaultRetrievalPipeline:
         metadata_store: RetrievalMetadataStore | None = None,
         cache: RetrievalCache | None = None,
         domain_profile: DomainProfile | None = None,
+        domain_profile_resolver: Callable[[str], DomainProfile] | None = None,
         query_rewriter: Any | None = None,
         intent_classifier: Any | None = None,
         max_query_chars: int = 2000,
@@ -243,6 +244,12 @@ class DefaultRetrievalPipeline:
         self.metadata_store = metadata_store
         self.cache = cache
         self.domain_profile = domain_profile
+        self.domain_profile_resolver = domain_profile_resolver
+        self._domain_profile_cache: dict[str, DomainProfile] = (
+            {domain_profile.name: domain_profile}
+            if domain_profile is not None
+            else {}
+        )
         self.query_rewriter = query_rewriter
         self.intent_classifier = intent_classifier
         self.max_query_chars = max(1, int(max_query_chars))
@@ -303,7 +310,24 @@ class DefaultRetrievalPipeline:
                 RagErrorCode.INVALID_REQUEST,
                 "query 规范化后为空",
             )
-        analysis = self._analyze(request, normalized)
+        graph_policy = request.graph or self._default_graph_policy()
+        if not graph_policy.allowed_relations:
+            # 请求里只写 enabled=true 时沿用 RetrieverConfig 的强关系白名单；
+            # 空列表不能静默变成“所有关系都允许”或“一个都不允许”。
+            graph_policy = graph_policy.model_copy(
+                update={
+                    "allowed_relations": list(
+                        self.config.graph_allowed_relations
+                    )
+                }
+            )
+        # 图扩展关闭时不需要读取 KB 画像，避免每次检索多查一次 PG。
+        domain_profiles = (
+            await self._load_domain_profiles(authorized_kbs, warnings)
+            if graph_policy.enabled
+            else ([self.domain_profile] if self.domain_profile else [])
+        )
+        analysis = self._analyze(request, normalized, domain_profiles)
         _stage(
             stages,
             RetrievalStage.ANALYZE,
@@ -319,17 +343,6 @@ class DefaultRetrievalPipeline:
 
         hybrid = request.hybrid or HybridPolicy(alpha=self.config.hybrid_alpha)
         rerank_policy = request.rerank or self._default_rerank_policy()
-        graph_policy = request.graph or self._default_graph_policy()
-        if not graph_policy.allowed_relations:
-            # 请求里只写 enabled=true 时沿用 RetrieverConfig 的强关系白名单；
-            # 空列表不能静默变成“所有关系都允许”或“一个都不允许”。
-            graph_policy = graph_policy.model_copy(
-                update={
-                    "allowed_relations": list(
-                        self.config.graph_allowed_relations
-                    )
-                }
-            )
         neighbor_policy = request.neighbors or self._default_neighbor_policy()
 
         # 3) 索引版本 + 结果缓存；缓存命中直接返回，不触发任何外部召回。
@@ -343,6 +356,7 @@ class DefaultRetrievalPipeline:
             graph_policy=graph_policy,
             neighbor_policy=neighbor_policy,
             index_versions=index_versions,
+            domain_profiles=domain_profiles,
         )
         cached = await self._read_cache(cache_key, warnings)
         if cached is not None:
@@ -767,11 +781,16 @@ class DefaultRetrievalPipeline:
             return False
         return any(item.startswith("doc:read:") for item in request.permissions)
 
-    def _analyze(self, request: RetrievalRequest, normalized: str) -> QueryAnalysis:
+    def _analyze(
+        self,
+        request: RetrievalRequest,
+        normalized: str,
+        domain_profiles: list[DomainProfile],
+    ) -> QueryAnalysis:
         """规范化 query 后的轻量分析：语言、关键词、图 seed 实体。"""
         entities: list[str] = []
-        if self.domain_profile is not None:
-            for match in self.domain_profile.match(normalized):
+        for profile in domain_profiles:
+            for match in profile.match(normalized):
                 if match.name not in entities:
                     entities.append(match.name)
         extra_entities = request.metadata.get("seed_entities") or request.metadata.get(
@@ -1872,6 +1891,57 @@ class DefaultRetrievalPipeline:
 
     # ——————————————————— 缓存 ———————————————————
 
+    def _resolve_domain_profile(self, name: str) -> DomainProfile | None:
+        """按名称解析领域画像；失败回退全局画像并缓存。"""
+        cached = self._domain_profile_cache.get(name)
+        if cached is not None:
+            return cached
+        if self.domain_profile_resolver is None:
+            return self.domain_profile
+        try:
+            profile = self.domain_profile_resolver(name)
+        except Exception:  # noqa: BLE001 - 单 KB 画像失败不阻断检索
+            logger.warning("加载知识库领域画像失败: %s", name, exc_info=True)
+            return self.domain_profile
+        self._domain_profile_cache[name] = profile
+        return profile
+
+    async def _load_domain_profiles(
+        self,
+        kb_ids: list[UUID],
+        warnings: list[RetrievalWarning],
+    ) -> list[DomainProfile]:
+        """读取每个 KB 绑定的领域画像；NULL 回退全局默认。"""
+        profiles: list[DomainProfile] = []
+        loader = (
+            getattr(self.metadata_store, "get_kb_domain_profiles", None)
+            if self.metadata_store is not None
+            else None
+        )
+        names: dict[UUID, str | None] = {}
+        if callable(loader):
+            try:
+                # 元数据 store 的可选扩展；运行时按存在性探测。
+                names = await loader(kb_ids)  # pyright: ignore[reportGeneralTypeIssues]
+            except Exception as exc:  # noqa: BLE001 - 画像只影响可选图扩展
+                warnings.append(
+                    _warning(
+                        RetrievalWarningCode.DOMAIN_PROFILE_FALLBACK,
+                        "读取知识库领域画像失败，使用全局默认",
+                        stage=RetrievalStage.ANALYZE,
+                        details={"cause": str(exc)},
+                    )
+                )
+        fallback = self.domain_profile
+        for kb_id in kb_ids:
+            name = names.get(kb_id) if names else None
+            profile = self._resolve_domain_profile(name) if name else fallback
+            if profile is not None and all(
+                item.name != profile.name for item in profiles
+            ):
+                profiles.append(profile)
+        return profiles
+
     async def _load_kb_versions(
         self,
         kb_ids: list[UUID],
@@ -1904,6 +1974,7 @@ class DefaultRetrievalPipeline:
         graph_policy: GraphExpansionPolicy,
         neighbor_policy: NeighborPolicy,
         index_versions: dict[UUID, int],
+        domain_profiles: list[DomainProfile],
     ):
         """构造检索结果缓存 key；不缓存 query/正文明文。"""
         index_version = ",".join(
@@ -1921,6 +1992,9 @@ class DefaultRetrievalPipeline:
                     "graph": graph_policy.model_dump(mode="json"),
                     "neighbors": neighbor_policy.model_dump(mode="json"),
                     "rerank": rerank_policy.model_dump(mode="json"),
+                    "domain_profiles": sorted(
+                        profile.name for profile in domain_profiles
+                    ),
                     "token_budget": (
                         request.token_budget
                         if request.token_budget is not None

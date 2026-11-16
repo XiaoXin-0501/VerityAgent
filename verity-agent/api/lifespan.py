@@ -10,6 +10,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -114,6 +115,17 @@ def _default_chat_model_id() -> str | None:
     )
 
 
+def _load_domain_profile_by_name(name: str):
+    """按 KB 绑定的画像名加载画像；全局 path 仅匹配同名画像。"""
+    configured_path = settings.rag.indexer.domain_profile_path
+    if configured_path and Path(configured_path).stem == name:
+        return load_domain_profile(name, path=configured_path)
+    return load_domain_profile(
+        name,
+        directory=settings.rag.indexer.domain_profile_dir,
+    )
+
+
 async def _build_rag_retriever(registry, prompt_registry, *, available: bool = True):
     """按 Settings 构造 RAG Retriever；向量库未就绪时返回 None。"""
     cfg = settings.rag
@@ -169,6 +181,7 @@ async def _build_rag_retriever(registry, prompt_registry, *, available: bool = T
         embedding_dimensions=cfg.indexer.embedding_dimensions,
         embedding_version=cfg.indexer.embedding_version,
         max_query_chars=cfg.max_query_chars,
+        domain_profile_resolver=_load_domain_profile_by_name,
     )
     logger.info(
         "RAG Retriever 就绪: embedding=%s rerank=%s rewrite=%s intent=%s",
@@ -239,7 +252,8 @@ async def _build_rag_indexer(registry, prompt_registry, *, available: bool = Tru
             fallback=default_chat,
             kind="chat",
         )
-        if (indexer_cfg.graph_extraction_mode or "").lower()
+        if indexer_cfg.graph_llm_enabled
+        and (indexer_cfg.graph_extraction_mode or "").lower()
         in {"llm", "hybrid"}
         else None
     )
