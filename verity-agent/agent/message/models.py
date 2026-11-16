@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Literal, Self
 from uuid import UUID
@@ -45,6 +46,7 @@ __all__ = [
     "RawMessage",
     "StoredMessage",
     "Turn",
+    "user_payload_matches",
 ]
 
 
@@ -301,3 +303,32 @@ class Turn(BaseModel):
 def is_message(value: BaseModel) -> bool:
     """判断对象是否为领域消息基类实例。"""
     return isinstance(value, BaseMessage)
+
+
+def user_payload_matches(
+    message: UserMessage,
+    *,
+    content: str,
+    images: Sequence[ImageRef],
+    files: Sequence[FileRef],
+) -> bool:
+    """比较已落库用户消息与请求的可见载荷（content/images/files）。"""
+    if message.content != content:
+        return False
+    stored_images = [
+        (item.url, getattr(item.detail, "value", item.detail))
+        for item in message.images
+    ]
+    request_images = [
+        (item.url, getattr(item.detail, "value", item.detail))
+        for item in images
+    ]
+    if stored_images != request_images:
+        return False
+    stored_files = [
+        (str(item.file_id), item.filename or "") for item in message.files
+    ]
+    request_files = [
+        (str(item.file_id), item.filename or "") for item in files
+    ]
+    return stored_files == request_files

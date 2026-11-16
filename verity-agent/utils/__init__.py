@@ -20,6 +20,7 @@ from .ids import (
     new_token,
     new_turn_id,
     new_uuid,
+    run_id_for,
     uuid7,
 )
 from .pagination import (
@@ -76,6 +77,7 @@ __all__ = [
     "new_token",
     "new_request_id",
     "new_run_id",
+    "run_id_for",
     "new_turn_id",
     "new_idempotency_key",
     # time

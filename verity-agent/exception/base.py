@@ -29,6 +29,8 @@ __all__ = [
     "PermissionDeniedError",
     "NotFoundError",
     "ConflictError",
+    "LeaseConflictError",
+    "IdempotencyConflictError",
     "InvalidStateTransitionError",
     "RateLimitedError",
     "UnavailableError",
@@ -159,6 +161,20 @@ class ConflictError(VerityError):
     code = "CONFLICT"
     http_status = 409
     default_message = "资源状态冲突"
+
+
+class LeaseConflictError(ConflictError):
+    """会话已有活跃 run，无法抢占执行租约。"""
+
+    code = "LEASE_CONFLICT"
+    default_message = "会话已有活跃运行"
+
+
+class IdempotencyConflictError(ConflictError):
+    """同一幂等键被用于不同参数，或重复请求无法安全重放。"""
+
+    code = "IDEMPOTENCY_CONFLICT"
+    default_message = "重复的请求或幂等键冲突"
 
 
 class InvalidStateTransitionError(ConflictError):

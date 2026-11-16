@@ -2,14 +2,11 @@
 
 当前落地范围：
 
-- 会话租约、用户/assistant/tool 消息落库；
-- 非流式 LLM 调用、工具轮、usage/结果组装；
-- 事件发布（事件本身可流式消费，provider token streaming 后续接入）；
+- 会话租约、用户/assistant/tool 消息落库、幂等回合重放；
+- 非流式/流式 LLM 调用、工具轮、usage/结果组装；
+- ContextAssembler + PromptBuilder、记忆 ready、回合后压缩后台任务；
+- 事件发布与 Run/Turn 终态；Redis 事件缓冲、跨实例取消由 facade 负责；
 - 端口全部可注入，测试不依赖 PG/Redis/Provider。
-
-尚未接入：MemoryLoader/ContextAssembler/PromptBuilder、压缩/抽取 worker、
-Redis 事件缓冲、多实例取消。它们通过后续端口扩展，不改变本循环的
-Run/Turn/Decision 结构。
 """
 
 from __future__ import annotations
@@ -19,9 +16,10 @@ import logging
 from collections.abc import Sequence
 from datetime import timedelta
 from time import perf_counter
-from typing import TYPE_CHECKING, Coroutine
+from typing import TYPE_CHECKING, Any, Coroutine
 from uuid import UUID
 
+from agent.context.models import ContextSection
 from agent.llm import (
     FilePart,
     FinishReason,
@@ -30,6 +28,7 @@ from agent.llm import (
     LLMMessage,
     LLMRequest,
     LLMResponse,
+    LLMRole,
     LLMStreamPhase,
     LLMToolCall,
     LLMToolDescriptor,
@@ -38,10 +37,7 @@ from agent.llm import (
     TextPart,
     ThinkingPart,
 )
-from agent.context.models import ContextSection
 from agent.message.enum import MessageStatus
-from agent.message.codec import encode_content
-from agent.prompting import PromptBuilder
 from agent.message.models import (
     AssistantMessage,
     RawMessage,
@@ -50,7 +46,9 @@ from agent.message.models import (
     ToolCall,
     ToolMessage,
     UserMessage,
+    user_payload_matches,
 )
+from agent.prompting import PromptBuilder
 from agent.runtime.enums import (
     AgentErrorCode,
     AgentEventType,
@@ -69,7 +67,7 @@ from utils.ids import uuid7
 from utils.time import utcnow
 
 if TYPE_CHECKING:
-    from agent.public import AgentRequest
+    from agent.public import AgentRequest, AgentResult
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +81,7 @@ class AgentLoop:
         """保存配置与端口；不建立外部连接。"""
         self.config = config
         self.deps = dependencies
-        self.prompt_builder = PromptBuilder(
-            default_model_id=dependencies.model_id
-        )
+        self.prompt_builder = PromptBuilder(default_model_id=dependencies.model_id)
 
     async def run(
         self,
@@ -95,7 +91,8 @@ class AgentLoop:
         turn_id: str,
         publisher: AgentEventPublisher,
         cancel_event: asyncio.Event,
-    ):
+        lease_acquired: bool = False,
+    ) -> AgentResult:
         """执行一次 run，返回公共 AgentResult。"""
         from agent.public import AgentResult
 
@@ -107,6 +104,10 @@ class AgentLoop:
         conversation_id = request.conversation_id
         # 心跳续租失败与用户取消分开标记：前者终态是 EXPIRED，后者是 CANCELLED。
         lease_lost = asyncio.Event()
+        # 提前初始化，避免异常路径依赖 locals() 判断；这些值在 finally 中一定会用到。
+        user_stored: Any = None
+        heartbeat_task: asyncio.Task | None = None
+        result: AgentResult | None = None
 
         async def emit(event_type: AgentEventType, data=None, **kwargs):
             """构造绑定当前 publisher 的事件发送协程。"""
@@ -133,27 +134,50 @@ class AgentLoop:
                 request.client_message_id,
             )
             if existing is not None:
-                raise AgentRuntimeError(
-                    agent_error(
-                        AgentErrorCode.INVALID_STATE,
-                        "重复的 client_message_id；幂等 attach 尚未接入",
-                        details={"client_message_id": str(request.client_message_id)},
-                    )
+                replayed = await self._replay_existing_turn(
+                    existing,
+                    request,
+                    run_id=run_id,
+                    turn_id=turn_id,
                 )
+                if replayed is None:
+                    raise AgentRuntimeError(
+                        agent_error(
+                            AgentErrorCode.IDEMPOTENCY_CONFLICT,
+                            "client_message_id 已用于不同内容，或原回合无法安全重放",
+                            details={
+                                "client_message_id": str(request.client_message_id)
+                            },
+                        )
+                    )
+                # 幂等命中：不重复执行，只把已有结果补成完整事件对。
+                result = replayed
+                await emit(
+                    AgentEventType.RUN_COMPLETED,
+                    replayed.model_dump(mode="json"),
+                )
+                await emit(
+                    AgentEventType.DONE,
+                    {"run_id": run_id, "status": RunStatus.COMPLETED.value},
+                )
+                return replayed
 
-            acquired = await self.deps.leases.acquire(
-                conversation_id,
-                run_id,
-                self.config.policy.run_lease_seconds,
-            )
-            if not acquired:
-                raise AgentRuntimeError(
-                    agent_error(
-                        AgentErrorCode.LEASE_CONFLICT,
-                        "会话已有活跃 run",
-                        details={"conversation_id": str(conversation_id)},
-                    )
+            # facade 已预抢租约时直接进入主循环；直接调用 AgentLoop 的调用方
+            # 仍在这里抢占，保证单测/自定义装配可用。
+            if not lease_acquired:
+                acquired = await self.deps.leases.acquire(
+                    conversation_id,
+                    run_id,
+                    self.config.policy.run_lease_seconds,
                 )
+                if not acquired:
+                    raise AgentRuntimeError(
+                        agent_error(
+                            AgentErrorCode.LEASE_CONFLICT,
+                            "会话已有活跃 run",
+                            details={"conversation_id": str(conversation_id)},
+                        )
+                    )
 
             heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(
@@ -200,6 +224,11 @@ class AgentLoop:
             user_stored = await self.deps.messages.append_user(
                 user_message,
                 client_message_id=request.client_message_id,
+                # 队列已接入时，用户消息与 user_messages 暂存行同事务写入；
+                # 回合终态只需 mark_ready，崩溃也不会漏抽取。
+                user_id=(
+                    request.user_id if self.deps.memory_queue is not None else None
+                ),
             )
             message_ids.append(user_stored.message.id)
             await self._emit_hook(
@@ -208,7 +237,7 @@ class AgentLoop:
                     "message_id": str(user_stored.message.id),
                     "role": "user",
                     "status": "completed",
-                    "content_bytes": len(user_stored.message.content.encode("utf-8")),
+                    "content_bytes": _content_bytes(user_stored.message),
                     "image_count": len(request.images),
                     "file_count": len(request.files),
                 },
@@ -391,7 +420,7 @@ class AgentLoop:
                         "message_id": str(assistant.id),
                         "role": "assistant",
                         "status": assistant.status.value,
-                        "content_bytes": len(assistant.content.encode("utf-8")),
+                        "content_bytes": _content_bytes(assistant),
                         "thinking_count": len(assistant.thinking),
                         "tool_call_count": len(assistant.tool_calls),
                     },
@@ -481,7 +510,10 @@ class AgentLoop:
                         )
                     )
 
-                if response.finish_reason is FinishReason.TOOL_CALLS and assistant.tool_calls:
+                if (
+                    response.finish_reason is FinishReason.TOOL_CALLS
+                    and assistant.tool_calls
+                ):
                     if tool_rounds >= limits.max_tool_rounds:
                         raise AgentRuntimeError(
                             agent_error(
@@ -515,20 +547,23 @@ class AgentLoop:
                     for tool_message in tool_messages:
                         stored = await self.deps.messages.append_tool(tool_message)
                         message_ids.append(stored.message.id)
-                        llm_messages.append(_to_llm_message(stored.message))
+                        converted = _to_llm_message(stored.message)
+                        if converted is not None:
+                            llm_messages.append(converted)
+                        tool_call_id = getattr(stored.message, "tool_call_id", None)
                         await self._emit_hook(
                             "message.appended",
                             {
                                 "message_id": str(stored.message.id),
                                 "role": "tool",
                                 "status": stored.message.status.value,
-                                "content_bytes": len(stored.message.content.encode("utf-8")),
-                                "tool_call_id": stored.message.tool_call_id,
+                                "content_bytes": _content_bytes(stored.message),
+                                "tool_call_id": tool_call_id,
                             },
                             request=request,
                             run_id=run_id,
                             turn_id=turn_id,
-                            call_id=stored.message.tool_call_id,
+                            call_id=tool_call_id,
                         )
                     if tool_selection is not None and self.deps.tools is not None:
                         # router 工具调用后展开组内工具；非 router 调用是 no-op。
@@ -579,13 +614,10 @@ class AgentLoop:
                 duration_ms=duration,
             )
             if self.deps.memory_queue is not None:
+                # 入队已在 append_user 的事务中完成；这里只把本会话暂存行置 ready。
                 self._schedule_background(
-                    "memory.enqueue_ready",
-                    self._enqueue_then_mark_ready(
-                        request=request,
-                        user_message=user_stored.message,
-                        conversation_id=conversation_id,
-                    ),
+                    "memory.mark_ready",
+                    self._mark_memory_ready(conversation_id),
                     run_id=run_id,
                 )
             if self.deps.compressor is not None:
@@ -643,9 +675,7 @@ class AgentLoop:
                 turn_id=turn_id,
                 status=status,
                 user_message_id=(
-                    user_stored.message.id
-                    if "user_stored" in locals()
-                    else UUID(int=0)
+                    user_stored.message.id if user_stored is not None else UUID(int=0)
                 ),
                 assistant_message=final_assistant,
                 message_ids=message_ids,
@@ -713,9 +743,7 @@ class AgentLoop:
                 turn_id=turn_id,
                 status=RunStatus.FAILED,
                 user_message_id=(
-                    user_stored.message.id
-                    if "user_stored" in locals()
-                    else UUID(int=0)
+                    user_stored.message.id if user_stored is not None else UUID(int=0)
                 ),
                 assistant_message=final_assistant,
                 message_ids=message_ids,
@@ -753,7 +781,7 @@ class AgentLoop:
             await emit(AgentEventType.DONE, {"run_id": run_id, "status": "failed"})
             return result
         finally:
-            if "heartbeat_task" in locals():
+            if heartbeat_task is not None:
                 heartbeat_task.cancel()
                 try:
                     await heartbeat_task
@@ -762,11 +790,14 @@ class AgentLoop:
             # 只有成功 acquire 的 run 才释放；release 在适配器层幂等。
             try:
                 final_status = "failed"
-                if "result" in locals():
+                if result is not None:
                     if result.status is RunStatus.COMPLETED:
                         final_status = "completed"
                     elif result.status is RunStatus.CANCELLED:
                         final_status = "cancelled"
+                elif cancel_event.is_set():
+                    # 任务被强制取消时没有 result；取消标记仍是权威信号。
+                    final_status = "cancelled"
                 await self.deps.leases.release(
                     conversation_id,
                     run_id,
@@ -774,6 +805,74 @@ class AgentLoop:
                 )
             except Exception:  # noqa: BLE001 - 释放失败不能覆盖 result
                 logger.warning("释放 run 租约失败: %s", run_id, exc_info=True)
+
+    async def _replay_existing_turn(
+        self,
+        existing: StoredMessage,
+        request: AgentRequest,
+        *,
+        run_id: str,
+        turn_id: str,
+    ):
+        """幂等命中时从已落库消息重建终态结果。
+
+        只有在用户消息内容一致、且助手回合已经完整落库（工具调用都有对应
+        ToolMessage、最后一条 assistant 已完成）时才允许重放；否则返回 None，
+        由调用方转成 ``IDEMPOTENCY_CONFLICT``，避免把半截回合伪装成成功。
+        """
+        from agent.public import AgentResult
+
+        message = existing.message
+        if not isinstance(message, UserMessage):
+            return None
+        if not user_payload_matches(
+            message,
+            content=request.content,
+            images=request.images,
+            files=request.files,
+        ):
+            return None
+        following = await self.deps.messages.load_after(
+            message.conversation_id,
+            existing.seq_no,
+        )
+        turn_messages: list = []
+        for item in following:
+            # 下一条用户消息代表新的回合，不能并入本次重放结果。
+            if isinstance(item.message, UserMessage):
+                break
+            turn_messages.append(item.message)
+        assistants = [
+            item for item in turn_messages if isinstance(item, AssistantMessage)
+        ]
+        if not assistants:
+            return None
+        final = assistants[-1]
+        if final.status is not MessageStatus.COMPLETED:
+            return None
+        tool_call_ids = {
+            item.tool_call_id for item in turn_messages if isinstance(item, ToolMessage)
+        }
+        # 有 tool_calls 却没有对应 ToolMessage，说明原回合在工具轮中崩溃。
+        if any(call.call_id not in tool_call_ids for call in final.tool_calls):
+            return None
+        generation_usage = (
+            final.generation.usage
+            if final.generation is not None and final.generation.usage is not None
+            else LLMUsage()
+        )
+        return AgentResult(
+            run_id=run_id,
+            conversation_id=message.conversation_id,
+            turn_id=turn_id,
+            status=RunStatus.COMPLETED,
+            user_message_id=message.id,
+            assistant_message=final,
+            message_ids=[message.id, *(item.id for item in turn_messages)],
+            usage=generation_usage,
+            warnings=[],
+            duration_ms=0,
+        )
 
     async def _heartbeat_loop(
         self,
@@ -820,21 +919,9 @@ class AgentLoop:
             logger.warning("后台任务投递失败: %s", name, exc_info=True)
             coro.close()
 
-    async def _enqueue_then_mark_ready(
-        self,
-        *,
-        request: AgentRequest,
-        user_message,
-        conversation_id: UUID,
-    ) -> None:
-        """后台串行执行“入队 -> ready”，避免 mark_ready 早于入队完成。"""
+    async def _mark_memory_ready(self, conversation_id: UUID) -> None:
+        """回合成功终态后把本会话的暂存行置 ready，供记忆 worker 领取。"""
         assert self.deps.memory_queue is not None
-        await self.deps.memory_queue.enqueue_user_message(
-            user_id=request.user_id,
-            conversation_id=conversation_id,
-            message_id=user_message.id,
-            content=encode_content(user_message),
-        )
         await self.deps.memory_queue.mark_ready(conversation_id)
 
     async def _emit_hook(
@@ -892,9 +979,7 @@ class AgentLoop:
                 agent_error(AgentErrorCode.LEASE_LOST, "会话 run 租约已丢失")
             )
         if cancel_event.is_set():
-            raise AgentRuntimeError(
-                agent_error(AgentErrorCode.CANCELLED, "运行已取消")
-            )
+            raise AgentRuntimeError(agent_error(AgentErrorCode.CANCELLED, "运行已取消"))
         if utcnow() >= limits.deadline:
             raise AgentRuntimeError(
                 agent_error(AgentErrorCode.TIMEOUT, "回合超时", retryable=True)
@@ -1120,9 +1205,7 @@ class AgentLoop:
             system_prompt=self.deps.system_prompt,
             sections=sections,
             messages=base_messages,
-            tool_tokens=sum(
-                len(item.name) + len(item.description) for item in tools
-            )
+            tool_tokens=sum(len(item.name) + len(item.description) for item in tools)
             // 4,
         )
         await self._emit_hook(
@@ -1151,7 +1234,7 @@ class AgentLoop:
         if include_system and self.deps.system_prompt:
             messages.append(
                 LLMMessage(
-                    role="system",
+                    role=LLMRole.SYSTEM,
                     content=[TextPart(text=self.deps.system_prompt)],
                 )
             )
@@ -1225,7 +1308,7 @@ class AgentLoop:
                     )
                 )
             parts.append(part)
-        return LLMMessage(role="user", content=parts)
+        return LLMMessage(role=LLMRole.USER, content=parts)
 
     @staticmethod
     def _tool_descriptors(selection) -> list[LLMToolDescriptor]:
@@ -1320,8 +1403,8 @@ class AgentLoop:
                         "raw_arguments": None,
                     },
                 )
-                item["raw_arguments"] = (
-                    (item["raw_arguments"] or "") + (event.arguments_delta or "")
+                item["raw_arguments"] = (item["raw_arguments"] or "") + (
+                    event.arguments_delta or ""
                 )
             elif event.type == "tool_call_end":
                 item = tool_calls.setdefault(
@@ -1376,7 +1459,7 @@ class AgentLoop:
             provider=self.deps.model_id,
             model=llm_request.model_id,
             message=LLMMessage(
-                role="assistant",
+                role=LLMRole.ASSISTANT,
                 content=content_parts,
                 tool_calls=calls,
             ),
@@ -1533,9 +1616,7 @@ class AgentLoop:
                     "call_id": result.call_id,
                     "name": result.tool_name,
                     "status": result.status.value,
-                    "error_code": (
-                        result.error.code.value if result.error else None
-                    ),
+                    "error_code": (result.error.code.value if result.error else None),
                     "truncated": result.truncated,
                 },
                 call_id=result.call_id,
@@ -1546,9 +1627,7 @@ class AgentLoop:
                     "call_id": result.call_id,
                     "tool_name": result.tool_name,
                     "status": result.status.value,
-                    "error_code": (
-                        result.error.code.value if result.error else None
-                    ),
+                    "error_code": (result.error.code.value if result.error else None),
                     "truncated": result.truncated,
                 },
                 request=request,
@@ -1556,9 +1635,7 @@ class AgentLoop:
                 turn_id=turn_id,
                 call_id=result.call_id,
             )
-            messages.append(
-                _tool_message(result, conversation_id=conversation_id)
-            )
+            messages.append(_tool_message(result, conversation_id=conversation_id))
         return messages
 
 
@@ -1572,7 +1649,7 @@ def _to_llm_message(message) -> LLMMessage | None:
     role = getattr(message, "role", None)
     if role == "system":
         return LLMMessage(
-            role="system",
+            role=LLMRole.SYSTEM,
             content=[TextPart(text=message.content)],
         )
     if role == "user":
@@ -1583,7 +1660,7 @@ def _to_llm_message(message) -> LLMMessage | None:
             parts.append(_to_llm_image(image))
         for file in message.files:
             parts.append(FilePart(file_id=file.file_id, filename=file.filename))
-        return LLMMessage(role="user", content=parts)
+        return LLMMessage(role=LLMRole.USER, content=parts)
     if role == "assistant":
         parts = []
         if message.content:
@@ -1597,16 +1674,14 @@ def _to_llm_message(message) -> LLMMessage | None:
             for item in message.thinking
         )
         return LLMMessage(
-            role="assistant",
+            role=LLMRole.ASSISTANT,
             content=parts,
-            tool_calls=[
-                _to_llm_tool_call(call) for call in message.tool_calls
-            ],
+            tool_calls=[_to_llm_tool_call(call) for call in message.tool_calls],
             prefix=message.is_prefix,
         )
     if role == "tool":
         return LLMMessage(
-            role="tool",
+            role=LLMRole.TOOL,
             content=[TextPart(text=message.content)] if message.content else [],
             tool_call_id=message.tool_call_id,
             name=message.name,
@@ -1666,7 +1741,8 @@ def _tool_message(result: ToolResult, *, conversation_id: UUID) -> ToolMessage:
         tool_call_id=result.call_id,
         name=result.tool_name,
         content=content,
-        json_data=json_data,
+        # Pydantic 构造签名按别名 ``json`` 生成；与存储协议保持一致。
+        json=json_data,
         files=(
             [*result.files, result.overflow_file]
             if result.overflow_file is not None
@@ -1717,3 +1793,9 @@ def _safe_arguments(arguments: dict) -> dict:
         "keys": sorted(arguments.keys()),
         "preview": str(arguments)[:200],
     }
+
+
+def _content_bytes(message: object) -> int:
+    """消息正文的 UTF-8 字节数；RawMessage 的 dict 正文按 0 计。"""
+    content = getattr(message, "content", "")
+    return len(content.encode("utf-8")) if isinstance(content, str) else 0

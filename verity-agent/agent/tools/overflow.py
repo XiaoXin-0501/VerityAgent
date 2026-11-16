@@ -6,7 +6,6 @@ import logging
 from uuid import UUID
 
 from agent.message.models import ToolFile
-from agent.tools.state import OverflowWriter
 from store.minio import MinioStorage
 from utils.serialization import json_dumps
 

@@ -143,7 +143,8 @@ class MemoryProfileWorker:
                     )
                     limit = getattr(self.facts_store, "enforce_fact_limit", None)
                     if callable(limit):
-                        await limit(user_id=user_id)
+                        # facts_store 是实现协议；可选上限方法由调用方按存在性探测。
+                        await limit(user_id=user_id)  # pyright: ignore[reportGeneralTypeIssues]
                 fact_count = await self.facts_store.count_active(user_id=user_id)
             await self.memories.update_with_retry(
                 user_id,
@@ -304,23 +305,41 @@ def _apply_profile(
         value = data.get(name)
         if not isinstance(value, str) or not value.strip():
             return old
-        return MemorySection(
-            summary=value.strip(),
-            updated_at=now,
-            confidence=min(0.95, max(0.5, old.confidence + step)),
+        # DBJsonModel 的字段带 JSON 别名；用 model_validate 同时接受 snake_case
+        # 字段名并保留 Pydantic 校验，避免直接构造时只认别名。
+        return MemorySection.model_validate(
+            {
+                "summary": value.strip(),
+                "updated_at": now,
+                "confidence": min(0.95, max(0.5, old.confidence + step)),
+            }
         )
 
-    user = MemoryUserSections(
-        work_context=section("work_context", current.user.work_context),
-        personal_context=section("personal_context", current.user.personal_context),
-        top_of_mind=section("top_of_mind", current.user.top_of_mind),
-        cognitive_style=section("cognitive_style", current.user.cognitive_style),
+    user = MemoryUserSections.model_validate(
+        {
+            "work_context": section("work_context", current.user.work_context),
+            "personal_context": section(
+                "personal_context", current.user.personal_context
+            ),
+            "top_of_mind": section("top_of_mind", current.user.top_of_mind),
+            "cognitive_style": section(
+                "cognitive_style", current.user.cognitive_style
+            ),
+        }
     )
-    history = MemoryHistorySections(
-        recent_months=section("recent_months", current.history.recent_months),
-        earlier_context=section("earlier_context", current.history.earlier_context),
-        long_term_background=section(
-            "long_term_background", current.history.long_term_background
-        ),
+    history = MemoryHistorySections.model_validate(
+        {
+            "recent_months": section(
+                "recent_months", current.history.recent_months
+            ),
+            "earlier_context": section(
+                "earlier_context", current.history.earlier_context
+            ),
+            "long_term_background": section(
+                "long_term_background", current.history.long_term_background
+            ),
+        }
     )
-    return MemoryValue(last_updated=now, user=user, history=history)
+    return MemoryValue.model_validate(
+        {"last_updated": now, "user": user, "history": history}
+    )

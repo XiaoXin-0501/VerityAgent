@@ -48,11 +48,11 @@ def _parse_with_bs4(html: str) -> list[list[str]] | None:
                 col += 1
             text = " ".join(cell.get_text(" ", strip=True).split())
             try:
-                rowspan = max(1, int(cell.get("rowspan", 1)))
+                rowspan = max(1, int(str(cell.get("rowspan", "1"))))
             except (TypeError, ValueError):
                 rowspan = 1
             try:
-                colspan = max(1, int(cell.get("colspan", 1)))
+                colspan = max(1, int(str(cell.get("colspan", "1"))))
             except (TypeError, ValueError):
                 colspan = 1
             for r in range(tr_index, tr_index + rowspan):

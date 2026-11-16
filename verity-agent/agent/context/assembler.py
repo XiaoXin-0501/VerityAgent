@@ -7,7 +7,7 @@ MemoryView/ContextSnapshot 的完整契约仍留在上下文文档的目标章�
 
 from __future__ import annotations
 
-from agent.llm import FilePart, ImagePart, LLMMessage, ThinkingPart, TextPart
+from agent.llm import FilePart, ImagePart, LLMMessage, LLMRole, ThinkingPart, TextPart
 from utils.tokens import estimate_tokens, truncate_to_tokens
 
 from .models import ContextPlan, ContextSection
@@ -111,7 +111,7 @@ class ContextAssembler:
         result_messages: list[LLMMessage] = []
         if system_text:
             result_messages.append(
-                LLMMessage(role="system", content=[TextPart(text=system_text)])
+                LLMMessage(role=LLMRole.SYSTEM, content=[TextPart(text=system_text)])
             )
         result_messages.extend(kept)
         total = _messages_tokens(result_messages)

@@ -5,6 +5,8 @@
 Settings 或加载 Provider 依赖。
 """
 
+from typing import TYPE_CHECKING
+
 from .facade import Agent, AgentStream, create_agent
 from .public import (
     AgentError,
@@ -23,6 +25,10 @@ from .public import (
     TurnStatus,
 )
 from config.agent import AgentConfig
+
+if TYPE_CHECKING:
+    # 类型检查可见；运行时仍由 __getattr__ 惰性导入，避免实例化全局 Settings。
+    from .bootstrap import build_default_agent, build_default_agent_dependencies
 
 __all__ = [
     # factory / facade

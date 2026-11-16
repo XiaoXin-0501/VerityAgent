@@ -27,6 +27,8 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(RequestContextMiddleware)
+    # 异常处理器在请求上下文里读取该配置，避免 exception 包反向 import config。
+    app.state.request_id_header = settings.app.request_id_header
     if settings.server.cors_origins:
         app.add_middleware(
             CORSMiddleware,

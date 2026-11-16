@@ -2,7 +2,8 @@
 
 Agent framework 以 ``agent.llm.LLMRequest/LLMResponse`` 为边界；
 本适配器只做 wire 转换，不负责 PromptBuilder、模型 fallback、ContextPlan。
-这些能力后续在 LLM/Context 模块实现，不要在这里复制一套。
+这些能力由 ``agent.prompting`` / ``agent.llm_service`` / ``agent.context`` 负责，
+不要在这里复制一套。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from agent.llm import (
     LLMMessage,
     LLMRequest,
     LLMResponse,
+    LLMRole,
     LLMStreamEvent,
     LLMToolCall,
     LLMUsage,
@@ -215,7 +217,7 @@ class ProviderChatAdapter:
             provider=str(getattr(response, "provider", "") or self.model.spec.provider),
             model=str(getattr(response, "model", "") or self.model.spec.model),
             message=LLMMessage(
-                role="assistant",
+                role=LLMRole.ASSISTANT,
                 content=parts,
                 tool_calls=tool_calls,
             ),
@@ -230,7 +232,8 @@ class RoutingChatAdapter:
 
     Agent framework 只有一个默认模型时，它等价于 ``ProviderChatAdapter``；
     请求显式覆盖 ``model_id`` 时，从 ProviderRegistry 解析对应 chat 模型。
-    真正的选型/fallback 仍属于后续 ModelRegistry，这里只做路由和类型校验。
+    模型白名单与 fallback 由外层 ``agent.llm_service.ChatService/ModelRegistry``
+    负责，这里只做路由和类型校验。
     """
 
     def __init__(

@@ -31,7 +31,13 @@ def _request_id(request: Request) -> str:
     value = getattr(request.state, "request_id", None)
     if value:
         return str(value)
-    return request.headers.get("X-Request-ID", "")
+    header = getattr(request.app.state, "request_id_header", "X-Request-ID")
+    return request.headers.get(header, "")
+
+
+def _request_id_header(request: Request) -> str:
+    """请求 id 响应头名；由应用工厂从配置注入。"""
+    return getattr(request.app.state, "request_id_header", "X-Request-ID")
 
 
 def _envelope(
@@ -58,7 +64,7 @@ def _envelope(
         error["request_id"] = request_id
     response_headers = dict(headers or {})
     if request_id:
-        response_headers.setdefault("X-Request-ID", request_id)
+        response_headers.setdefault(_request_id_header(request), request_id)
     return JSONResponse(
         status_code=status_code,
         content={"error": error},

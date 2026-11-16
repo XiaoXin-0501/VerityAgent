@@ -30,7 +30,7 @@ def merge_tile_blocks(layout: LayoutDocument) -> list[LayoutBlock]:
         grouped.setdefault(block.page_no, []).append(block)
 
     merged: list[LayoutBlock] = []
-    for page_no, blocks in grouped.items():
+    for blocks in grouped.values():
         kept: list[LayoutBlock] = []
         for block in blocks:
             duplicate_index = _find_duplicate(block, kept)

@@ -49,7 +49,7 @@ class PptxParser:
         for slide_index, slide in enumerate(presentation.slides, start=1):
             for shape in slide.shapes:
                 if getattr(shape, "has_text_frame", False):
-                    text = shape.text.strip()
+                    text = str(getattr(shape, "text", "") or "").strip()
                     if text:
                         blocks.append(
                             make_block(
@@ -63,7 +63,9 @@ class PptxParser:
                         )
                         order += 1
                 if getattr(shape, "has_table", False):
-                    table = shape.table
+                    table = getattr(shape, "table", None)
+                    if table is None:
+                        continue
                     rows = [
                         [cell.text.strip() for cell in row.cells]
                         for row in table.rows
@@ -81,7 +83,8 @@ class PptxParser:
                             )
                         )
                         order += 1
-            notes = slide.notes_slide.notes_text_frame.text.strip()
+            notes_frame = slide.notes_slide.notes_text_frame
+            notes = notes_frame.text.strip() if notes_frame is not None else ""
             if notes:
                 blocks.append(
                     make_block(

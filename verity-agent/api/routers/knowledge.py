@@ -263,18 +263,20 @@ async def delete_knowledge_base(
     kb = await KnowledgeBaseRepository().soft_delete(kb_id)
     submitted = 0
     failed = 0
-    for item in pending:
-        try:
-            await indexer.delete(item.id)
-            submitted += 1
-        except Exception:  # noqa: BLE001 - 单文档失败不影响知识库隐藏
-            failed += 1
-            logger.warning(
-                "知识库文档删除任务提交失败: kb=%s doc=%s",
-                kb_id,
-                item.id,
-                exc_info=True,
-            )
+    if pending:
+        assert indexer is not None
+        for item in pending:
+            try:
+                await indexer.delete(item.id)
+                submitted += 1
+            except Exception:  # noqa: BLE001 - 单文档失败不影响知识库隐藏
+                failed += 1
+                logger.warning(
+                    "知识库文档删除任务提交失败: kb=%s doc=%s",
+                    kb_id,
+                    item.id,
+                    exc_info=True,
+                )
     return {
         "knowledge_base": _kb_payload(kb),
         "document_count": len(pending),

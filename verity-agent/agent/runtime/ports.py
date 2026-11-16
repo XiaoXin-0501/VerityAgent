@@ -78,8 +78,13 @@ class MessagePort(Protocol):
         message: UserMessage,
         *,
         client_message_id: UUID,
+        user_id: UUID | None = None,
     ) -> StoredMessage:
-        """追加用户消息并分配 seq_no。"""
+        """追加用户消息并分配 seq_no。
+
+        ``user_id`` 非空时，实现方应在同一事务内同步写入长期记忆暂存行
+        （``user_messages``，``ready_at`` 仍为空），避免崩溃后漏抽取。
+        """
         ...
 
     async def append_assistant(self, message: AssistantMessage) -> StoredMessage:
@@ -97,6 +102,16 @@ class MessagePort(Protocol):
         limit: int = 40,
     ) -> list[StoredMessage]:
         """按 seq_no 升序读取最近消息。"""
+        ...
+
+    async def load_after(
+        self,
+        conversation_id: UUID,
+        seq_no: int,
+        *,
+        limit: int = 200,
+    ) -> list[StoredMessage]:
+        """读取 ``seq_no`` 之后的消息；幂等命中时重建已有回合。"""
         ...
 
 
@@ -162,18 +177,7 @@ class AttachmentPort(Protocol):
 
 
 class MemoryQueuePort(Protocol):
-    """长期记忆队列的最小写入端口；实际抽取由独立 worker 完成。"""
-
-    async def enqueue_user_message(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        message_id: UUID,
-        content: dict,
-    ) -> None:
-        """回合终态后把用户消息放入待抽取队列（幂等）。"""
-        ...
+    """长期记忆队列的回合终态端口；入队由 MessagePort 同事务完成。"""
 
     async def mark_ready(self, conversation_id: UUID) -> None:
         """把该会话未就绪的暂存行标为可抽取。"""
@@ -271,7 +275,7 @@ class AgentDependencies:
     event_store: Any = None
     # 后台任务运行器；为空时 Agent 自己创建一个进程内 runner
     background_tasks: Any = None
-    # 可选系统提示词；ContextAssembler 尚未接入时的最小替代
+    # 基础 system prompt；ContextAssembler 会与 memory/RAG sections 合并
     system_prompt: str | None = None
     # 读取最近消息条数；后续由 ContextBudgetPlanner 取代
     history_limit: int = 40

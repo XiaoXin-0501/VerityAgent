@@ -120,16 +120,16 @@ def _extract_qa_pairs(
             answer_match = _QA_ANSWER_RE.search(raw)
             if answer_match:
                 question = _clean_question(raw[: answer_match.start()])
-                answer = _QA_ANSWER_RE.sub("", raw[answer_match.start() :], count=1)
-                answer = answer.strip()
+                answer_text = _QA_ANSWER_RE.sub("", raw[answer_match.start() :], count=1)
+                answer_text = answer_text.strip()
             else:
                 question = _clean_question(raw)
-                answer = ""
+                answer_text = ""
             if question:
                 pairs.append(
                     _QaPair(
                         question=question,
-                        answer=answer,
+                        answer=answer_text,
                         text=raw,
                     )
                 )
@@ -250,7 +250,7 @@ def _visual_groups(
     if len(blocks) < 4:
         return None
     gaps: list[float] = []
-    for previous, current in zip(blocks, blocks[1:]):
+    for previous, current in zip(blocks, blocks[1:], strict=False):
         gap = _vertical_gap(previous, current)
         if gap is not None and gap >= 0:
             gaps.append(gap)
@@ -264,7 +264,7 @@ def _visual_groups(
         return None
 
     groups: list[list[ContentBlock]] = [[blocks[0]]]
-    for previous, current in zip(blocks, blocks[1:]):
+    for previous, current in zip(blocks, blocks[1:], strict=False):
         gap = _vertical_gap(previous, current)
         if gap is None or gap >= threshold:
             groups.append([current])

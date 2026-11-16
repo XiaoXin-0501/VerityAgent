@@ -161,8 +161,11 @@ async def build_default_agent(
     **kwargs: Any,
 ) -> Agent:
     """构造默认 Agent；依赖由 ``build_default_agent_dependencies`` 提供。"""
+    resolved_config = config or AgentConfig()
+    # history_limit 属于依赖端口；未显式传入时跟随 AgentConfig，避免两套默认值。
+    kwargs.setdefault("history_limit", resolved_config.history_limit)
     dependencies = build_default_agent_dependencies(
         provider_registry=provider_registry,
         **kwargs,
     )
-    return await create_agent(config or AgentConfig(), dependencies=dependencies)
+    return await create_agent(resolved_config, dependencies=dependencies)

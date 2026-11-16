@@ -77,7 +77,8 @@ class FactReconciliationWorker:
                     continue
                 await self.memories.update_with_retry(
                     user_id,
-                    lambda _latest: MemoryChange(fact_count=count),
+                    # 默认参数绑定当前 count，避免重试回调延迟执行时捕获到后续循环值。
+                    lambda _latest, expected=count: MemoryChange(fact_count=expected),
                 )
                 corrected += 1
             except Exception:  # noqa: BLE001 - 单用户失败不影响其他用户

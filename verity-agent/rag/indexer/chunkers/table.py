@@ -273,11 +273,13 @@ class TableChunker(BaseChunker):
             dict.fromkeys(item for item in local_parts if item)
         )
 
-        need_llm = self.table_describer is not None and (
+        describer = self.table_describer
+        need_llm = describer is not None and (
             is_spreadsheet or (not local and heading_short)
         )
         if not need_llm:
             return local
+        assert describer is not None
 
         request = TableDescriptionRequest(
             heading=heading,
@@ -292,7 +294,7 @@ class TableChunker(BaseChunker):
             ],
             context=context,
         )
-        generated = await self.table_describer.describe(request)
+        generated = await describer.describe(request)
         if generated and generated.strip():
             return truncate(
                 generated.strip(),

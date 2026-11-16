@@ -504,6 +504,16 @@ export const useChatStore = defineStore('chat', () => {
         content: text,
         stream: true,
       })
+      // 幂等命中已完成的 run：后端直接返回终态结果，无需再订阅事件流。
+      if (result.status !== 'queued' && result.result) {
+        runId.value = result.run_id
+        runStatus.value = result.status as RunStatus
+        conversationStore.touch(targetConversationId, {
+          last_message_at: now,
+        })
+        await refreshMessages(targetConversationId)
+        return true
+      }
       streaming.value = true
       runId.value = result.run_id
       runStatus.value = 'queued'

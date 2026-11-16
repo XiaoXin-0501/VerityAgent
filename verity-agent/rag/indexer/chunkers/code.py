@@ -167,7 +167,7 @@ class CodeChunker(BaseChunker):
             semantic_description,
         )
         chunks: list[ChunkDraft] = []
-        for offset, group in enumerate(groups):
+        for group in groups:
             code_text = "\n".join(unit.text for unit in group).strip()
             if not code_text:
                 continue

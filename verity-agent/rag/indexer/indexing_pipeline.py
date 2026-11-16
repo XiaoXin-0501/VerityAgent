@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 from uuid import UUID, uuid4
 
 from config.rag import IndexerConfig
@@ -782,7 +783,7 @@ def _warning_code(message: str) -> IndexingWarningCode:
 def _build_error(exc: Exception, stage: IndexingStage) -> IndexingError:
     """把阶段内异常转换成 ``IndexingError``。"""
     code = _error_code(exc, stage)
-    details = {"cause": str(exc)}
+    details: dict[str, Any] = {"cause": str(exc)}
     raw_details = getattr(exc, "details", None)
     if isinstance(raw_details, dict):
         details.update(

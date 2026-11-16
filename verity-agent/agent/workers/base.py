@@ -13,7 +13,6 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
-from utils.time import utcnow
 
 __all__ = [
     "TaskStatus",

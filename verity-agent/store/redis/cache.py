@@ -15,7 +15,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from exception import RedisError, ValidationError
+from exception import RedisError
 from utils.serialization import json_dumps, json_loads
 from utils.time import utcnow
 

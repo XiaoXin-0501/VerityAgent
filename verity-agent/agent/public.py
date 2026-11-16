@@ -80,7 +80,7 @@ class AgentRequest(_Model):
     stream: bool | None = None
     # 覆盖主模型；为空使用 AgentDependencies.model_id
     model_id: str | None = None
-    # RAG 模式；v1 framework 只保留字段，INJECTED 需要注入 RagPort
+    # RAG 模式；INJECTED 在注入 RagPort 时检索并渲染 context section
     rag_mode: RAGMode | None = None
     # 工具选择覆盖
     tool_choice: ToolChoice | None = None

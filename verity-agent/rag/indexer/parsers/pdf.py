@@ -22,6 +22,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any, cast
 from uuid import UUID
 
 from config.rag import ImagePdfConfig, OcrConfig
@@ -954,7 +955,7 @@ class PdfParser:
 
         for _bbox, kind, item in entries:
             if kind == "table":
-                table = item  # type: ignore[assignment]
+                table = cast(Any, item)
                 structured = make_table(table.rows[0], table.rows[1:])
                 current_heading, current_path = headings.current()
                 blocks.append(
@@ -975,7 +976,7 @@ class PdfParser:
                 order += 1
                 continue
 
-            block = item  # type: ignore[assignment]
+            block = cast(Any, item)
             kept_lines = []
             for line in block.lines:
                 normalized = _normalize_line(line.text)

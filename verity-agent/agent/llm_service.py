@@ -108,7 +108,7 @@ class ChatService:
         if not self.enable_fallback:
             targets = targets[:1]
         last_error: Exception | None = None
-        for index, model_id in enumerate(targets):
+        for model_id in targets:
             iterator = self.llm.stream(
                 request.model_copy(update={"model_id": model_id})
             ).__aiter__()

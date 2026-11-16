@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from config.hooks import RedactionConfig
 from utils.serialization import json_dumps, to_jsonable

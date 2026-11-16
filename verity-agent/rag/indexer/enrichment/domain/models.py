@@ -295,7 +295,9 @@ class DomainProfile(_Model):
                 re.IGNORECASE,
             )
             object.__setattr__(self, "_pattern", compiled)
-        return self._pattern
+        pattern = self._pattern
+        assert pattern is not None
+        return pattern
 
     def match(self, text: str) -> list[DomainMatch]:
         """按最长优先扫描文本，返回不重叠的领域实体命中。"""

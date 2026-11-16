@@ -6,22 +6,36 @@ HTTP 层只做鉴权、DTO 投影和调用 Agent Facade；不在这里拼 Prompt
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from agent import AgentRequest
+from agent import AgentRequest, RAGMode
+from agent.llm import ToolChoice
 from agent.message.models import FileRef, ImageRef
+from agent.runtime.enums import AgentErrorCode, RunStatus
+from agent.runtime.errors import AgentRuntimeError
 from api.routers.auth import get_current_user
-from exception import UnavailableError, ValidationError
+from config import settings
+from exception import (
+    ConflictError,
+    IdempotencyConflictError,
+    InternalError,
+    LeaseConflictError,
+    NotFoundError,
+    UnavailableError,
+    ValidationError,
+)
 from store.pg.models.user import User
 from store.pg.repositories import (
     ConversationMessageRepository,
     ConversationRepository,
     PermissionRepository,
 )
+from utils.ids import run_id_for
 from utils.pagination import decode_cursor, encode_cursor, normalize_limit
 
 router = APIRouter(prefix="/conversations", tags=["会话"])
@@ -49,9 +63,16 @@ class SendMessageRequest(BaseModel):
 
     @model_validator(mode="after")
     def _has_payload(self) -> "SendMessageRequest":
-        """content/images/files 至少一个非空。"""
+        """content/images/files 至少一个非空，且不超过消息模块上限。"""
         if not self.content.strip() and not self.images and not self.files:
             raise ValueError("content/images/files 至少有一个非空")
+        limits = settings.message
+        if len(self.content) > limits.max_text_chars:
+            raise ValueError(f"content 超过 {limits.max_text_chars} 字符")
+        if len(self.images) > limits.max_images:
+            raise ValueError(f"images 最多 {limits.max_images} 个")
+        if len(self.files) > limits.max_files:
+            raise ValueError(f"files 最多 {limits.max_files} 个")
         return self
 
 
@@ -86,15 +107,12 @@ def _decision_payload(message: Any) -> dict[str, Any]:
     # ToolMessage 的字段别名是 json，但 Pydantic 的 ``model.json`` 是方法；
     # 只能取 ``json_data`` 字段，不能 getattr("json")，否则响应里会出现 bound method。
     json_data = getattr(message, "json_data", None)
+    status = getattr(message, "status", None)
     return {
         "id": str(getattr(message, "id", "")),
         "seq_no": None,
-        "role": role.value if hasattr(role, "value") else str(role),
-        "status": (
-            message.status.value
-            if hasattr(getattr(message, "status", None), "value")
-            else str(getattr(message, "status", ""))
-        ),
+        "role": str(getattr(role, "value", role) or ""),
+        "status": str(getattr(status, "value", status) or ""),
         "content": content,
         "thinking": thinking,
         "tool_calls": tool_calls,
@@ -231,7 +249,7 @@ async def send_message(
     payload: SendMessageRequest,
     request: Request,
     user: User = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> Any:
     """发送消息：流式返回 run 句柄，非流式直接等待终态。"""
     await ConversationRepository().get_for_user(user.id, conversation_id)
     permissions = await PermissionRepository().list_codes_for_user(user.id)
@@ -247,34 +265,136 @@ async def send_message(
             permissions=frozenset(permissions),
             stream=payload.stream,
             model_id=payload.model_id,
-            rag_mode=payload.rag_mode,
-            tool_choice=payload.tool_choice,
+            rag_mode=RAGMode(payload.rag_mode.lower()) if payload.rag_mode else None,
+            tool_choice=(
+                ToolChoice.model_validate(payload.tool_choice)
+                if payload.tool_choice
+                else None
+            ),
             max_tool_rounds=payload.max_tool_rounds,
             metadata=payload.metadata,
         )
     except ValueError as exc:
         raise ValidationError("消息参数不合法", details={"cause": str(exc)}) from exc
     if payload.stream:
-        stream = agent.stream(agent_request)
-        return {
-            "message_id": None,
-            "client_message_id": str(payload.client_message_id),
-            "run_id": stream.run_id,
-            "turn_id": stream.turn_id,
-            "status": "queued",
-            "events_url": f"/runs/{stream.run_id}/events",
-            "stream_url": f"/runs/{stream.run_id}/events",
-        }
-    result = await agent.run(agent_request)
-    if result.status.value in {"conflict", "expired"}:
-        raise ValidationError(
-            "会话已有活跃 run 或租约已过期",
-            details=result.error.model_dump(mode="json") if result.error else {},
+        # 先按稳定 run id 判断幂等命中：已有运行中 run 直接返回句柄让客户端 attach；
+        # 已有终态结果直接返回结果，避免重复执行 LLM/工具。
+        run_id = run_id_for(conversation_id, payload.client_message_id)
+        existing = await agent.get_run(run_id)
+        if existing is not None:
+            return JSONResponse(
+                status_code=200 if existing.result is not None else 202,
+                content=_run_handle(
+                    run_id=existing.run_id,
+                    turn_id=existing.turn_id,
+                    message_id=existing.user_message_id,
+                    client_message_id=payload.client_message_id,
+                    status=(
+                        existing.result.status.value
+                        if existing.result is not None
+                        else "queued"
+                    ),
+                    result=existing.result,
+                ),
+            )
+        try:
+            stream = agent.stream(agent_request)
+        except AgentRuntimeError as exc:
+            _raise_agent_error(exc.error)
+        return JSONResponse(
+            status_code=202,
+            content=_run_handle(
+                run_id=stream.run_id,
+                turn_id=stream.turn_id,
+                message_id=None,
+                client_message_id=payload.client_message_id,
+                status="queued",
+            ),
         )
+    result = await agent.run(agent_request)
+    _raise_for_result(result)
     return {
         "message_id": str(result.user_message_id),
+        "client_message_id": str(payload.client_message_id),
         "run_id": result.run_id,
         "turn_id": result.turn_id,
         "status": result.status.value,
         "result": result.model_dump(mode="json"),
     }
+
+
+def _run_handle(
+    *,
+    run_id: str,
+    turn_id: str,
+    message_id: UUID | None,
+    client_message_id: UUID,
+    status: str,
+    result=None,
+) -> dict[str, Any]:
+    """构造发送消息的 run 句柄；流式与非流式共用一个形状。"""
+    payload: dict[str, Any] = {
+        "message_id": str(message_id) if message_id is not None else None,
+        "client_message_id": str(client_message_id),
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "status": status,
+        "events_url": f"/runs/{run_id}/events",
+        "stream_url": f"/runs/{run_id}/events",
+    }
+    if result is not None:
+        payload["result"] = result.model_dump(mode="json")
+    return payload
+
+
+def _raise_agent_error(error) -> NoReturn:
+    """把 Agent 公开错误码映射为 HTTP 领域异常（仅用于请求入口）。"""
+    code = error.code
+    if code is AgentErrorCode.LEASE_CONFLICT:
+        raise LeaseConflictError(error.message, details=error.details)
+    if code is AgentErrorCode.IDEMPOTENCY_CONFLICT:
+        raise IdempotencyConflictError(error.message, details=error.details)
+    if code is AgentErrorCode.RUN_NOT_FOUND:
+        raise NotFoundError("运行", error.details.get("run_id"))
+    if code is AgentErrorCode.FILE_NOT_READY:
+        raise ConflictError(error.message, details=error.details)
+    if code in {
+        AgentErrorCode.MODEL_UNAVAILABLE,
+        AgentErrorCode.TIMEOUT,
+        AgentErrorCode.DEPENDENCY_UNAVAILABLE,
+    }:
+        raise UnavailableError(error.message, details=error.details)
+    if code in {
+        AgentErrorCode.MODEL_CONTENT_FILTERED,
+        AgentErrorCode.CONTEXT_LENGTH_EXCEEDED,
+    }:
+        raise ValidationError(error.message, details=error.details)
+    if code in {
+        AgentErrorCode.INVALID_CONFIG,
+        AgentErrorCode.INTERNAL,
+        AgentErrorCode.PERSISTENCE_ERROR,
+    }:
+        raise InternalError(error.message, details=error.details)
+    # 其他终态（如 EMPTY_RESPONSE、工具失败）保持 409，调用方可读 result 决定重试。
+    raise ConflictError(error.message, details=error.details)
+
+
+def _raise_for_result(result) -> None:
+    """非流式入口：把冲突/依赖类终态转成对应 HTTP 错误。"""
+    if result.status in {RunStatus.CONFLICT, RunStatus.EXPIRED}:
+        code = (
+            result.error.code
+            if result.error is not None
+            else AgentErrorCode.LEASE_CONFLICT
+        )
+        if code is AgentErrorCode.IDEMPOTENCY_CONFLICT:
+            raise IdempotencyConflictError(
+                result.error.message if result.error else "幂等冲突",
+                details=result.error.details if result.error else {},
+            )
+        raise LeaseConflictError(
+            result.error.message if result.error else "会话已有活跃运行",
+            details=result.error.details if result.error else {},
+        )
+    if result.error is not None:
+        _raise_agent_error(result.error)

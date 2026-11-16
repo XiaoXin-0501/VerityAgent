@@ -106,12 +106,24 @@ class PgMessageAdapter:
         message: UserMessage,
         *,
         client_message_id: UUID,
+        user_id: UUID | None = None,
     ) -> StoredMessage:
-        """追加用户消息；content 使用消息 codec v2。"""
+        """追加用户消息；``user_id`` 非空时与记忆暂存行同事务写入。"""
+        content = encode_content(message)
+        if user_id is not None:
+            # 双写同事务：conversation_messages + user_messages(ready_at=NULL)。
+            # 回合终态只负责 mark_ready，不在这里入队。
+            row, _ = await self.repository.append_user_turn(
+                user_id,
+                message.conversation_id,
+                content,
+                client_message_id=client_message_id,
+            )
+            return decode_stored_row(row.model_dump())
         row = await self.repository.append(
             message.conversation_id,
             PgMessageRole(AgentMessageRole.USER.value),
-            encode_content(message),
+            content,
             status=PgMessageStatus(AgentMessageStatus.COMPLETED.value),
             client_message_id=client_message_id,
         )
@@ -147,9 +159,24 @@ class PgMessageAdapter:
         rows = await self.repository.get_recent(conversation_id, limit=limit)
         return [decode_stored_row(row.model_dump()) for row in rows]
 
+    async def load_after(
+        self,
+        conversation_id: UUID,
+        seq_no: int,
+        *,
+        limit: int = 200,
+    ) -> list[StoredMessage]:
+        """读取指定 seq 之后的消息；幂等命中时重建已完成回合。"""
+        rows = await self.repository.list_range(
+            conversation_id,
+            after_seq=seq_no,
+            limit=limit,
+        )
+        return [decode_stored_row(row.model_dump()) for row in rows]
+
 
 class PgMemoryQueueAdapter:
-    """UserMessageRepository -> Agent MemoryQueuePort。"""
+    """UserMessageRepository -> Agent MemoryQueuePort（只负责回合终态 ready）。"""
 
     def __init__(
         self,
@@ -157,22 +184,6 @@ class PgMemoryQueueAdapter:
     ) -> None:
         """保存长期记忆暂存队列仓储。"""
         self.repository = repository or UserMessageRepository()
-
-    async def enqueue_user_message(
-        self,
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        message_id: UUID,
-        content: dict,
-    ) -> None:
-        """幂等入队；同一 message_id 重复入队由仓储保证。"""
-        await self.repository.enqueue(
-            user_id,
-            conversation_id,
-            message_id,
-            content,
-        )
 
     async def mark_ready(self, conversation_id: UUID) -> None:
         """回合终态后置 ready_at，供长期记忆 worker 领取。"""

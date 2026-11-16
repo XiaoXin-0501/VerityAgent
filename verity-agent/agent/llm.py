@@ -1,9 +1,9 @@
 """LLM 应用层公共类型（单文件版）。
 
 消息模块的 ``GenerationInfo``、Hooks 的 ``LLMUsage``、Agent 的
-``LLMRequest/LLMResponse`` 都从这里引用，不重复定义字段。
-ChatService/ModelRegistry/PromptBuilder/Streaming 尚未实现；未来真正需要
-服务实现时再拆分本模块为包，不提前造空文件。
+``LLMRequest/LLMResponse/LLMStreamEvent`` 都从这里引用，不重复定义字段。
+``ChatService`` 在 ``agent.llm_service``、``PromptBuilder`` 在
+``agent.prompting``；本模块只保留公共类型，避免循环依赖。
 """
 
 from __future__ import annotations

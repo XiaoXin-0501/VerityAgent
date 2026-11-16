@@ -902,7 +902,7 @@ class DefaultRetrievalPipeline:
         issues = list(primary.issues)
         timings = dict(primary.timings_ms)
         for query, result in zip(queries[1:], results, strict=True):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 warnings.append(
                     _warning(
                         RetrievalWarningCode.QUERY_REWRITE_FAILED,
@@ -1007,7 +1007,7 @@ class DefaultRetrievalPipeline:
         try:
             next_hops = await self.graph_expander.expand(
                 seed_entities=analysis.entities,
-                kb_ids=authorized_kbs,
+                kb_ids=[str(item) for item in authorized_kbs],
                 policy=policy,
             )
         except Exception as exc:  # noqa: BLE001 - 图扩展可降级
@@ -1173,7 +1173,9 @@ class DefaultRetrievalPipeline:
             and self.config.cache_enabled
             and self.config.doc_status_cache_ttl_s > 0
         )
+        cache = self.cache
         if cache_enabled:
+            assert cache is not None
             misses = []
             for doc_id, kb_id in doc_kb.items():
                 key = document_status_cache_key(
@@ -1181,7 +1183,7 @@ class DefaultRetrievalPipeline:
                     index_version=index_versions.get(kb_id, 0),
                 )
                 try:
-                    payload = await self.cache.get(key)
+                    payload = await cache.get(key)
                 except Exception as exc:  # noqa: BLE001 - 状态缓存失败回源 PG
                     warnings.append(
                         _warning(
@@ -1216,6 +1218,7 @@ class DefaultRetrievalPipeline:
                 ) from exc
             cached.update(from_store)
             if cache_enabled:
+                assert cache is not None
                 for doc_id, status in from_store.items():
                     kb_id = doc_kb.get(doc_id)
                     if kb_id is None:
@@ -1225,7 +1228,7 @@ class DefaultRetrievalPipeline:
                         index_version=index_versions.get(kb_id, 0),
                     )
                     try:
-                        await self.cache.set(
+                        await cache.set(
                             key,
                             {"status": status},
                             ttl_s=self.config.doc_status_cache_ttl_s,
@@ -1458,7 +1461,6 @@ class DefaultRetrievalPipeline:
         """
         min_score = self._effective_min_score(request)
         min_quality = self._effective_min_quality(request)
-        before = len(chunks)
         score_filtered = 0
         quality_filtered = 0
         deduped: list[RetrievedChunk] = []
@@ -1782,7 +1784,9 @@ class DefaultRetrievalPipeline:
             and self.config.cache_enabled
             and self.config.doc_meta_cache_ttl_s > 0
         )
+        cache = self.cache
         if cache_enabled:
+            assert cache is not None
             misses = []
             for doc_id, kb_id in doc_kb.items():
                 key = document_meta_cache_key(
@@ -1790,7 +1794,7 @@ class DefaultRetrievalPipeline:
                     index_version=index_versions.get(kb_id, 0),
                 )
                 try:
-                    payload = await self.cache.get(key)
+                    payload = await cache.get(key)
                 except Exception as exc:  # noqa: BLE001 - 描述缓存失败回源 PG
                     warnings.append(
                         _warning(
@@ -1824,6 +1828,7 @@ class DefaultRetrievalPipeline:
                 from_store = {}
             cached.update(from_store)
             if cache_enabled:
+                assert cache is not None
                 for doc_id, item in from_store.items():
                     kb_id = doc_kb.get(doc_id)
                     if kb_id is None:
@@ -1833,7 +1838,7 @@ class DefaultRetrievalPipeline:
                         index_version=index_versions.get(kb_id, 0),
                     )
                     try:
-                        await self.cache.set(
+                        await cache.set(
                             key,
                             item.model_dump(mode="json"),
                             ttl_s=self.config.doc_meta_cache_ttl_s,
@@ -1963,8 +1968,9 @@ class DefaultRetrievalPipeline:
             return None
         if self.cache is None:
             return None
+        cache = self.cache
         try:
-            payload = await self.cache.get(key)
+            payload = await cache.get(key)
         except Exception as exc:  # noqa: BLE001 - 缓存可降级
             warnings.append(
                 _warning(
@@ -1990,8 +1996,9 @@ class DefaultRetrievalPipeline:
             or self.cache is None
         ):
             return
+        cache = self.cache
         try:
-            await self.cache.set(
+            await cache.set(
                 key,
                 result.model_dump(mode="json"),
                 ttl_s=self.config.cache_ttl_s,

@@ -114,11 +114,14 @@ def _default_chat_model_id() -> str | None:
     )
 
 
-async def _build_rag_retriever(registry, prompt_registry):
-    """按 Settings 构造 RAG Retriever；缺少 embedding/向量库时返回 None。"""
+async def _build_rag_retriever(registry, prompt_registry, *, available: bool = True):
+    """按 Settings 构造 RAG Retriever；向量库未就绪时返回 None。"""
     cfg = settings.rag
     if not settings.weaviate.enabled:
         logger.info("Weaviate 未启用，跳过 RAG Retriever 装配")
+        return None
+    if not available:
+        logger.warning("Weaviate 未就绪，跳过 RAG Retriever 装配")
         return None
     embedding_id = cfg.indexer.embedding_model_id
     if not embedding_id:
@@ -177,11 +180,14 @@ async def _build_rag_retriever(registry, prompt_registry):
     return retriever
 
 
-async def _build_rag_indexer(registry, prompt_registry):
-    """按 Settings 构造 RAG Indexer；MinIO/Weaviate/embedding 缺失时返回 None。"""
+async def _build_rag_indexer(registry, prompt_registry, *, available: bool = True):
+    """按 Settings 构造 RAG Indexer；MinIO/Weaviate/embedding 未就绪时返回 None。"""
     cfg = settings.rag
     if not settings.weaviate.enabled or not settings.minio.enabled:
         logger.info("Weaviate/MinIO 未启用，跳过 RAG Indexer 装配")
+        return None
+    if not available:
+        logger.warning("MinIO/Weaviate 未就绪，跳过 RAG Indexer 装配")
         return None
     embedding_id = cfg.indexer.embedding_model_id
     if not embedding_id:
@@ -192,9 +198,66 @@ async def _build_rag_indexer(registry, prompt_registry):
     except ConfigurationError as exc:
         logger.warning("RAG embedding 模型不可用: %s", exc)
         return None
+    # 入库阶段的描述/表格/代码/图抽取模型都按配置解析；配置了模型 id 就注入，
+    # 否则显式降级，避免“配置打开了但实际一直没生效”的静默偏差。
+    default_chat = _default_chat_model_id()
+    indexer_cfg = cfg.indexer
+    description_model = (
+        _resolve_model(
+            registry,
+            indexer_cfg.description_model_id,
+            fallback=default_chat,
+            kind="chat",
+        )
+        if indexer_cfg.description_llm_enabled
+        else None
+    )
+    table_model = (
+        _resolve_model(
+            registry,
+            indexer_cfg.table_summary_model_id,
+            fallback=default_chat,
+            kind="chat",
+        )
+        if indexer_cfg.table_summary_llm_enabled
+        else None
+    )
+    code_model = (
+        _resolve_model(
+            registry,
+            indexer_cfg.code_summary_model_id,
+            fallback=default_chat,
+            kind="chat",
+        )
+        if indexer_cfg.code_summary_enabled
+        else None
+    )
+    graph_model = (
+        _resolve_model(
+            registry,
+            indexer_cfg.graph_model_id,
+            fallback=default_chat,
+            kind="chat",
+        )
+        if (indexer_cfg.graph_extraction_mode or "").lower()
+        in {"llm", "hybrid"}
+        else None
+    )
+    logger.info(
+        "RAG Indexer 模型: embedding=%s description=%s table=%s code=%s graph=%s",
+        embedding_id,
+        getattr(getattr(description_model, "spec", None), "id", None),
+        getattr(getattr(table_model, "spec", None), "id", None),
+        getattr(getattr(code_model, "spec", None), "id", None),
+        getattr(getattr(graph_model, "spec", None), "id", None),
+    )
     return await build_default_indexer(
-        cfg.indexer,
+        indexer_cfg,
         embedding_model=embedding_model,
+        description_chat_model=description_model,
+        table_summary_chat_model=table_model,
+        code_summary_chat_model=code_model,
+        graph_chat_model=graph_model,
         prompt_registry=prompt_registry,
     )
 
@@ -440,12 +503,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.provider_registry = registry
         rag_retriever = None
         try:
-            rag_retriever = await _build_rag_retriever(registry, prompts)
+            rag_retriever = await _build_rag_retriever(
+                registry,
+                prompts,
+                available=weaviate_ready,
+            )
         except Exception as exc:  # noqa: BLE001 - RAG 装配失败不阻断普通对话
             logger.warning("RAG Retriever 装配失败，降级为无知识库工具: %s", exc)
         app.state.rag_retriever = rag_retriever
         try:
-            rag_indexer = await _build_rag_indexer(registry, prompts)
+            rag_indexer = await _build_rag_indexer(
+                registry,
+                prompts,
+                available=weaviate_ready and minio_ready,
+            )
         except Exception as exc:  # noqa: BLE001 - 管理面入库失败不阻断对话
             logger.warning("RAG Indexer 装配失败，知识库管理不可用: %s", exc)
         app.state.indexer = rag_indexer

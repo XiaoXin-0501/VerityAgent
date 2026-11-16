@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+from typing import TypedDict
 
 from config.rag import IndexerConfig
 from rag.shared.models import Chunk, ChunkGraphExtraction, GraphRelation
@@ -45,6 +46,15 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class _EntityStat(TypedDict):
+    """单个实体在文本中的聚合统计；避免用 dict[str, object] 丢失类型。"""
+
+    weight: float
+    count: int
+    first: int
+    in_heading: bool
 
 
 class DomainRelationExtractor:
@@ -234,7 +244,7 @@ class DomainGraphExtractor:
         先按分数降序、同分按首次出现顺序，保证同一输入结果确定。
         """
         heading_key = _normalize_keyword(heading).lower()
-        stats: dict[str, dict[str, object]] = {}
+        stats: dict[str, _EntityStat] = {}
         for index, match in enumerate(matches):
             entry = stats.setdefault(
                 match.name,
@@ -299,7 +309,7 @@ def _build_postokenizer(profile: DomainProfile):
     return pseg.POSTokenizer(tokenizer)
 
 
-def _first_index(stats: dict[str, dict[str, object]], name: str) -> int:
+def _first_index(stats: dict[str, _EntityStat], name: str) -> int:
     """取实体首次出现位置，用于同分排序。"""
     return int(stats[name]["first"])
 

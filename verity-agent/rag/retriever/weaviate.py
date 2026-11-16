@@ -536,7 +536,7 @@ class WeaviateNeighborExpander:
         """查询单条主 chunk 的邻居；失败由 pipeline 降级为告警。"""
         from weaviate.classes.query import Filter
 
-        index = int(chunk.chunk_index)
+        index = int(chunk.chunk_index or 0)
         lower = max(0, index - max(0, policy.before))
         upper = index + max(0, policy.after)
         where = Filter.by_property("doc_id").equal(str(chunk.doc_id))

@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
-from exception import Neo4jQueryError
-
 from .connection import Neo4jConnectionManager, get_neo4j
 
 __all__ = ["GraphStore", "relation_key"]
