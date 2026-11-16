@@ -82,6 +82,8 @@ export function statusLabel(status: string): string {
     streaming: '生成中',
     partial: '部分完成',
     active: '活跃',
+    disabled: '已停用',
+    deleting: '删除中',
     archived: '已归档',
   }
   return labels[status] ?? status

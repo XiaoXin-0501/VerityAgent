@@ -75,7 +75,12 @@ src/
 | 管理员：文档 | `GET/POST/DELETE /api/v1/knowledge-bases/{kb_id}/documents...` |
 | 管理员：入库任务 | `GET /api/v1/index-jobs/{job_id}` |
 
-知识库管理页仅 `role=admin` 可见：创建知识库、上传/删除文档、轮询入库进度。
+新建对话先进入前端草稿态，不调用后端；用户发送首条消息时才创建会话
+（标题取首条消息前 `VITE_CONVERSATION_TITLE_MAX_LENGTH` 个字符），并立即发起 run。
+
+知识库管理页仅 `role=admin` 可见：创建、禁用/启用、删除知识库，上传/删除文档，
+轮询入库进度。删除知识库需要在弹窗中再次输入当前管理员密码，随后软删元数据
+并提交其下文档的索引清理任务。
 向量模型/维度由服务端 `RAG__INDEXER__*` 决定，前端不传。
 
 > 默认种子账号 `xiaoxin` 启动时会被同步为 `admin`；已有库在 dev/test

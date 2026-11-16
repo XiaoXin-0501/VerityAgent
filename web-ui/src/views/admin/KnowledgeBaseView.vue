@@ -1,31 +1,34 @@
 <template>
   <section class="kb-page">
-    <header class="kb-page__topbar">
-      <div class="kb-page__topbar-left">
-        <BrandMark />
-        <span class="kb-page__divider" aria-hidden="true"></span>
-        <el-button text class="kb-page__back" @click="router.push({ name: 'home' })">
-          <el-icon><ArrowLeft /></el-icon>
-          <span>返回对话</span>
-        </el-button>
-      </div>
-      <div class="kb-page__topbar-right">
-        <el-tooltip content="刷新知识库与文档" placement="bottom">
-          <el-button
-            circle
-            text
-            :loading="loadingKbs"
-            aria-label="刷新知识库与文档"
-            @click="handleRefresh"
-          >
-            <el-icon><Refresh /></el-icon>
-          </el-button>
-        </el-tooltip>
-      </div>
-    </header>
-
     <div class="kb-page__body">
       <aside class="kb-panel">
+        <div class="kb-panel__brand">
+          <BrandMark />
+          <div class="kb-panel__brand-actions">
+            <el-tooltip content="返回对话" placement="bottom">
+              <el-button
+                circle
+                text
+                aria-label="返回对话"
+                @click="router.push({ name: 'home' })"
+              >
+                <el-icon><ArrowLeft /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="刷新知识库与文档" placement="bottom">
+              <el-button
+                circle
+                text
+                :loading="loadingKbs"
+                aria-label="刷新知识库与文档"
+                @click="handleRefresh"
+              >
+                <el-icon><Refresh /></el-icon>
+              </el-button>
+            </el-tooltip>
+          </div>
+        </div>
+
         <div class="kb-panel__head">
           <h2 class="kb-panel__title">知识库管理</h2>
           <el-tag size="small" type="info" effect="plain">
@@ -60,6 +63,13 @@
             <span class="kb-item__name">{{ item.name }}</span>
             <span class="kb-item__desc">{{ item.description || '暂无描述' }}</span>
             <span class="kb-item__meta">
+              <el-tag
+                size="small"
+                :type="kbStatusTagType(item.status)"
+                effect="light"
+              >
+                {{ statusLabel(item.status) }}
+              </el-tag>
               <el-tag size="small" effect="plain">{{ item.required_permission_code }}</el-tag>
               <span>v{{ item.index_version }}</span>
             </span>
@@ -81,6 +91,13 @@
                 {{ selectedKb.description || '暂无描述' }}
               </p>
               <div class="doc-panel__facts">
+                <el-tag
+                  size="small"
+                  :type="kbStatusTagType(selectedKb.status)"
+                  effect="light"
+                >
+                  {{ statusLabel(selectedKb.status) }}
+                </el-tag>
                 <el-tag size="small" effect="plain" type="info">
                   权限：{{ selectedKb.required_permission_code }}
                 </el-tag>
@@ -90,10 +107,33 @@
                 <span>索引版本 v{{ selectedKb.index_version }}</span>
               </div>
             </div>
-            <el-button type="primary" plain @click="openUpload">
-              <el-icon><UploadFilled /></el-icon>
-              <span>上传文档</span>
-            </el-button>
+            <div class="doc-panel__actions">
+              <el-button class="doc-action doc-action--primary" @click="openUpload">
+                <el-icon><UploadFilled /></el-icon>
+                <span>上传文档</span>
+              </el-button>
+              <el-button
+                class="doc-action"
+                text
+                :loading="statusUpdating"
+                @click="toggleKbStatus"
+              >
+                <el-icon>
+                  <VideoPause v-if="selectedKb.status === 'active'" />
+                  <CircleCheck v-else />
+                </el-icon>
+                <span>{{ selectedKb.status === 'active' ? '禁用' : '启用' }}</span>
+              </el-button>
+              <el-button
+                class="doc-action doc-action--danger"
+                text
+                :loading="deletingKb"
+                @click="openDeleteDialog"
+              >
+                <el-icon><Delete /></el-icon>
+                <span>删除</span>
+              </el-button>
+            </div>
           </div>
 
           <div class="doc-panel__upload-hint">
@@ -259,17 +299,72 @@
         </el-button>
       </template>
     </el-dialog>
+    <el-dialog
+      v-model="deleteVisible"
+      title="删除知识库"
+      width="480px"
+      :close-on-click-modal="false"
+      @closed="resetDeleteDialog"
+    >
+      <div class="delete-dialog">
+        <div class="delete-dialog__warning">
+          <span class="delete-dialog__icon">
+            <el-icon :size="20"><WarningFilled /></el-icon>
+          </span>
+          <div>
+            <p class="delete-dialog__title">
+              确认删除「{{ deleteTarget?.name }}」？
+            </p>
+            <p class="delete-dialog__text">
+              知识库会立即从检索和管理列表隐藏，其下文档的向量、图与对象存储数据
+              将异步清理。此操作无法在界面中恢复。
+            </p>
+          </div>
+        </div>
+
+        <el-form label-position="top" @submit.prevent="confirmDelete">
+          <el-form-item label="管理员密码" :error="deleteError">
+            <el-input
+              v-model="deletePassword"
+              type="password"
+              show-password
+              autocomplete="current-password"
+              placeholder="再次输入当前管理员密码"
+              @keyup.enter="confirmDelete"
+            />
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <template #footer>
+        <el-button :disabled="deletingKb" @click="deleteVisible = false">取消</el-button>
+        <el-button
+          type="danger"
+          :loading="deletingKb"
+          :disabled="!deletePassword"
+          @click="confirmDelete"
+        >
+          确认删除
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
+import 'element-plus/es/components/message-box/style/css'
+
 import {
   ArrowLeft,
+  CircleCheck,
   Collection,
+  Delete,
   Document,
   Plus,
   Refresh,
   UploadFilled,
+  VideoPause,
+  WarningFilled,
 } from '@element-plus/icons-vue'
 import type { UploadFile, UploadRawFile } from 'element-plus'
 import { ElMessageBox } from 'element-plus'
@@ -280,10 +375,12 @@ import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import {
   createKnowledgeBaseApi,
   deleteDocumentApi,
+  deleteKnowledgeBaseApi,
   getIndexJobApi,
   getKnowledgeOptionsApi,
   listDocumentsApi,
   listKnowledgeBasesApi,
+  updateKnowledgeBaseStatusApi,
   uploadDocumentApi,
 } from '@/api/modules/knowledge'
 import type {
@@ -297,6 +394,7 @@ import {
   documentStatusLabel,
   formatBytes,
   formatDateTime,
+  statusLabel,
 } from '@/utils/format'
 
 const DOC_TYPE_EXTENSIONS: Record<string, string[]> = {
@@ -314,6 +412,8 @@ const loadingDocs = ref(false)
 const router = useRouter()
 const creating = ref(false)
 const uploading = ref(false)
+const statusUpdating = ref(false)
+const deletingKb = ref(false)
 const uploadPercent = ref(0)
 const knowledgeBases = ref<KnowledgeBase[]>([])
 const documents = ref<KnowledgeDocument[]>([])
@@ -330,6 +430,10 @@ const createForm = reactive({
 })
 const uploadFile = ref<File | null>(null)
 const uploadDescription = ref('')
+const deleteVisible = ref(false)
+const deleteTarget = ref<KnowledgeBase | null>(null)
+const deletePassword = ref('')
+const deleteError = ref('')
 
 let disposed = false
 
@@ -354,6 +458,19 @@ function statusTagType(status: string): 'success' | 'warning' | 'danger' | 'info
     case 'pending':
       return 'warning'
     case 'failed':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+function kbStatusTagType(status: string): 'success' | 'warning' | 'danger' | 'info' {
+  switch (status) {
+    case 'active':
+      return 'success'
+    case 'disabled':
+      return 'warning'
+    case 'deleting':
       return 'danger'
     default:
       return 'info'
@@ -439,6 +556,68 @@ async function submitCreate(): Promise<void> {
     // 错误提示由请求层统一处理
   } finally {
     creating.value = false
+  }
+}
+
+async function toggleKbStatus(): Promise<void> {
+  const kb = selectedKb.value
+  if (!kb || statusUpdating.value) return
+  const target = kb.status === 'active' ? 'disabled' : 'active'
+  statusUpdating.value = true
+  try {
+    const updated = await updateKnowledgeBaseStatusApi(kb.id, target)
+    knowledgeBases.value = knowledgeBases.value.map((item) =>
+      item.id === updated.id ? updated : item,
+    )
+    ElMessage.success(target === 'active' ? '知识库已启用' : '知识库已禁用')
+  } catch {
+    // 错误提示由请求层统一处理
+  } finally {
+    statusUpdating.value = false
+  }
+}
+
+function openDeleteDialog(): void {
+  const kb = selectedKb.value
+  if (!kb) return
+  deleteTarget.value = kb
+  deletePassword.value = ''
+  deleteError.value = ''
+  deleteVisible.value = true
+}
+
+function resetDeleteDialog(): void {
+  deleteTarget.value = null
+  deletePassword.value = ''
+  deleteError.value = ''
+}
+
+async function confirmDelete(): Promise<void> {
+  const kb = deleteTarget.value
+  const password = deletePassword.value
+  if (!kb || !password || deletingKb.value) return
+  deletingKb.value = true
+  deleteError.value = ''
+  try {
+    const result = await deleteKnowledgeBaseApi(kb.id, password)
+    deleteVisible.value = false
+    knowledgeBases.value = knowledgeBases.value.filter((item) => item.id !== kb.id)
+    const next = knowledgeBases.value[0]
+    selectedId.value = next?.id ?? null
+    documents.value = []
+    if (next) await loadDocuments(next.id)
+    if (result.failed > 0) {
+      ElMessage.warning(
+        `知识库已删除，${result.failed} 个文档的清理任务提交失败，需要人工检查`,
+      )
+    } else {
+      ElMessage.success(`知识库已删除，已提交 ${result.submitted} 个文档清理任务`)
+    }
+  } catch (error) {
+    deleteError.value =
+      error instanceof Error ? error.message : '删除失败，请稍后重试'
+  } finally {
+    deletingKb.value = false
   }
 }
 
@@ -623,55 +802,27 @@ onBeforeUnmount(() => {
   background: var(--app-chat-background);
 }
 
-.kb-page__topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex: 0 0 var(--app-layout-header-height);
-  height: var(--app-layout-header-height);
-  padding: 0 var(--app-space-lg);
-  background-color: var(--app-bg-glass);
-  border-bottom: 1px solid var(--app-border-color);
-  backdrop-filter: blur(14px);
-}
-
-.kb-page__topbar-left,
-.kb-page__topbar-right {
-  display: flex;
-  align-items: center;
-  gap: var(--app-space-sm);
-}
-
-.kb-page__back {
-  margin-left: var(--app-space-sm);
-  color: var(--app-text-secondary);
-}
-
-.kb-page__back span {
-  margin-left: var(--app-space-2xs);
-}
-
-.kb-page__divider {
-  width: 1px;
-  height: 18px;
-  background-color: var(--app-border-color);
-}
-
-.kb-page__back {
-  color: var(--app-text-secondary);
-}
-
-.kb-page__back span {
-  margin-left: var(--app-space-2xs);
-}
-
 .kb-page__body {
   display: flex;
   flex: 1;
   min-height: 0;
 }
 
-/* —— 知识库列表 —— */
+/* —— 知识库侧栏 —— */
+.kb-panel__brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-sm);
+  margin-bottom: var(--app-space-md);
+}
+
+.kb-panel__brand-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2xs);
+}
+
 .kb-panel {
   display: flex;
   flex: 0 0 var(--app-sidebar-width);
@@ -844,6 +995,72 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
+.doc-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--app-space-sm);
+}
+
+.doc-action.el-button {
+  height: 34px;
+  padding: 0 var(--app-space-md);
+  font-size: var(--app-font-size-sm);
+  color: var(--app-text-regular);
+  background-color: var(--app-bg-card);
+  border: 1px solid var(--app-border-color);
+  border-radius: var(--app-radius-pill);
+  box-shadow: var(--app-shadow-bubble);
+  transition:
+    color var(--app-transition-fast),
+    background-color var(--app-transition-fast),
+    border-color var(--app-transition-fast),
+    transform var(--app-transition-fast);
+}
+
+.doc-action.el-button:hover {
+  color: var(--app-color-primary);
+  background-color: var(--app-color-primary-soft);
+  border-color: var(--app-color-primary-soft);
+  transform: translateY(-1px);
+}
+
+.doc-action :deep(.el-icon) {
+  margin-right: var(--app-space-xs);
+  color: var(--app-color-primary);
+}
+
+.doc-action--primary.el-button {
+  color: var(--app-color-primary);
+  background-color: var(--app-color-primary-soft);
+  border-color: transparent;
+}
+
+.doc-action--primary.el-button:hover {
+  color: var(--app-text-on-primary);
+  background-color: var(--app-color-primary);
+  border-color: var(--app-color-primary);
+}
+
+.doc-action--primary :deep(.el-icon) {
+  color: currentColor;
+}
+
+.doc-action--danger.el-button {
+  color: var(--app-text-regular);
+}
+
+.doc-action--danger :deep(.el-icon) {
+  color: var(--app-color-danger);
+}
+
+.doc-action--danger.el-button:hover {
+  color: var(--app-color-danger);
+  background-color: var(--app-color-danger-soft);
+  border-color: var(--app-color-danger-soft);
+}
+
 .doc-panel__title {
   font-size: var(--app-font-size-lg);
   font-weight: 600;
@@ -973,6 +1190,41 @@ onBeforeUnmount(() => {
   color: var(--app-text-regular);
 }
 
+.delete-dialog__warning {
+  display: flex;
+  gap: var(--app-space-sm);
+  padding: var(--app-space-md);
+  margin-bottom: var(--app-space-md);
+  background-color: var(--app-color-danger-soft);
+  border: 1px solid var(--app-color-danger-soft);
+  border-radius: var(--app-radius-md);
+}
+
+.delete-dialog__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  color: var(--app-color-danger);
+  background-color: var(--app-bg-card);
+  border-radius: var(--app-radius-pill);
+}
+
+.delete-dialog__title {
+  font-size: var(--app-font-size-base);
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.delete-dialog__text {
+  margin-top: var(--app-space-2xs);
+  font-size: var(--app-font-size-sm);
+  line-height: var(--app-line-height-base);
+  color: var(--app-text-secondary);
+}
+
 .upload-form {
   margin-top: var(--app-space-md);
 }
@@ -982,19 +1234,6 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 900px) {
-  .kb-page__topbar {
-    padding-inline: var(--app-space-md);
-  }
-
-  .kb-page__divider,
-  .kb-page__topbar-left :deep(.brand-mark__name) {
-    display: none;
-  }
-
-  .kb-page__back span {
-    display: none;
-  }
-
   .kb-page__body {
     flex-direction: column;
   }
@@ -1002,13 +1241,21 @@ onBeforeUnmount(() => {
   .kb-panel {
     flex: 0 0 auto;
     width: 100%;
-    max-height: 260px;
+    max-height: 320px;
     border-right: none;
     border-bottom: 1px solid var(--app-border-color);
   }
 
   .doc-panel {
     padding: var(--app-space-md);
+  }
+
+  .doc-panel__head {
+    flex-direction: column;
+  }
+
+  .doc-panel__actions {
+    justify-content: flex-start;
   }
 }
 </style>

@@ -349,3 +349,10 @@ export interface KnowledgeOptions {
   embedding_dimensions: number
   embedding_version: string
 }
+
+export interface DeleteKnowledgeBaseResult {
+  knowledge_base: KnowledgeBase
+  document_count: number
+  submitted: number
+  failed: number
+}

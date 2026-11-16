@@ -158,7 +158,8 @@ const groups = computed<ConversationGroup[]>(() => {
   for (const item of filtered.value) {
     const time = item.last_message_at ? new Date(item.last_message_at).getTime() : 0
     if (!time) {
-      earlier.push(item)
+      // 新建但还没有消息的会话放在“今天”，避免掉到“更早”。
+      today.push(item)
     } else if (time >= startOfToday) {
       today.push(item)
     } else if (time >= startOfToday - 86_400_000) {

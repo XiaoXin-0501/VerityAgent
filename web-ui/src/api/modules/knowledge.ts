@@ -1,5 +1,6 @@
 import type {
   CreateKnowledgeBaseParams,
+  DeleteKnowledgeBaseResult,
   DocumentListResult,
   IndexJob,
   KnowledgeBase,
@@ -19,6 +20,25 @@ export function createKnowledgeBaseApi(
   params: CreateKnowledgeBaseParams,
 ): Promise<KnowledgeBase> {
   return http.post<KnowledgeBase>('/knowledge-bases', params)
+}
+
+/** 管理员：启用/停用知识库。 */
+export function updateKnowledgeBaseStatusApi(
+  kbId: string,
+  status: 'active' | 'disabled',
+): Promise<KnowledgeBase> {
+  return http.patch<KnowledgeBase>(`/knowledge-bases/${kbId}`, { status })
+}
+
+/** 管理员：删除知识库并提交文档索引清理任务；需要二次输入管理员密码。 */
+export function deleteKnowledgeBaseApi(
+  kbId: string,
+  password: string,
+): Promise<DeleteKnowledgeBaseResult> {
+  return http.delete<DeleteKnowledgeBaseResult>(`/knowledge-bases/${kbId}`, {
+    data: { password },
+    silent: true,
+  })
 }
 
 /** 管理员：上传限制、启用类型与默认权限码。 */

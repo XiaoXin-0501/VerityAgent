@@ -89,26 +89,23 @@ async function handleSelect(id: string): Promise<void> {
   await loadConversation(id)
 }
 
-async function handleCreate(): Promise<void> {
+function handleCreate(): void {
   sidebarOpen.value = false
-  try {
-    const created = await conversationStore.create()
-    chat.resetMessages()
-    await loadConversation(created.id)
-  } catch {
-    // 错误提示由请求层统一处理
-  }
+  // 新建对话只进入前端草稿态；首条消息发送时才真正创建后端会话。
+  conversationStore.select(null)
+  chat.resetAll()
+  draft.value = ''
 }
 
 async function handleRefresh(): Promise<void> {
   try {
-    const items = await conversationStore.fetchList()
-    const targetId = conversationStore.activeId ?? items[0]?.id
+    await conversationStore.fetchList()
+    const targetId = conversationStore.activeId
     if (!targetId) {
-      chat.resetAll()
+      // 保持当前草稿态；若原会话已不可见则清空旧消息。
+      if (chat.conversationId) chat.resetAll()
       return
     }
-    conversationStore.select(targetId)
     await loadConversation(targetId)
   } catch {
     // 错误提示由请求层统一处理
@@ -134,10 +131,11 @@ async function handleSend(): Promise<void> {
 onMounted(async () => {
   try {
     const items = await conversationStore.fetchList()
-    const first = items[0]
-    if (first) {
-      conversationStore.select(first.id)
-      await loadConversation(first.id)
+    const preferred =
+      items.find((item) => item.id === conversationStore.activeId) ?? items[0]
+    if (preferred) {
+      conversationStore.select(preferred.id)
+      await loadConversation(preferred.id)
     }
   } catch {
     // 错误提示由请求层统一处理

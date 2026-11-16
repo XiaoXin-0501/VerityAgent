@@ -17,12 +17,15 @@ export const useConversationStore = defineStore('conversations', () => {
     loading.value = true
     try {
       const result = await listConversationsApi({ limit: 50 })
-      items.value = result.items
+      // 空会话不进入历史列表：新建对话先停留在前端草稿态，发出首条消息后才创建。
+      items.value = result.items.filter(
+        (item) => !(item.turn_count === 0 && item.last_message_at === null),
+      )
       loaded.value = true
       if (activeId.value && !items.value.some((item) => item.id === activeId.value)) {
         activeId.value = null
       }
-      return result.items
+      return items.value
     } finally {
       loading.value = false
     }
@@ -47,7 +50,7 @@ export const useConversationStore = defineStore('conversations', () => {
     }
   }
 
-  function select(id: string): void {
+  function select(id: string | null): void {
     if (activeId.value === id) return
     activeId.value = id
   }

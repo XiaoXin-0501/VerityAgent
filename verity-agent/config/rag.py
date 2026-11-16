@@ -389,3 +389,7 @@ class RagConfig(ConfigModel):
     retriever: RetrieverConfig = Field(default_factory=RetrieverConfig)
     # 单条 query 最大字符数；超过截断并写 warning
     max_query_chars: int = Field(default=2000, gt=0)
+    # 新建知识库未显式指定权限码时使用的默认值
+    default_kb_permission_code: str = Field(
+        default="kb:read", min_length=1, max_length=100
+    )

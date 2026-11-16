@@ -10,24 +10,32 @@
 
 from __future__ import annotations
 
+import logging
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from api.routers.auth import require_admin
+from api.routers.auth import require_admin, verify_password
 from config import settings
-from exception import NotFoundError, UnavailableError, ValidationError
+from exception import (
+    NotFoundError,
+    PermissionDeniedError,
+    UnavailableError,
+    ValidationError,
+)
 from rag.public import DocumentSource, IndexDocumentRequest
 from store.minio import MinioStorage
 from store.minio.paths import kb_source_key, sanitize_extension
 from store.pg.models.enums import DocumentStatus, KnowledgeBaseStatus
 from store.pg.models.knowledge import Document, KnowledgeBase
-from store.pg.repositories import DocumentRepository, KnowledgeBaseRepository
 from store.pg.models.user import User
+from store.pg.repositories import DocumentRepository, KnowledgeBaseRepository
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/knowledge-bases", tags=["知识库管理"])
 index_jobs_router = APIRouter(prefix="/index-jobs", tags=["知识库管理"])
@@ -54,8 +62,20 @@ class CreateKnowledgeBaseRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
-    # 访问该库所需权限码；对话检索时按真实用户权限校验
-    required_permission_code: str = Field(default="kb:read", min_length=1, max_length=100)
+    # 访问该库所需权限码；为空使用 RAG__DEFAULT_KB_PERMISSION_CODE
+    required_permission_code: str | None = Field(default=None, max_length=100)
+
+
+class UpdateKnowledgeBaseStatusRequest(BaseModel):
+    """启用/停用知识库。"""
+
+    status: Literal["active", "disabled"]
+
+
+class DeleteKnowledgeBaseRequest(BaseModel):
+    """删除知识库前二次确认管理员密码。"""
+
+    password: str = Field(min_length=1, max_length=128)
 
 
 def _indexer(request: Request):
@@ -140,7 +160,7 @@ async def get_knowledge_options(
     return {
         "enabled_doc_types": list(cfg.enabled_doc_types),
         "max_file_bytes": settings.message.max_file_bytes,
-        "default_permission_code": "kb:read",
+        "default_permission_code": settings.rag.default_kb_permission_code,
         "embedding_model_id": cfg.embedding_model_id,
         "embedding_dimensions": cfg.embedding_dimensions,
         "embedding_version": cfg.embedding_version,
@@ -156,9 +176,15 @@ async def create_knowledge_base(
     cfg = settings.rag.indexer
     if not cfg.embedding_model_id:
         raise UnavailableError("未配置 RAG embedding 模型，无法创建知识库")
+    permission_code = (
+        payload.required_permission_code
+        or settings.rag.default_kb_permission_code
+    ).strip()
+    if not permission_code:
+        raise ValidationError("required_permission_code 不能为空")
     kb = await KnowledgeBaseRepository().create(
         payload.name,
-        payload.required_permission_code,
+        permission_code,
         description=payload.description,
         embedding_model_id=cfg.embedding_model_id,
         embedding_dimensions=cfg.embedding_dimensions,
@@ -177,6 +203,84 @@ async def list_knowledge_bases(
     """管理员查看全部未删除知识库。"""
     items = await KnowledgeBaseRepository().list(limit=limit, offset=offset)
     return {"items": [_kb_payload(item) for item in items], "next_cursor": None}
+
+
+@router.patch("/{kb_id}")
+async def update_knowledge_base_status(
+    kb_id: UUID,
+    payload: UpdateKnowledgeBaseStatusRequest,
+    user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """启用/停用知识库；停用后检索不可见，文档与索引保留。"""
+    await _require_kb(kb_id)
+    kb = await KnowledgeBaseRepository().update(
+        kb_id,
+        status=KnowledgeBaseStatus(payload.status),
+    )
+    return _kb_payload(kb)
+
+
+@router.delete("/{kb_id}", status_code=202)
+async def delete_knowledge_base(
+    kb_id: UUID,
+    payload: DeleteKnowledgeBaseRequest,
+    request: Request,
+    user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """删除知识库：校验管理员密码后软删并提交文档清理任务。
+
+    知识库先被标记 deleting/deleted_at，立即从管理列表与检索中消失；
+    Weaviate/Neo4j/MinIO/PG 文档清理由 Indexer 后台任务完成。
+    """
+    if not verify_password(payload.password, user.password_hash):
+        logger.warning(
+            "管理员删除知识库密码校验失败: user=%s kb=%s", user.id, kb_id
+        )
+        raise PermissionDeniedError(
+            "管理员密码错误",
+            details={"kb_id": str(kb_id)},
+        )
+    await _require_kb(kb_id)
+    documents = DocumentRepository()
+    rows: list[Document] = []
+    offset = 0
+    while True:
+        page = await documents.list_by_kb(kb_id, limit=200, offset=offset)
+        rows.extend(page)
+        if len(page) < 200:
+            break
+        offset += 200
+    pending = [
+        item
+        for item in rows
+        if item.status not in (DocumentStatus.DELETING, DocumentStatus.DELETED)
+    ]
+    # 有文档时必须先确认 Indexer 可用，避免只删元数据、留下索引孤儿。
+    indexer = _indexer(request) if pending else None
+    if pending:
+        assert indexer is not None
+
+    kb = await KnowledgeBaseRepository().soft_delete(kb_id)
+    submitted = 0
+    failed = 0
+    for item in pending:
+        try:
+            await indexer.delete(item.id)
+            submitted += 1
+        except Exception:  # noqa: BLE001 - 单文档失败不影响知识库隐藏
+            failed += 1
+            logger.warning(
+                "知识库文档删除任务提交失败: kb=%s doc=%s",
+                kb_id,
+                item.id,
+                exc_info=True,
+            )
+    return {
+        "knowledge_base": _kb_payload(kb),
+        "document_count": len(pending),
+        "submitted": submitted,
+        "failed": failed,
+    }
 
 
 @router.get("/{kb_id}/documents")
@@ -245,37 +349,51 @@ async def upload_document(
     )
 
     documents = DocumentRepository()
-    document = await documents.create(
-        kb.id,
-        filename,
-        extension,
-        len(data),
-        object_key,
-        user.id,
-        sha256=digest,
-        description=(description or "").strip() or None,
-        status=DocumentStatus.PENDING,
-    )
-
-    index_request = IndexDocumentRequest(
-        kb_id=kb.id,
-        doc_id=document.id,
-        source=DocumentSource(
-            object_key=object_key,
-            filename=filename,
-            extension=extension,
-            mime_type=mime_type,
-            size_bytes=len(data),
-            sha256=digest,
-            uploaded_by=user.id,
-        ),
-    )
+    document: Document | None = None
     try:
+        document = await documents.create(
+            kb.id,
+            filename,
+            extension,
+            len(data),
+            object_key,
+            user.id,
+            sha256=digest,
+            description=(description or "").strip() or None,
+            status=DocumentStatus.PENDING,
+        )
+
+        index_request = IndexDocumentRequest(
+            kb_id=kb.id,
+            doc_id=document.id,
+            source=DocumentSource(
+                object_key=object_key,
+                filename=filename,
+                extension=extension,
+                mime_type=mime_type,
+                size_bytes=len(data),
+                sha256=digest,
+                uploaded_by=user.id,
+            ),
+        )
         job = await indexer.index(index_request)
     except Exception:
-        # 入库提交失败时把文档置 failed，避免长期停在 pending。
-        await documents.mark_failed(document.id)
+        # PG 登记失败时清理刚上传的对象，避免 MinIO 孤儿文件；
+        # 入库提交失败时保留原件并置 failed，便于后续重试/删除。
+        if document is None:
+            try:
+                await storage.delete_kb_document(
+                    kb.id, doc_id, extension=extension
+                )
+            except Exception:  # noqa: BLE001 - 清理失败不覆盖原始异常
+                logger.warning("清理上传孤儿对象失败: %s", object_key)
+        else:
+            try:
+                await documents.mark_failed(document.id)
+            except Exception:  # noqa: BLE001 - 状态回写失败不覆盖原始异常
+                logger.warning("文档置 failed 失败: %s", document.id)
         raise
+    assert document is not None
     return {
         "document": _document_payload(document),
         "job": job.model_dump(mode="json"),
