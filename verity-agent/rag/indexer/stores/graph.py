@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from exception import Neo4jError
-from rag.shared.models import GraphRelation
+from rag.shared.models import GraphKeyword, GraphRelation
 from store.neo4j import GraphStore
 
 __all__ = ["GraphIndexStore", "Neo4jGraphIndexStore"]
@@ -23,9 +23,9 @@ class GraphIndexStore(Protocol):
         chunk_id: str,
         doc_id: str,
         kb_id: str,
-        keywords: list[str],
+        keywords: list[GraphKeyword],
     ) -> None:
-        """写 ChunkRef 并连接关键词（MENTIONED_IN）。"""
+        """写 ChunkRef 并连接带类型的实体（MENTIONED_IN）。"""
         ...
 
     async def upsert_relations(
@@ -55,15 +55,18 @@ class Neo4jGraphIndexStore:
         chunk_id: str,
         doc_id: str,
         kb_id: str,
-        keywords: list[str],
+        keywords: list[GraphKeyword],
     ) -> None:
-        """写入 chunk 引用与关键词；失败转成 Neo4jError 由上层处理。"""
+        """写入 chunk 引用与带类型实体；失败转成 Neo4jError 由上层处理。"""
         try:
             await self.store.link_keywords(
                 chunk_id=chunk_id,
                 doc_id=doc_id,
                 kb_id=kb_id,
-                keywords=keywords,
+                keywords=[
+                    {"name": item.name, "type": item.type}
+                    for item in keywords
+                ],
             )
         except Neo4jError:
             raise
@@ -95,6 +98,8 @@ class Neo4jGraphIndexStore:
                         "relation": item.relation,
                         "object": item.object,
                         "confidence": item.confidence,
+                        "subject_type": item.subject_type,
+                        "object_type": item.object_type,
                     }
                     for item in relations
                 ],

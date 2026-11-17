@@ -166,7 +166,7 @@
               </template>
             </el-table-column>
 
-            <el-table-column label="状态" width="150">
+            <el-table-column label="状态" width="150" align="center" header-align="center">
               <template #default="{ row }">
                 <div class="doc-status">
                   <el-tag size="small" :type="statusTagType(row.status)" effect="light">
@@ -182,7 +182,12 @@
               </template>
             </el-table-column>
 
-            <el-table-column label="切片 / Token" width="130">
+            <el-table-column
+              label="切片 / Token"
+              width="130"
+              align="center"
+              header-align="center"
+            >
               <template #default="{ row }">
                 <span class="doc-number">{{ row.chunk_count ?? '-' }}</span>
                 <span class="doc-number-sep">/</span>
@@ -190,23 +195,33 @@
               </template>
             </el-table-column>
 
-            <el-table-column label="更新时间" width="150">
+            <el-table-column label="更新时间" width="150" align="center" header-align="center">
               <template #default="{ row }">
                 <span class="doc-time">{{ formatDateTime(row.updated_at) }}</span>
               </template>
             </el-table-column>
 
-            <el-table-column label="操作" width="90" fixed="right">
+            <el-table-column
+              label="操作"
+              width="90"
+              align="center"
+              header-align="center"
+              fixed="right"
+            >
               <template #default="{ row }">
-                <el-button
-                  text
-                  type="danger"
-                  :loading="deletingIds.includes(row.id)"
-                  :disabled="row.status === 'deleting' || row.status === 'deleted'"
-                  @click="handleDelete(row as KnowledgeDocument)"
-                >
-                  删除
-                </el-button>
+                <el-tooltip content="删除文档" placement="top">
+                  <el-button
+                    class="doc-delete"
+                    text
+                    type="danger"
+                    :loading="deletingIds.includes(row.id)"
+                    :disabled="row.status === 'deleting' || row.status === 'deleted'"
+                    aria-label="删除文档"
+                    @click="handleDelete(row as KnowledgeDocument)"
+                  >
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </template>
             </el-table-column>
           </el-table>
@@ -1182,7 +1197,12 @@ onBeforeUnmount(() => {
 .doc-status {
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: var(--app-space-2xs);
+}
+
+.doc-status :deep(.el-progress) {
+  width: 80px;
 }
 
 .doc-number {
@@ -1198,6 +1218,20 @@ onBeforeUnmount(() => {
 .doc-time {
   font-size: var(--app-font-size-xs);
   color: var(--app-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.doc-delete {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--app-radius-sm);
+  color: var(--app-text-muted);
+}
+
+.doc-delete:hover:not(.is-disabled) {
+  color: var(--app-color-danger);
+  background-color: var(--app-color-danger-soft);
 }
 
 /* —— 弹窗 —— */

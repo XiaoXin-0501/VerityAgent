@@ -61,10 +61,19 @@ class GraphStore:
         chunk_id: str,
         doc_id: str,
         kb_id: str,
-        keywords: Iterable[str],
+        keywords: Iterable[Mapping[str, Any]],
     ) -> None:
-        """为 chunk 关联关键词节点（去重后批量 MERGE）。"""
-        values = [item for item in dict.fromkeys(keywords) if item]
+        """为 chunk 关联带类型的实体节点（按 name 去重后批量 MERGE）。"""
+        values: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in keywords:
+            name = str(item.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            values.append(
+                {"name": name, "type": str(item.get("type") or "")}
+            )
         if not values:
             return
         await self._write(
@@ -73,7 +82,11 @@ class GraphStore:
             SET c.doc_id = $doc_id
             WITH c
             UNWIND $keywords AS kw
-            MERGE (k:Keyword {name: kw, kb_id: $kb_id})
+            MERGE (k:Keyword {name: kw.name, kb_id: $kb_id})
+            SET k.type = CASE
+                WHEN kw.type <> '' THEN kw.type
+                ELSE coalesce(k.type, '')
+            END
             MERGE (k)-[:MENTIONED_IN]->(c)
             """,
             {
@@ -106,6 +119,8 @@ class GraphStore:
                     "key": item.get("key")
                     or relation_key(subject, relation, obj, kb_id),
                     "confidence": item.get("confidence"),
+                    "subject_type": item.get("subject_type"),
+                    "object_type": item.get("object_type"),
                 }
             )
         if not values:
@@ -122,7 +137,17 @@ class GraphStore:
                 rel.kb_id = $kb_id,
                 rel.confidence = coalesce(r.confidence, rel.confidence)
             MERGE (s:Keyword {name: r.subject, kb_id: $kb_id})
+            SET s.type = CASE
+                WHEN r.subject_type IS NOT NULL AND r.subject_type <> ''
+                    THEN r.subject_type
+                ELSE coalesce(s.type, '')
+            END
             MERGE (o:Keyword {name: r.object, kb_id: $kb_id})
+            SET o.type = CASE
+                WHEN r.object_type IS NOT NULL AND r.object_type <> ''
+                    THEN r.object_type
+                ELSE coalesce(o.type, '')
+            END
             MERGE (s)-[:SUBJECT_OF]->(rel)
             MERGE (o)-[:OBJECT_OF]->(rel)
             MERGE (s)-[:MENTIONED_IN]->(c)

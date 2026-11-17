@@ -109,9 +109,9 @@ def build_default_indexing_pipeline(
     ``vector_store.ensure_schema()`` 应在应用启动时单独调用（dev/test 可
     自动建 collection，prod 只校验）。
 
-    图抽取由 ``graph_extractor`` 显式注入时优先使用；否则按
-    ``IndexerConfig.graph_extraction_mode`` 构建。``graph_chat_model`` 只在
-    ``llm/hybrid`` 模式下使用，未注入时自动降级为领域词典。
+    图抽取由 ``graph_extractor`` 显式注入时优先使用；否则按知识库绑定的
+    ``domain_profile`` 构建 LLM 抽取器。``graph_chat_model`` 是图抽取必需
+    依赖：领域画像只做类型/白名单/黑名单提示，不直接产出图节点。
     ``prompt_registry`` 用于外部覆盖 Prompt 模板；为空时使用内置模板。
 
     表格/代码语义描述：显式注入 ``table_describer`` / ``code_describer`` 优先；
@@ -128,7 +128,9 @@ def build_default_indexing_pipeline(
     # 默认使用带熔断的 Redis 缓存；Redis 不可用时自动降级为 miss，不阻塞入库。
     rag_cache = cache
     if rag_cache is None and (
-        cfg.embedding_cache_enabled or cfg.description_cache_enabled
+        cfg.embedding_cache_enabled
+        or cfg.description_cache_enabled
+        or cfg.graph_llm_cache_enabled
     ):
         rag_cache = build_default_chunk_cache()
     table_describer = table_describer or _build_table_describer(
@@ -168,6 +170,7 @@ def build_default_indexing_pipeline(
         graph_extractor=graph_extractor,
         graph_chat_model=graph_chat_model,
         prompt_registry=prompt_registry,
+        graph_cache=rag_cache,
         worker_id=worker_id,
         run_in_background=run_in_background,
     )
@@ -389,8 +392,9 @@ def _build_description_refiner(
         chat_model,
         model_id=model_id,
         temperature=0.1,
-        # 500 字中文描述约需 500+ token，256 会截断；512 留出余量。
-        max_output_tokens=512,
+        # 500 字中文描述约需 500+ token；推理模型还会消耗 reasoning token，
+        # 2048 避免输出被截断后只剩空文本。
+        max_output_tokens=2048,
         prompts=prompts,
         cache=cache,
         cache_enabled=config.description_cache_enabled,

@@ -327,6 +327,11 @@ class OpenAIChatModel(ChatModel):
         provider_options.update(options.provider_options)
         if provider_options:
             payload.update(provider_options)
+        # 模型级 thinking 开关：关闭时发送厂商的关闭参数，而不是只丢弃
+        # reasoning 内容；未配置关闭参数时保持厂商默认。
+        thinking_payload = self.thinking_payload()
+        if thinking_payload:
+            payload.update(thinking_payload)
         fmt = self._response_format(request)
         if fmt is not None:
             payload["response_format"] = fmt

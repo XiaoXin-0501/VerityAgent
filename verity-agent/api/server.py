@@ -31,7 +31,13 @@ def main() -> None:
     """启动 uvicorn；Windows 使用 Selector 事件循环且不启用 reload。"""
     log_path = setup_logging()
     if log_path is not None:
-        logging.getLogger(__name__).info("文件日志写入: %s", log_path)
+        logging.getLogger(__name__).info(
+            "日志文件: app=%s access=%s error=%s rag=%s",
+            log_path,
+            log_path.parent / settings.app.log.access_file_name,
+            log_path.parent / settings.app.log.error_file_name,
+            log_path.parent / settings.app.log.rag_file_name,
+        )
     uvicorn.run(
         "api.app:app",
         host=settings.server.host,

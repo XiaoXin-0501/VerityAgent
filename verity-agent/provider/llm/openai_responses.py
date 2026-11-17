@@ -231,6 +231,9 @@ class OpenAIResponsesChatModel(ChatModel):
         provider_options.update(options.provider_options)
         if provider_options:
             payload.update(provider_options)
+        thinking_payload = self.thinking_payload()
+        if thinking_payload:
+            payload.update(thinking_payload)
         fmt = request.response_format
         if fmt.type is ResponseFormatType.JSON_OBJECT:
             payload["text"] = {"format": {"type": "json_object"}}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from .base import ConfigModel
 
@@ -29,7 +29,7 @@ class LoggingConfig(ConfigModel):
     """本地文件日志配置。
 
     - 默认落盘到 Windows D 盘；路径可被 ``APP__LOG__DIRECTORY`` 覆盖；
-    - 使用标准库 ``RotatingFileHandler``，单文件超限后轮转；
+    - 使用标准库 ``RotatingFileHandler``，按用途分文件轮转（app/access/error/rag）；
     - 多进程部署时标准库 handler 不保证跨进程安全，生产 worker=1 或改用
       外部日志采集。
     """
@@ -38,8 +38,14 @@ class LoggingConfig(ConfigModel):
     to_file: bool = True
     # 日志目录；相对路径按 verity-agent 源码根目录解析
     directory: str = "D:/verityAgent日志"
-    # 日志文件名
-    file_name: str = "verity-agent.log"
+    # 主应用日志文件名（不含 HTTP access / RAG 组件日志）
+    file_name: str = Field(default="verity-agent.log", min_length=1)
+    # HTTP access 日志；与主应用日志分离，避免轮询请求淹没业务日志
+    access_file_name: str = Field(default="access.log", min_length=1)
+    # WARNING 及以上日志；跨组件集中排查问题
+    error_file_name: str = Field(default="error.log", min_length=1)
+    # RAG 入库/检索组件日志；按 logger 前缀分流
+    rag_file_name: str = Field(default="rag.log", min_length=1)
     # 单文件大小上限（字节）；超过后轮转
     max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     # 保留的历史文件数量
@@ -48,6 +54,19 @@ class LoggingConfig(ConfigModel):
     encoding: str = "utf-8"
     # 是否同时输出到控制台
     console: bool = True
+
+    @model_validator(mode="after")
+    def _unique_file_names(self) -> "LoggingConfig":
+        """四类日志必须写到不同文件，避免重复 handler 互相覆盖/重复。"""
+        names = [
+            self.file_name,
+            self.access_file_name,
+            self.error_file_name,
+            self.rag_file_name,
+        ]
+        if len(set(names)) != len(names):
+            raise ValueError("log 文件名不能重复")
+        return self
 
 
 class AppConfig(ConfigModel):
@@ -102,8 +121,14 @@ class ServerConfig(ConfigModel):
     cors_origins: list[str] = Field(default_factory=list)
     # CORS 是否允许携带 Cookie/Authorization
     cors_allow_credentials: bool = True
-    # 请求体大小上限（字节）；防止超大上传拖垮进程
+    # 普通请求体大小上限（字节）；JSON/表单等小请求
     max_request_body_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
+    # multipart 上传请求体上限（字节）；知识库文档可能较大，
+    # 与单文件业务上限（RAG__INDEXER__MAX_SOURCE_BYTES）分开控制
+    max_multipart_body_bytes: int = Field(
+        default=1024 * 1024 * 1024,
+        gt=0,
+    )
 
 
 class AuthConfig(ConfigModel):

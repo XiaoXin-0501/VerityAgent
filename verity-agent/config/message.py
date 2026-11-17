@@ -18,7 +18,7 @@ class MessageConfig(ConfigModel):
     max_images: int = Field(default=9, ge=0)
     # 单条用户消息最多文件数
     max_files: int = Field(default=9, ge=0)
-    # 单个文件大小上限（字节）；知识库上传与会话附件共用
+    # 单个会话附件大小上限（字节）；知识库文档上限见 IndexerConfig.max_source_bytes
     max_file_bytes: int = Field(default=20 * _MB, gt=0)
     # 单条消息文本最大字符数
     max_text_chars: int = Field(default=200_000, gt=0)

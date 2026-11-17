@@ -24,6 +24,35 @@
       }
     },
     {
+      "id": "chat-no-thinking",
+      "provider": "openai",
+      "model": "deepseek-flash",
+      "kind": "chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "api_style": "openai_chat",
+      "thinking_enabled": false,
+      "thinking_options": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "capabilities": {
+        "streaming": true,
+        "tool_calling": true,
+        "max_context_tokens": 1048576,
+        "max_output_tokens": 393216
+      },
+      "pricing": {
+        "input_per_million": 2,
+        "output_per_million": 8,
+        "currency": "CNY"
+      },
+      "defaults": {
+        "temperature": 0.5
+      }
+    },
+    {
       "id": "rerank-default",
       "provider": "dashscope",
       "model": "qwen3.7-text-rerank",

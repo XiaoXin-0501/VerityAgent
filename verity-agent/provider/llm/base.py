@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import AsyncIterator
+from typing import Any
 
 from provider.base import BaseProvider, ProviderModelSpec
 from config.provider import ChatApiStyle, ChatProviderConfig
@@ -27,6 +28,20 @@ class ChatModel:
     def option(self, name: str, value):
         """请求值优先；未提供时使用模型 metadata.defaults。"""
         return value if value is not None else self._defaults.get(name)
+
+    def thinking_payload(self) -> dict[str, Any]:
+        """返回模型级 thinking 开关对应的请求字段。
+
+        关闭时必须返回厂商的关闭参数（``thinking_disabled_options``），
+        而不是仅在客户端丢弃 reasoning 内容；未配置时返回空字典，由各
+        provider 按自身默认行为处理。
+        """
+        enabled = self.spec.metadata.get("thinking_enabled")
+        if enabled is False:
+            return dict(self.spec.metadata.get("thinking_disabled_options") or {})
+        if enabled is True:
+            return dict(self.spec.metadata.get("thinking_options") or {})
+        return {}
 
     async def complete(self, request: ChatModelRequest) -> ChatModelResponse:
         """非流式调用；由具体厂商适配器实现。"""

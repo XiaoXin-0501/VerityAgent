@@ -311,22 +311,26 @@ class DefaultRetrievalPipeline:
                 "query 规范化后为空",
             )
         graph_policy = request.graph or self._default_graph_policy()
-        if not graph_policy.allowed_relations:
-            # 请求里只写 enabled=true 时沿用 RetrieverConfig 的强关系白名单；
-            # 空列表不能静默变成“所有关系都允许”或“一个都不允许”。
-            graph_policy = graph_policy.model_copy(
-                update={
-                    "allowed_relations": list(
-                        self.config.graph_allowed_relations
-                    )
-                }
-            )
         # 图扩展关闭时不需要读取 KB 画像，避免每次检索多查一次 PG。
         domain_profiles = (
             await self._load_domain_profiles(authorized_kbs, warnings)
             if graph_policy.enabled
             else ([self.domain_profile] if self.domain_profile else [])
         )
+        if not graph_policy.allowed_relations:
+            # 关系白名单优先用请求/配置的显式覆盖；未配置时取参与检索的
+            # KB 画像关系并集，保证“入库写得进、检索也走得出”。
+            relations = list(self.config.graph_allowed_relations) or sorted(
+                {
+                    name
+                    for profile in domain_profiles
+                    for name in profile.relation_names
+                }
+            )
+            if relations:
+                graph_policy = graph_policy.model_copy(
+                    update={"allowed_relations": relations}
+                )
         analysis = self._analyze(request, normalized, domain_profiles)
         _stage(
             stages,

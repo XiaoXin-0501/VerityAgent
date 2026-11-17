@@ -12,12 +12,9 @@ from .chunkers import ChatCodeDescriber, ChatTableDescriber
 from .description import ChatDescriptionRefiner
 from .embedding import EmbeddingResult, EmbeddingService
 from .enrichment import (
-    DomainGraphExtractor,
     DomainProfile,
     GraphExtractor,
-    HybridGraphExtractor,
     LLMGraphExtractor,
-    RuleGraphExtractor,
     build_graph_extractor,
     load_domain_profile,
 )
@@ -59,9 +56,6 @@ __all__ = [
     "ChatCodeDescriber",
     "ChatDescriptionRefiner",
     "GraphExtractor",
-    "RuleGraphExtractor",
-    "DomainGraphExtractor",
-    "HybridGraphExtractor",
     "LLMGraphExtractor",
     "DomainProfile",
     "build_graph_extractor",

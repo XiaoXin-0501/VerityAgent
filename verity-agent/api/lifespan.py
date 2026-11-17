@@ -252,11 +252,14 @@ async def _build_rag_indexer(registry, prompt_registry, *, available: bool = Tru
             fallback=default_chat,
             kind="chat",
         )
-        if indexer_cfg.graph_llm_enabled
-        and (indexer_cfg.graph_extraction_mode or "").lower()
-        in {"llm", "hybrid"}
+        if indexer_cfg.graph_build_enabled
         else None
     )
+    if indexer_cfg.graph_build_enabled and graph_model is None:
+        logger.warning(
+            "图构建已开启但未解析到 graph chat model；"
+            "入库时图抽取会因缺少 LLM 失败"
+        )
     logger.info(
         "RAG Indexer 模型: embedding=%s description=%s table=%s code=%s graph=%s",
         embedding_id,
@@ -423,7 +426,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.log_file = None
         logger.warning("文件日志初始化失败，仅使用控制台", exc_info=True)
     if app.state.log_file is not None:
-        logger.info("文件日志写入: %s", app.state.log_file)
+        log_dir = app.state.log_file.parent
+        logger.info(
+            "日志文件: app=%s access=%s error=%s rag=%s",
+            app.state.log_file,
+            log_dir / settings.app.log.access_file_name,
+            log_dir / settings.app.log.error_file_name,
+            log_dir / settings.app.log.rag_file_name,
+        )
     registry = None
     hook_dispatcher = None
     agent = None

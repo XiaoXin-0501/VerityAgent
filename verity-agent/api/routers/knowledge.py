@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/knowledge-bases", tags=["知识库管理"])
 index_jobs_router = APIRouter(prefix="/index-jobs", tags=["知识库管理"])
 
+# 上传分块大小：UploadFile 本身由 Starlette 落到临时文件，这里按块读取，
+# 避免几百 MB 的文件一次性进入进程内存。
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
 # 扩展名 -> IndexerConfig.enabled_doc_types 的文档类型。
 _DOC_TYPE_BY_EXTENSION = {
     "pdf": "pdf",
@@ -188,7 +192,8 @@ async def get_knowledge_options(
     cfg = settings.rag.indexer
     return {
         "enabled_doc_types": list(cfg.enabled_doc_types),
-        "max_file_bytes": settings.message.max_file_bytes,
+        # 知识库文档上限；与聊天附件上限解耦，支持较大的专业文档
+        "max_file_bytes": settings.rag.indexer.max_source_bytes,
         "default_permission_code": settings.rag.default_kb_permission_code,
         "domain_profiles": _available_domain_profiles(),
         "default_domain_profile": cfg.domain_profile,
@@ -344,7 +349,7 @@ async def upload_document(
     description: str | None = Form(default=None),
     user: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    """上传原件到 MinIO、登记文档并提交后台入库。"""
+    """上传原件到 MinIO（分块流式）、登记文档并提交后台入库。"""
     kb = await _require_kb(kb_id)
     indexer = _indexer(request)
 
@@ -354,34 +359,66 @@ async def upload_document(
     extension = sanitize_extension(Path(filename).suffix)
     _validate_extension(extension)
 
-    max_bytes = settings.message.max_file_bytes
+    max_bytes = settings.rag.indexer.max_source_bytes
     if file.size is not None and file.size > max_bytes:
         raise ValidationError(
             "文件超过大小上限",
             details={"size_bytes": file.size, "max_file_bytes": max_bytes},
         )
-    data = await file.read()
-    if len(data) > max_bytes:
-        raise ValidationError(
-            "文件超过大小上限",
-            details={"size_bytes": len(data), "max_file_bytes": max_bytes},
-        )
-    if not data:
-        raise ValidationError("文件内容为空")
 
     doc_id = uuid4()
     object_key = kb_source_key(kb.id, doc_id, extension)
     mime_type = file.content_type or "application/octet-stream"
-    digest = sha256(data).hexdigest()
-
+    digest = sha256()
+    size = 0
+    sha = ""
     storage = MinioStorage()
-    await storage.put_kb_source(
+
+    # 关键：不把 UploadFile 一次性 read() 进内存。先按块计算 sha256/大小，
+    # 再 seek(0) 把同一个临时文件句柄交给 MinIO put_object 分片流式上传。
+    digest = sha256()
+    size = 0
+    sha = ""
+    storage = MinioStorage()
+    try:
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                raise ValidationError(
+                    "文件超过大小上限",
+                    details={
+                        "size_bytes": size,
+                        "max_file_bytes": max_bytes,
+                    },
+                )
+            digest.update(chunk)
+        if size == 0:
+            raise ValidationError("文件内容为空")
+        sha = digest.hexdigest()
+        await file.seek(0)
+        await storage.put_kb_source_stream(
+            kb.id,
+            doc_id,
+            extension,
+            file.file,
+            size,
+            content_type=mime_type,
+            metadata={
+                "uploaded_by": str(user.id),
+                "sha256": sha,
+            },
+        )
+    finally:
+        await file.close()
+
+    logger.info(
+        "知识库文档上传完成: kb=%s doc=%s size_bytes=%d",
         kb.id,
         doc_id,
-        extension,
-        data,
-        content_type=mime_type,
-        metadata={"uploaded_by": str(user.id), "sha256": digest},
+        size,
     )
 
     documents = DocumentRepository()
@@ -391,10 +428,10 @@ async def upload_document(
             kb.id,
             filename,
             extension,
-            len(data),
+            size,
             object_key,
             user.id,
-            sha256=digest,
+            sha256=sha,
             description=(description or "").strip() or None,
             status=DocumentStatus.PENDING,
         )
@@ -407,8 +444,8 @@ async def upload_document(
                 filename=filename,
                 extension=extension,
                 mime_type=mime_type,
-                size_bytes=len(data),
-                sha256=digest,
+                size_bytes=size,
+                sha256=sha,
                 uploaded_by=user.id,
             ),
         )

@@ -1,15 +1,8 @@
-"""垂直领域画像与领域抽取实现。
+"""垂直领域画像：模型、加载器与只读索引。
 
-一个部署只加载一个 ``DomainProfile``；切换领域只替换 JSON 画像。
+一个部署可加载多个画像（按知识库绑定），但图抽取器实例仍按画像复用。
 """
 
-from .extractor import (
-    DomainGraphExtractor,
-    DomainRelationExtractor,
-    canonicalize_relations,
-    merge_keywords,
-    merged_allowed_relations,
-)
 from .loader import (
     BUILTIN_DOMAIN_DIR,
     load_domain_profile,
@@ -21,7 +14,6 @@ from .models import (
     DomainMatch,
     DomainProfile,
     DomainPrompt,
-    DomainRelationRule,
     DomainRelationType,
 )
 
@@ -29,16 +21,10 @@ __all__ = [
     "BUILTIN_DOMAIN_DIR",
     "DomainEntity",
     "DomainEntityType",
-    "DomainGraphExtractor",
     "DomainMatch",
-    "DomainRelationExtractor",
-    "DomainRelationRule",
     "DomainProfile",
     "DomainPrompt",
     "DomainRelationType",
-    "canonicalize_relations",
     "load_domain_profile",
-    "merge_keywords",
-    "merged_allowed_relations",
     "resolve_domain_profile_path",
 ]

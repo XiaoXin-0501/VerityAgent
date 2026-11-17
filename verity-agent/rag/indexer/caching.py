@@ -32,6 +32,7 @@ __all__ = [
     "build_default_chunk_cache",
     "description_cache_key",
     "embedding_cache_key",
+    "graph_extraction_cache_key",
 ]
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,31 @@ def embedding_cache_key(
         model_id=model_id,
         query_digest=sha256_text(text),
         version=f"{input_type}:{dimensions or 0}:{version}",
+    )
+
+
+def graph_extraction_cache_key(
+    *,
+    model_id: str,
+    prompt_version: int,
+    prompt_checksum: str,
+    domain_profile: str,
+    text: str,
+) -> CacheKey:
+    """chunk 级图抽取结果 key。
+
+    key 由 chunk 正文摘要 + 模型 + Prompt 版本/checksum + 领域画像内容签名/运行配置
+    组成；重试、REINDEX 或重复上传同一文档时直接复用，不再重复调用 LLM。
+    """
+    return CacheKey(
+        scope=CacheScope.GRAPH_EXTRACTION,
+        model_id=model_id,
+        version=f"graph:{prompt_version}",
+        extra={
+            "prompt_checksum": prompt_checksum,
+            "domain_profile": domain_profile,
+            "chunk": sha256_text(text),
+        },
     )
 
 

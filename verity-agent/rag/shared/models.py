@@ -56,6 +56,7 @@ __all__ = [
     "NoiseReport",
     "DocumentDescriptionCandidate",
     "ChunkEnrichment",
+    "GraphKeyword",
     "GraphRelation",
     "ChunkGraphExtraction",
     "EmbeddingInput",
@@ -384,20 +385,33 @@ class ChunkEnrichment(_Model):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class GraphKeyword(_Model):
+    """图关键词节点；``type`` 来自领域画像的实体类型清单。"""
+
+    name: str
+    type: str = ""
+
+
 class GraphRelation(_Model):
+    """图关系三元组；端点类型仅用于写 Neo4j Keyword.type。"""
+
     subject: str
     relation: str
     object: str
     confidence: float | None = None
+    subject_type: str | None = None
+    object_type: str | None = None
 
 
 class ChunkGraphExtraction(_Model):
+    """单个 chunk 的图抽取产物；关键词必须是带类型的领域实体。"""
+
     chunk_id: str
-    keywords: list[str] = Field(default_factory=list)
+    keywords: list[GraphKeyword] = Field(default_factory=list)
     relations: list[GraphRelation] = Field(default_factory=list)
-    # 抽取来源模型；规则/词典模式为空（预留字段，便于审计）
+    # 抽取来源模型；便于审计与缓存失效排查
     model: str | None = None
-    # 整体置信度；词典模式可视为 1.0，LLM 可保留模型自评
+    # 整体置信度；空结果时为 None
     confidence: float | None = None
 
 

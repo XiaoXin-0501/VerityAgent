@@ -39,6 +39,16 @@
       },
       // 是否启用该模型
       "enabled": true,
+      // thinking 开关：null=厂商默认，false=显式关闭，true=显式开启
+      "thinking_enabled": null,
+      // 开启 thinking 时合并到请求体的厂商参数；按厂商填写
+      "thinking_options": {},
+      // 关闭 thinking 时合并到请求体的厂商参数；必须真实关闭，
+      // 不能只靠客户端丢弃 reasoning 内容。示例：
+      //   DeepSeek/兼容网关: {"thinking": {"type": "disabled"}}
+      //   Qwen/DashScope:   {"enable_thinking": false}
+      //   OpenAI Responses: {"reasoning": {"effort": "none"}}
+      "thinking_disabled_options": {},
       // 模型能力声明；chat 使用 ChatModelCapabilities 字段
       "capabilities": {
         // 是否支持流式输出

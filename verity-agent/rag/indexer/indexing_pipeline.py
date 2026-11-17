@@ -110,7 +110,7 @@ class DefaultIndexingPipeline:
         graph_extractor: GraphExtractor | None = None,
         graph_chat_model: Any | None = None,
         prompt_registry: Any | None = None,
-        relation_extractor: Any | None = None,
+        graph_cache: Any | None = None,
         worker_id: str = "rag-indexer",
         run_in_background: bool = True,
     ) -> None:
@@ -128,7 +128,7 @@ class DefaultIndexingPipeline:
         self._graph_extractor_override = graph_extractor
         self._graph_chat_model = graph_chat_model
         self._prompt_registry = prompt_registry
-        self._relation_extractor = relation_extractor
+        self._graph_cache = graph_cache
         self._graph_extractors: dict[str, GraphExtractor] = {}
         self.worker_id = worker_id
         self.run_in_background = run_in_background
@@ -420,7 +420,7 @@ class DefaultIndexingPipeline:
             chunking_version=self.config.chunking_version,
         )
 
-        # 4) ENRICHING：图关键词/关系抽取（默认规则）。
+        # 4) ENRICHING：LLM 图实体/关系抽取。
         build_graph = (
             self.config.graph_build_enabled
             if request.graph_build_enabled is None
@@ -428,18 +428,13 @@ class DefaultIndexingPipeline:
         )
         job = await self._set_stage(job, IndexingStage.ENRICHING)
         extractions = {}
-        if build_graph and self.config.graph_extraction_mode != "off":
+        if build_graph:
             domain_profile = await self._get_kb_domain_profile(request.kb_id)
             graph_extractor = self._graph_extractor_for(domain_profile)
-            for chunk in chunks:
-                extractions[chunk.chunk_id] = await graph_extractor.extract(
-                    chunk
-                )
-        elif build_graph:
-            job = await self._warn(
-                job,
-                IndexingWarningCode.GRAPH_SKIPPED,
-                "graph_extraction_mode=off，跳过图抽取",
+            # 抽取器内部按 chunk 数/字符数切批并限制并发。
+            extractions = await graph_extractor.extract_batch(
+                chunks,
+                max_concurrency=self.config.graph_llm_concurrency,
             )
         else:
             job = await self._warn(
@@ -469,7 +464,7 @@ class DefaultIndexingPipeline:
 
         # 7) GRAPH_UPSERT：图写入失败不回滚 Weaviate（D-56/§8.4）。
         job = await self._set_stage(job, IndexingStage.GRAPH_UPSERT)
-        if build_graph and self.config.graph_extraction_mode != "off":
+        if build_graph:
             for chunk in chunks:
                 extraction = extractions.get(chunk.chunk_id)
                 if extraction is None:
@@ -751,7 +746,7 @@ class DefaultIndexingPipeline:
             profile=profile,
             chat_model=self._graph_chat_model,
             prompts=self._prompt_registry,
-            relation_extractor=self._relation_extractor,
+            cache=self._graph_cache,
         )
         self._graph_extractors[name] = extractor
         return extractor

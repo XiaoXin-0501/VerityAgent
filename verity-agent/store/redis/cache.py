@@ -41,6 +41,8 @@ class CacheScope(StrEnum):
     CHUNK_EMBEDDING = "rag:chunk_embedding"
     # chunk 级 LLM 描述（表格/代码/文档描述），key 带模型 + Prompt 版本
     CHUNK_DESCRIPTION = "rag:chunk_description"
+    # chunk 级图谱抽取结果；key 带模型 + Prompt 版本 + 领域画像 + chunk 内容
+    GRAPH_EXTRACTION = "rag:graph_extraction"
     RERANK = "rag:rerank"
     GRAPH_NEXT_HOP = "graph"
     # query 改写 / 意图分类的 LLM 结果；key 带 query 摘要 + 模型 + Prompt 版本
@@ -63,6 +65,7 @@ DEFAULT_TTLS: dict[CacheScope, int] = {
     # 30 天 TTL 只作为容量兜底，模型切换通过 key 版本天然失效。
     CacheScope.CHUNK_EMBEDDING: 2_592_000,
     CacheScope.CHUNK_DESCRIPTION: 2_592_000,
+    CacheScope.GRAPH_EXTRACTION: 2_592_000,
     CacheScope.RERANK: 3_600,
     CacheScope.GRAPH_NEXT_HOP: 3_600,
     CacheScope.QUERY_REWRITE: 86_400,

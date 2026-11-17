@@ -57,6 +57,14 @@ class ModelConfig(ConfigModel):
     capabilities: dict[str, Any] = Field(default_factory=dict)
     # 原始价格；LLM 层映射为 ModelPricing
     pricing: dict[str, Any] | None = None
+    # 是否启用模型 thinking/推理模式：
+    # None=厂商默认；False=显式关闭；True=显式开启
+    thinking_enabled: bool | None = None
+    # 开启 thinking 时合并到请求体的厂商参数
+    thinking_options: dict[str, Any] = Field(default_factory=dict)
+    # 关闭 thinking 时合并到请求体的厂商参数；不同厂商字段名不同，
+    # 例如 {"thinking": {"type": "disabled"}} / {"enable_thinking": False}
+    thinking_disabled_options: dict[str, Any] = Field(default_factory=dict)
     # chat 默认生成参数：temperature/top_p/max_output_tokens/stop 等
     defaults: dict[str, Any] = Field(default_factory=dict)
     # 扩展字段

@@ -11,8 +11,7 @@ import io
 import mimetypes
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, BinaryIO, Mapping
 
 from exception import MinioObjectNotFoundError
 
@@ -112,41 +111,70 @@ class MinioStorage:
             metadata=dict(metadata or {}),
         )
 
-    async def put_file(
+    async def put_stream(
         self,
         bucket: str,
         key: str,
-        path: str | Path,
+        data: BinaryIO,
+        length: int,
         *,
         content_type: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> ObjectInfo:
-        """读取本地文件后按 bytes 上传。"""
-        file_path = Path(path)
-        data = await asyncio.to_thread(file_path.read_bytes)
-        return await self.put_bytes(
-            bucket,
-            key,
-            data,
-            content_type=content_type,
-            metadata=metadata,
+        """从已打开的文件对象流式上传（minio 按 part_size 分片）。
+
+        ``data`` 由调用方保证可读且长度为 ``length``；这里不会把内容复制成
+        整块 bytes，适合大文档与 Starlette ``UploadFile.file``。
+        """
+        if length < 0:
+            raise ValueError("length 不能为负数")
+        content_type = (
+            content_type
+            or mimetypes.guess_type(key)[0]
+            or "application/octet-stream"
         )
 
-    async def put_kb_source(
+        def _put():
+            """在线程池中执行同步 put_object；内部按 part_size 分片读取。"""
+            return self.manager.client.put_object(
+                bucket,
+                key,
+                data,
+                length=length,
+                content_type=content_type,
+                metadata=dict(metadata or {}),
+                part_size=self.config.part_size,
+            )
+
+        try:
+            await asyncio.to_thread(_put)
+        except Exception as exc:
+            raise self.manager.translate_error(exc) from exc
+        return ObjectInfo(
+            bucket=bucket,
+            key=key,
+            size=length,
+            content_type=content_type,
+            metadata=dict(metadata or {}),
+        )
+
+    async def put_kb_source_stream(
         self,
         kb_id: Any,
         doc_id: Any,
         extension: str,
-        data: bytes,
+        data: BinaryIO,
+        length: int,
         *,
         content_type: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> ObjectInfo:
-        """上传知识库文档原件。"""
-        return await self.put_bytes(
+        """流式上传知识库文档原件。"""
+        return await self.put_stream(
             self.kb_bucket,
             kb_source_key(kb_id, doc_id, extension),
             data,
+            length,
             content_type=content_type,
             metadata=metadata,
         )

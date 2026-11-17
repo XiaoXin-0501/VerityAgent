@@ -6,6 +6,7 @@ Provider 不再是独立配置块；每个模型自带连接信息。Factory 为
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping
 
 from config.model import ModelConfig
@@ -19,6 +20,8 @@ from .base import (
 from .enums import ProviderModelKind
 
 __all__ = ["model_spec_from_config"]
+
+logger = logging.getLogger(__name__)
 
 
 def _pricing(value: Any) -> ProviderPricing | None:
@@ -72,6 +75,25 @@ def model_spec_from_config(
     """把顶层 ModelConfig 转换为 ProviderModelSpec（含默认能力与定价）。"""
     metadata = dict(model.metadata)
     metadata.setdefault("vendor", model.provider)
+    if model.thinking_enabled is not None:
+        metadata["thinking_enabled"] = model.thinking_enabled
+    if model.thinking_options:
+        metadata["thinking_options"] = dict(model.thinking_options)
+    if model.thinking_disabled_options:
+        metadata["thinking_disabled_options"] = dict(
+            model.thinking_disabled_options
+        )
+    if (
+        model.thinking_enabled is False
+        and model.capabilities.get("thinking")
+        and not model.thinking_disabled_options
+    ):
+        logger.warning(
+            "模型 %s 声明 thinking_enabled=false 但未配置 "
+            "thinking_disabled_options；只会省略 thinking 参数，"
+            "无法保证厂商真正关闭",
+            model.id,
+        )
     if model.defaults:
         metadata["defaults"] = dict(model.defaults)
     return ProviderModelSpec(

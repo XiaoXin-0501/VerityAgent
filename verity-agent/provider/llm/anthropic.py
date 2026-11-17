@@ -257,14 +257,22 @@ class AnthropicChatModel(ChatModel):
         stop = options.stop or self._defaults.get("stop") or []
         if stop:
             payload["stop_sequences"] = stop
+        thinking_enabled = self.spec.metadata.get("thinking_enabled")
         thinking_budget = self.option(
             "thinking_budget", options.thinking_budget
         )
-        if thinking_budget is not None:
+        if thinking_enabled is not False and thinking_budget is not None:
             payload["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": thinking_budget,
             }
+        if thinking_enabled is False:
+            # Anthropic 默认不启用 thinking；显式移除预算，避免请求仍带
+            # thinking 字段。若模型需要厂商级关闭参数，由配置注入。
+            payload.pop("thinking", None)
+        thinking_payload = self.thinking_payload()
+        if thinking_payload:
+            payload.update(thinking_payload)
         provider_options = dict(self._defaults.get("provider_options") or {})
         provider_options.update(options.provider_options)
         if provider_options:

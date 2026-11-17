@@ -39,8 +39,8 @@ class ImagePdfConfig(ConfigModel):
     tile_height: int = Field(default=1400, ge=400)
     # 相邻 tile 重叠像素；避免长图在 tile 边界切断行
     tile_overlap: int = Field(default=140, ge=0)
-    # 单文档最多处理页数；超出部分记 warning
-    max_pages: int = Field(default=100, ge=1)
+    # 单文档最多处理页数；大文档可调高，超出部分记 warning
+    max_pages: int = Field(default=1000, ge=1)
     # 单页最多 tile 数，防止极端长图
     max_tiles_per_page: int = Field(default=24, ge=1)
     # OCR 置信度阈值；低于仍保留，但标记 low_confidence
@@ -59,8 +59,8 @@ class ImagePdfConfig(ConfigModel):
     mineru_table_enabled: bool = True
     # 是否启用 MinerU 公式识别
     mineru_formula_enabled: bool = False
-    # MinerU 单文档超时（秒）
-    mineru_timeout_s: int = Field(default=900, ge=30)
+    # MinerU 单文档超时（秒）；大文档建议按部署调高
+    mineru_timeout_s: int = Field(default=3600, ge=30)
     # MinerU 模型源：modelscope / huggingface / auto
     mineru_model_source: str = "modelscope"
     # 预留 LLM 后处理；默认关闭
@@ -90,8 +90,8 @@ class OcrConfig(ConfigModel):
     dpi: int = Field(default=200, ge=72, le=600)
     # 低于该置信度的 OCR 文本仍保留，但标记 LOW_OCR
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    # 单文档最多 OCR 页数，防止超大扫描件无限耗时
-    max_pages: int = Field(default=100, ge=1)
+    # 单文档最多 OCR 页数；大扫描件可调高，超出部分记 warning
+    max_pages: int = Field(default=1000, ge=1)
 
 
 class QualityPolicyConfig(ConfigModel):
@@ -129,6 +129,9 @@ class IndexerConfig(ConfigModel):
             "spreadsheet",
         ]
     )
+    # 单个知识库文档上限（字节）；默认 512 MiB。上传走磁盘流式写入，
+    # 不在内存中整文件展开；确实需要更大文档时按部署调高。
+    max_source_bytes: int = Field(default=512 * 1024 * 1024, gt=0)
 
     # 用于入库的 embedding 应用模型 id
     embedding_model_id: str | None = None
@@ -170,7 +173,7 @@ class IndexerConfig(ConfigModel):
     table_summary_model_id: str | None = None
     # 代码 LLM 摘要模型 id
     code_summary_model_id: str | None = None
-    # 图抽取 LLM 模型 id（mode=llm/hybrid 时使用）
+    # 图抽取 LLM 模型 id；开启建图时必须可用
     graph_model_id: str | None = None
     # 是否启用大表/歧义表的 LLM 摘要
     table_summary_llm_enabled: bool = False
@@ -187,58 +190,49 @@ class IndexerConfig(ConfigModel):
     # 代码送入 LLM 的最大字符数
     semantic_code_max_input_chars: int = Field(default=2000, ge=100)
     # 描述生成最大输出 token
-    semantic_description_max_output_tokens: int = Field(default=160, ge=32)
+    semantic_description_max_output_tokens: int = Field(default=1024, ge=32)
     # 描述生成温度
     semantic_description_temperature: float = Field(
         default=0.0, ge=0.0, le=2.0
     )
-    # 入库是否建图；v1 默认 true（D-56）
+    # 入库是否建图；v1 默认 true（D-56）。开启后必须注入图抽取 LLM。
     graph_build_enabled: bool = True
-    # 垂直领域画像名；一个部署只接入一个领域（默认宠物医疗参考画像）
+    # 垂直领域画像名；一个部署只接入一个领域（默认宠物医疗参考画像）。
+    # 画像只提供类型、补充词白名单/黑名单和关系白名单，不直接产出图节点。
     domain_profile: str = "pet_medical"
     # 自定义领域画像目录；为空时使用内置 domains/ 目录
     domain_profile_dir: str | None = None
     # 自定义领域画像文件；设置后优先于 domain_profile/domain_profile_dir
     domain_profile_path: str | None = None
-    # 图抽取模式：
-    # rule=纯通用规则；lexicon=领域词典 + 通用词；llm=LLM（失败降级词典）；
-    # hybrid=LLM 为主 + 词典辅助；off=关闭
-    graph_extraction_mode: str = "hybrid"
-    # LLM 图抽取总开关；关闭时 llm/hybrid 自动降级为 lexicon
-    graph_llm_enabled: bool = True
     # 运维侧追加的关键词黑名单；与内置黑名单、领域画像黑名单取并集
     graph_keyword_blacklist: list[str] = Field(default_factory=list)
-    # 注入 LLM 提示词的领域词典参考条数；避免上下文过大
-    graph_llm_dictionary_hint_size: int = Field(default=60, ge=0)
-    # 领域词之外是否补充英文/技术术语关键词（不使用中文分词）
-    graph_include_generic_terms: bool = True
-    # 每个 chunk 最多写入多少关键词
+    # 每个 chunk 最多注入多少个“文本中实际出现的”补充词参考（仅用于统一标准名）
+    graph_llm_reference_terms_per_chunk: int = Field(default=20, ge=0, le=100)
+    # 单次 LLM 图抽取最多包含的 chunk 数
+    graph_llm_batch_size: int = Field(default=4, ge=1, le=20)
+    # 单次请求所有 chunk 的正文总字符上限
+    graph_llm_batch_max_chars: int = Field(default=8000, ge=500)
+    # 同一文档并发进行的图抽取请求数
+    graph_llm_concurrency: int = Field(default=4, ge=1, le=32)
+    # 是否缓存 chunk 级图抽取结果（重试/重灌直接复用）
+    graph_llm_cache_enabled: bool = True
+    # 图抽取缓存 TTL（秒）；默认 30 天
+    graph_llm_cache_ttl_s: int = Field(default=2_592_000, ge=0)
+    # 每个 chunk 最多写入多少实体（Neo4j Keyword 节点）
     graph_max_keywords_per_chunk: int = Field(default=10, ge=1)
     # 关系抽取最低置信度
     graph_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     # 每个 chunk 最多写入多少关系
     graph_max_relations_per_chunk: int = Field(default=20, ge=1)
-    # 关系白名单；与领域画像声明的关系取并集
-    graph_relation_whitelist: list[str] = Field(
-        default_factory=lambda: [
-            "is_a",
-            "part_of",
-            "depends_on",
-            "implements",
-            "supports",
-            "requires",
-            "causes",
-            "contrasts",
-        ]
-    )
     # LLM 图抽取：过短 chunk 不调用模型
     graph_llm_min_chunk_chars: int = Field(default=40, ge=0)
     # LLM 图抽取：单 chunk 最多送入模型的字符数
     graph_llm_max_input_chars: int = Field(default=4000, ge=200)
     # LLM 图抽取温度；抽取任务建议低温
     graph_llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    # LLM 图抽取最大输出 token
-    graph_llm_max_output_tokens: int = Field(default=800, ge=64)
+    # LLM 图抽取最大输出 token；推理模型会把 reasoning 计入该上限，
+    # 800 会在 JSON 尚未输出完时被截断，默认留足 4096。
+    graph_llm_max_output_tokens: int = Field(default=4096, ge=64)
     # LLM 未返回 confidence 时的兜底置信度
     graph_llm_default_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
@@ -338,19 +332,8 @@ class RetrieverConfig(ConfigModel):
     graph_expansion_enabled: bool = False
     # 图扩展最大跳数；v1 只允许 1
     graph_max_hops: int = Field(default=1, ge=1)
-    # 允许扩展的关系白名单
-    graph_allowed_relations: list[str] = Field(
-        default_factory=lambda: [
-            "is_a",
-            "part_of",
-            "depends_on",
-            "implements",
-            "supports",
-            "requires",
-            "causes",
-            "contrasts",
-        ]
-    )
+    # 允许扩展的关系白名单；为空时取参与检索的 KB 领域画像关系并集
+    graph_allowed_relations: list[str] = Field(default_factory=list)
     # 关系最小证据数
     graph_min_evidence: int = Field(default=2, ge=1)
     # 最多下一跳实体数
