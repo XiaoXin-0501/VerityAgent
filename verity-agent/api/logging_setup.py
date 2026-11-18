@@ -10,6 +10,7 @@
 设计约束：
 
 - 目录、文件名、大小、保留数量全部来自 ``AppConfig.log``，不在业务代码写死；
+- 日志格式带 ``req/run/conv/doc/kb`` 短上下文，便于把一次问答/一次入库串起来；
 - 默认写入 ``D:/verityAgent日志``，可用 ``APP__LOG__DIRECTORY`` 覆盖；
 - 初始化失败（目录无权限/盘符不存在）只降级为控制台，不阻断应用启动；
 - 幂等：重复调用不会叠加 handler；``shutdown_logging`` 用于测试/优雅退出。
@@ -24,15 +25,13 @@ from pathlib import Path
 from config import settings
 from config.app import AppConfig, LoggingConfig
 from config.base import SOURCE_ROOT
-from utils.log_context import current_request_id
+from utils.log_context import current_log_context
 
 __all__ = ["setup_logging", "shutdown_logging", "LOG_FORMAT"]
 
-# 统一格式：时间/级别/logger/请求 id/进程/线程/消息。
-LOG_FORMAT = (
-    "%(asctime)s %(levelname)s %(name)s "
-    "[req=%(request_id)s pid=%(process)d thread=%(threadName)s] %(message)s"
-)
+# 统一格式：时间/级别/logger/请求-运行上下文/消息。
+# 多个 id 由 Filter 压缩成 ``req=... run=... conv=...``，避免 UUID 污染正文。
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s [%(context)s] %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # uvicorn 自己的 logger 默认不向 root 传播；access 日志单独挂文件。
@@ -45,12 +44,12 @@ _log_signature: tuple[object, ...] | None = None
 _log_path: Path | None = None
 
 
-class _RequestIdFilter(logging.Filter):
-    """把 contextvar 中的 request_id 注入日志记录。"""
+class _ContextFilter(logging.Filter):
+    """把 contextvar 中的请求/运行/入库 id 注入日志记录。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """写入 ``record.request_id``；没有请求上下文时为 ``-``。"""
-        record.request_id = current_request_id()
+        """写入紧凑 ``record.context``；没有上下文时为 ``-``。"""
+        record.context = current_log_context()
         return True
 
 
@@ -154,7 +153,7 @@ def _make_file_handler(
     )
     handler.setLevel(level)
     handler.setFormatter(formatter)
-    handler.addFilter(_RequestIdFilter())
+    handler.addFilter(_ContextFilter())
     for item in filters:
         handler.addFilter(item)
     handler._verity_managed = True  # type: ignore[attr-defined]
@@ -183,7 +182,7 @@ def setup_logging(config: AppConfig | None = None) -> Path | None:
     ):
         console = logging.StreamHandler()
         console.setFormatter(formatter)
-        console.addFilter(_RequestIdFilter())
+        console.addFilter(_ContextFilter())
         console._verity_managed = True  # type: ignore[attr-defined]
         console._verity_console = True  # type: ignore[attr-defined]
         root.addHandler(console)

@@ -77,7 +77,8 @@ def build_default_agent_dependencies(
             )
 
     registry = tool_registry or build_tool_registry(
-        search_kb=settings.tools.search_kb
+        search_kb=settings.tools.search_kb,
+        recall_round=settings.tools.recall_round,
     )
     pipeline = tool_pipeline or build_tool_pipeline(registry, settings.tools)
     capabilities = getattr(spec, "capabilities", None)
@@ -138,6 +139,15 @@ def build_default_agent_dependencies(
         fact_top_k=settings.memory.fact_top_k,
         fact_min_confidence=settings.memory.fact_min_confidence,
         compressor=compressor,
+        # 轮次召回工具：注册表常驻，运行时按摘要压缩次数追加权限码。
+        recall_round_permission=(
+            settings.tools.recall_round.permission_code
+            if settings.tools.recall_round.enabled
+            else None
+        ),
+        recall_round_min_compressions=(
+            settings.tools.recall_round.min_compressions
+        ),
         event_store=(
             event_store
             if event_store is not None

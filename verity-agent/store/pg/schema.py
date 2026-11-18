@@ -88,9 +88,36 @@ ALTER TABLE IF EXISTS conversations ADD CONSTRAINT conversations_current_run_sta
     CHECK (current_run_status IN ('idle', 'running', 'waiting_tool', 'paused',
                                   'failed', 'completed', 'cancelled'));
 
--- conversation_messages：幂等键 / finalize 时间
+-- conversation_messages：幂等键 / finalize 时间 / 轮次 id
 ALTER TABLE IF EXISTS conversation_messages ADD COLUMN IF NOT EXISTS client_message_id UUID;
 ALTER TABLE IF EXISTS conversation_messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE IF EXISTS conversation_messages ADD COLUMN IF NOT EXISTS round_id UUID;
+
+-- 旧消息回填轮次：以“最近一条 user 消息”为界，user 消息自身 id 作为该轮
+-- 轮次 id；第一条 user 消息之前的 system/遗留行保持 NULL。
+DO $$
+BEGIN
+    IF to_regclass('public.conversation_messages') IS NOT NULL THEN
+        UPDATE conversation_messages AS m
+        SET round_id = (
+            SELECT u.id
+            FROM conversation_messages AS u
+            WHERE u.conversation_id = m.conversation_id
+              AND u.seq_no <= m.seq_no
+              AND u.role = 'user'
+            ORDER BY u.seq_no DESC
+            LIMIT 1
+        )
+        WHERE m.round_id IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM conversation_messages AS u
+              WHERE u.conversation_id = m.conversation_id
+                AND u.seq_no <= m.seq_no
+                AND u.role = 'user'
+          );
+    END IF;
+END $$;
 
 -- conversation_summaries：压缩次数
 ALTER TABLE IF EXISTS conversation_summaries ADD COLUMN IF NOT EXISTS compression_count BIGINT NOT NULL DEFAULT 0;
@@ -306,6 +333,8 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     conversation_id    UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     seq_no             BIGINT NOT NULL CHECK (seq_no > 0),
     client_message_id  UUID,
+    -- 轮次 id：一次用户提问到完整回答的全部消息共享同一个值
+    round_id           UUID,
     role               VARCHAR(20) NOT NULL
                        CHECK (role IN ('user', 'assistant', 'tool', 'system')),
     content            JSONB NOT NULL,
@@ -320,6 +349,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_client_id
     WHERE client_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
     ON conversation_messages (conversation_id, seq_no);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_round
+    ON conversation_messages (conversation_id, round_id, seq_no)
+    WHERE round_id IS NOT NULL;
 
 -- ==========================================================
 -- 8. conversation_summaries 会话摘要（1:1）

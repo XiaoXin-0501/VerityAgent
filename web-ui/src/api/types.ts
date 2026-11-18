@@ -359,4 +359,8 @@ export interface DeleteKnowledgeBaseResult {
   document_count: number
   submitted: number
   failed: number
+  /** 删除时收到取消信号的在途上传数 */
+  cancelled_uploads: number
+  /** 在途上传是否在等待窗口内全部退出 */
+  uploads_settled: boolean
 }

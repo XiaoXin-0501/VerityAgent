@@ -654,7 +654,15 @@ async function confirmDelete(): Promise<void> {
         `知识库已删除，${result.failed} 个文档的清理任务提交失败，需要人工检查`,
       )
     } else {
-      ElMessage.success(`知识库已删除，已提交 ${result.submitted} 个文档清理任务`)
+      const cancelled = result.cancelled_uploads
+        ? `，已取消 ${result.cancelled_uploads} 个在途上传`
+        : ''
+      ElMessage.success(
+        `知识库已删除，已提交 ${result.submitted} 个文档清理任务${cancelled}`,
+      )
+    }
+    if (!result.uploads_settled) {
+      ElMessage.warning('部分上传未在等待窗口内退出，服务端已通过原子登记拒绝晚到文档')
     }
   } catch (error) {
     deleteError.value =

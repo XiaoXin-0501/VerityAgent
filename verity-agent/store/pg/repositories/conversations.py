@@ -518,6 +518,7 @@ class ConversationMessageRepository(BaseRepository):
         status: MessageStatus = MessageStatus.COMPLETED,
         seq_no: int | None = None,
         client_message_id: UUID | str | None = None,
+        round_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> ConversationMessage:
         """追加消息并分配序号；client_message_id 用于幂等去重。"""
@@ -530,6 +531,7 @@ class ConversationMessageRepository(BaseRepository):
                 status=status,
                 seq_no=seq_no,
                 client_message_id=client_message_id,
+                round_id=round_id,
             )
 
     async def _append(
@@ -542,6 +544,7 @@ class ConversationMessageRepository(BaseRepository):
         status: MessageStatus,
         seq_no: int | None,
         client_message_id: UUID | str | None = None,
+        round_id: UUID | str | None = None,
     ) -> ConversationMessage:
         """在指定事务内插入消息，承担序号分配与幂等查重。"""
         conversation_uuid = as_uuid(conversation_id)
@@ -571,14 +574,16 @@ class ConversationMessageRepository(BaseRepository):
             conn,
             """
             INSERT INTO conversation_messages
-                (conversation_id, seq_no, client_message_id, role, content, status)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (conversation_id, seq_no, client_message_id, round_id,
+                 role, content, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
                 conversation_uuid,
                 seq_no,
                 as_uuid(client_message_id) if client_message_id is not None else None,
+                as_uuid(round_id) if round_id is not None else None,
                 _param(role),
                 to_jsonb(payload),
                 _param(status),
@@ -619,6 +624,7 @@ class ConversationMessageRepository(BaseRepository):
         content: Any,
         *,
         client_message_id: UUID | str | None = None,
+        round_id: UUID | str | None = None,
         conn: AsyncConnection[Row] | None = None,
     ) -> tuple[ConversationMessage, UserMessage]:
         """写用户消息 + 同步写入长期记忆暂存表（同一事务双写）。
@@ -636,6 +642,7 @@ class ConversationMessageRepository(BaseRepository):
                 status=MessageStatus.COMPLETED,
                 seq_no=None,
                 client_message_id=client_message_id,
+                round_id=round_id,
             )
             queued = await self._user_messages.enqueue(
                 user_id,
@@ -693,6 +700,33 @@ class ConversationMessageRepository(BaseRepository):
             params.append(limit)
         async with self._transaction(conn) as c:
             rows = await self._fetch_all(c, sql, params)
+        return self._models(ConversationMessage, rows)
+
+    async def list_rounds(
+        self,
+        conversation_id: UUID | str,
+        round_ids: list[UUID | str],
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[ConversationMessage]:
+        """按轮次 id 取完整消息链（含提问、工具过程与最终回答）。
+
+        轮次召回工具只使用本方法读取；调用方负责把结果裁剪成“提问 + 最终回答”。
+        """
+        if not round_ids:
+            return []
+        ids = [as_uuid(item) for item in round_ids]
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT * FROM conversation_messages
+                WHERE conversation_id = %s
+                  AND round_id = ANY(%s::uuid[])
+                ORDER BY seq_no
+                """,
+                (as_uuid(conversation_id), ids),
+            )
         return self._models(ConversationMessage, rows)
 
     async def get_recent(

@@ -190,30 +190,37 @@ class GraphStore:
         self,
         *,
         seed: str,
-        kb_id: str,
+        kb_ids: Iterable[str],
         allowed_relations: Iterable[str],
         min_evidence: int = 2,
         limit: int = 20,
         hub_as_intermediate: bool = False,
     ) -> list[dict[str, Any]]:
-        """1 跳强关系扩展；返回下一跳实体，不返回 chunk。
+        """在允许的知识库集合内做 1 跳强关系扩展；不返回 chunk。
 
-        ``hub_as_intermediate=False``（默认）时排除 ``is_hub=true`` 的实体，
-        避免“犬/猫/药物”这类高频 hub 把图扩展变成泛化召回。
+        跨库语义：查询在授权 KB 集合内统一执行，seed 与下一跳都从集合中取；
+        下一跳实体仍由 RetrievalPipeline 到全部授权 KB 召回 chunk。
+        ``hub_as_intermediate=False`` 时排除 ``is_hub=true``。
         """
+        ids = list(dict.fromkeys(str(item) for item in kb_ids if item))
+        if not ids:
+            return []
         return await self._read(
             """
-            MATCH (k:Keyword {kb_id: $kb_id, name: $seed})
+            MATCH (k:Keyword {name: $seed})
+            WHERE k.kb_id IN $kb_ids
             MATCH (k)-[:SUBJECT_OF|OBJECT_OF]-(rel:Relation)
-            WHERE rel.kb_id = $kb_id
+            WHERE rel.kb_id IN $kb_ids
               AND rel.relation IN $allowed_relations
               AND coalesce(rel.evidence_count, 0) >= $min_evidence
             MATCH (rel)-[:SUBJECT_OF|OBJECT_OF]-(n:Keyword)
-            WHERE n.kb_id = $kb_id
+            WHERE n.kb_id IN $kb_ids
               AND n <> k
               AND ($hub_as_intermediate OR coalesce(n.is_hub, false) = false)
-            RETURN k.name AS seed_name,
+            RETURN k.kb_id AS seed_kb_id,
+                   k.name AS seed_name,
                    rel.relation AS relation,
+                   n.kb_id AS next_hop_kb_id,
                    n.name AS next_hop_name,
                    rel.evidence_count AS evidence_count
             ORDER BY evidence_count DESC
@@ -221,7 +228,7 @@ class GraphStore:
             """,
             {
                 "seed": seed,
-                "kb_id": kb_id,
+                "kb_ids": ids,
                 "allowed_relations": list(allowed_relations),
                 "min_evidence": min_evidence,
                 "limit": limit,

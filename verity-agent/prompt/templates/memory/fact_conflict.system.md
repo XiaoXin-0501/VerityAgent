@@ -16,4 +16,5 @@
 1. 只依据输入的事实文本判断，不引入外部知识。
 2. 新旧事实主体不同、时间不同或适用对象不同时，优先判为 compatible。
 3. 不确定时输出 unresolved，不要猜测 target_id。
-4. reason 控制在 50 字以内。
+4. 候选的 `confirmation_count` / `last_confirmed_at` 只用于辅助判断事实稳定性，不能替代文本判断。
+5. reason 控制在 50 字以内。

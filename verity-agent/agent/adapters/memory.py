@@ -63,6 +63,11 @@ class PgMemoryProfileAdapter:
             text = truncate_to_tokens(text, token_budget)
         return text
 
+    async def compression_count(self, conversation_id: UUID) -> int:
+        """返回会话摘要成功压缩次数；无摘要时按 0 处理。"""
+        summary = await self.summary_repository.get(conversation_id)
+        return int(summary.compression_count) if summary is not None else 0
+
 
 def _render_memory(value: MemoryValue) -> str:
     """把固定 7 段画像渲染成带标签的纯文本。"""
@@ -80,11 +85,18 @@ def _render_memory(value: MemoryValue) -> str:
 
 
 def _render_session_summary(summary: SessionSummary) -> str:
-    """把 topics/facts/constraints 渲染成紧凑的会话摘要。"""
+    """把 topics/facts/constraints 渲染成紧凑的会话摘要。
+
+    topic 带上轮次 id，让模型在需要原始问答时调用 ``recall_round``；
+    不展开中间消息。
+    """
     lines: list[str] = []
     for topic in summary.topics:
-        if topic.summary.strip():
-            lines.append(f"- 主题 {topic.name}: {topic.summary.strip()}")
+        if not topic.summary.strip():
+            continue
+        rounds = ", ".join(str(item) for item in topic.source_round_ids)
+        suffix = f" [rounds: {rounds}]" if rounds else ""
+        lines.append(f"- 主题 {topic.name}: {topic.summary.strip()}{suffix}")
     for fact in summary.facts:
         if fact.content.strip():
             lines.append(f"- 事实: {fact.content.strip()}")

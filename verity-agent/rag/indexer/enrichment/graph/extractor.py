@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,7 +41,9 @@ from rag.shared.models import (
     GraphRelation,
 )
 from utils.hashing import short_digest
+from utils.log_summary import summary_block
 from utils.text import truncate
+from utils.tokens import estimate_tokens
 
 from ...caching import ChunkCache, graph_extraction_cache_key
 from ..domain.models import DomainProfile
@@ -61,6 +65,54 @@ logger = logging.getLogger(__name__)
 _ReferenceTerms = list[dict[str, str]]
 # (chunk, 截断后的正文, 补充词, 缓存 key)
 _PendingChunk = tuple[Chunk, str, _ReferenceTerms, Any | None]
+
+
+@dataclass(slots=True)
+class _ExtractionStats:
+    """一次批量图抽取的运行统计，用于输出人类可读的流程摘要。"""
+
+    chunks_total: int = 0
+    chunks_skipped: int = 0
+    cache_hits: int = 0
+    batches: int = 0
+    llm_calls: int = 0
+    truncations: int = 0
+    retries: int = 0
+    failed_batches: int = 0
+    input_truncated_chunks: int = 0
+    entities: int = 0
+    relations: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    unknown_types: int = 0
+    unknown_relations: int = 0
+    unknown_type_samples: list[str] = field(default_factory=list)
+    unknown_relation_samples: list[str] = field(default_factory=list)
+
+    def add_unknown_type(self, name: str, entity_type: str) -> None:
+        """累计未声明类型；只保留前 5 个样例避免刷日志。"""
+        self.unknown_types += 1
+        sample = f"{name}({entity_type})"
+        if (
+            len(self.unknown_type_samples) < 5
+            and sample not in self.unknown_type_samples
+        ):
+            self.unknown_type_samples.append(sample)
+
+    def add_unknown_relation(
+        self,
+        subject: str,
+        relation: str,
+        obj: str,
+    ) -> None:
+        """累计未声明关系；只保留前 5 个样例。"""
+        self.unknown_relations += 1
+        sample = f"{subject}-{relation}->{obj}"
+        if (
+            len(self.unknown_relation_samples) < 5
+            and sample not in self.unknown_relation_samples
+        ):
+            self.unknown_relation_samples.append(sample)
 
 
 class _LLMEntity(BaseModel):
@@ -142,21 +194,22 @@ class LLMGraphExtractor:
         """批量抽取：缓存命中优先，未命中按 batch 分组并发调用模型。"""
         if not chunks:
             return {}
+        started = time.perf_counter()
+        stats = _ExtractionStats(chunks_total=len(chunks))
         results: dict[str, ChunkGraphExtraction] = {}
         pending: list[_PendingChunk] = []
-        # 与 _make_batches 使用同一截断上限，确保 reference_terms 和缓存 key
-        # 都基于实际送入模型的正文。
-        prompt_limit = min(
-            max(200, int(self.config.graph_llm_max_input_chars)),
-            max(500, int(self.config.graph_llm_batch_max_chars)),
-        )
+        # 单 chunk 只做字符级截断；批次大小由 _make_batches 按 token 预算决定。
+        prompt_limit = max(200, int(self.config.graph_llm_max_input_chars))
         for chunk in chunks:
             text = (graph_source_text(chunk) or "").strip()
             if not text or len(text) < self.config.graph_llm_min_chunk_chars:
+                stats.chunks_skipped += 1
                 results[chunk.chunk_id] = ChunkGraphExtraction(
                     chunk_id=chunk.chunk_id
                 )
                 continue
+            if len(text) > prompt_limit:
+                stats.input_truncated_chunks += 1
             prompt_text = truncate(text, prompt_limit)
             # 只把当前 chunk 文本里实际出现的补充词带给模型；白名单不是
             # 抽取边界，也不要求穷举领域。
@@ -167,13 +220,18 @@ class LLMGraphExtractor:
             key = self._cache_key(prompt_text, reference_terms)
             cached = await self._cache_get(key)
             if cached is not None:
+                stats.cache_hits += 1
+                stats.entities += len(cached.keywords)
+                stats.relations += len(cached.relations)
                 results[chunk.chunk_id] = cached
                 continue
             pending.append((chunk, prompt_text, reference_terms, key))
         if not pending:
+            self._log_summary(stats, started)
             return results
 
         batches = list(self._make_batches(pending))
+        stats.batches = len(batches)
         concurrency = max(
             1,
             int(max_concurrency or self.config.graph_llm_concurrency),
@@ -185,7 +243,7 @@ class LLMGraphExtractor:
         ) -> dict[str, ChunkGraphExtraction]:
             """在并发信号量内执行一个批次。"""
             async with semaphore:
-                return await self._extract_batch_items(batch)
+                return await self._extract_batch_items(batch, stats)
 
         outcomes = await asyncio.gather(
             *(run(batch) for batch in batches),
@@ -193,6 +251,7 @@ class LLMGraphExtractor:
         )
         for batch, outcome in zip(batches, outcomes, strict=True):
             if isinstance(outcome, BaseException):
+                stats.failed_batches += 1
                 logger.warning(
                     "LLM 图抽取批次失败: chunks=%d err=%s",
                     len(batch),
@@ -207,7 +266,44 @@ class LLMGraphExtractor:
                 elif key is not None:
                     await self._cache_set(key, extraction)
                 results[chunk.chunk_id] = extraction
+        self._log_summary(stats, started)
         return results
+
+    def _log_summary(self, stats: _ExtractionStats, started: float) -> None:
+        """输出一次入库图抽取的可分析摘要（含截断/重试/未声明项）。"""
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        level = logging.WARNING if stats.truncations else logging.INFO
+        logger.log(
+            level,
+            "%s",
+            summary_block(
+                "图抽取",
+                [
+                    f"model={self.model_id} | chunks={stats.chunks_total} "
+                    f"(跳过 {stats.chunks_skipped}, 缓存 {stats.cache_hits}) "
+                    f"| 批次={stats.batches} | LLM={stats.llm_calls} 次",
+                    f"tokens 输入={stats.input_tokens} 输出={stats.output_tokens} "
+                    f"| 实体={stats.entities} 关系={stats.relations} "
+                    f"| 耗时={duration_ms}ms",
+                    f"截断={stats.truncations} 重试={stats.retries} "
+                    f"失败批次={stats.failed_batches} "
+                    f"输入截断={stats.input_truncated_chunks}",
+                ],
+            ),
+        )
+        if stats.unknown_types or stats.unknown_relations:
+            logger.info(
+                "%s",
+                summary_block(
+                    "图抽取未声明项（暂不入图）",
+                    [
+                        f"类型 {stats.unknown_types} 个: "
+                        f"{stats.unknown_type_samples}",
+                        f"关系 {stats.unknown_relations} 个: "
+                        f"{stats.unknown_relation_samples}",
+                    ],
+                ),
+            )
 
     # ——————————————————— 批次与缓存 ———————————————————
 
@@ -215,25 +311,22 @@ class LLMGraphExtractor:
         self,
         pending: list[_PendingChunk],
     ) -> Iterable[list[_PendingChunk]]:
-        """按 batch_size 与总字符上限切批；正文已在入批前按上限截断。"""
-        batch_size = max(1, int(self.config.graph_llm_batch_size))
-        max_chars = max(500, int(self.config.graph_llm_batch_max_chars))
+        """按输入 token 预算装批；chunk 是最小单位，不拆 chunk 填缝。
+
+        单 chunk 超过预算时仍单独成批（必要时由单 chunk 字符上限截断），
+        保证不会因为预算把 chunk 丢掉。
+        """
+        max_tokens = max(500, int(self.config.graph_llm_batch_max_input_tokens))
         batch: list[_PendingChunk] = []
-        chars = 0
-        for chunk, prompt_text, reference_terms, key in pending:
-            if batch and (
-                len(batch) >= batch_size
-                or chars + len(prompt_text) > max_chars
-            ):
+        batch_tokens = 0
+        for item in pending:
+            item_tokens = estimate_tokens(item[1])
+            if batch and batch_tokens + item_tokens > max_tokens:
                 yield batch
                 batch = []
-                chars = 0
-            batch.append((chunk, prompt_text, reference_terms, key))
-            chars += len(prompt_text)
-            if len(batch) >= batch_size:
-                yield batch
-                batch = []
-                chars = 0
+                batch_tokens = 0
+            batch.append(item)
+            batch_tokens += item_tokens
         if batch:
             yield batch
 
@@ -314,8 +407,10 @@ class LLMGraphExtractor:
     async def _extract_batch_items(
         self,
         batch: list[_PendingChunk],
+        stats: _ExtractionStats,
     ) -> dict[str, ChunkGraphExtraction]:
         """执行一个批次；截断/解析类错误拆分重试，API 故障返回空结果。"""
+        stats.llm_calls += 1
         chunks = [item[0] for item in batch]
         texts = [item[1] for item in batch]
         reference_terms = [item[2] for item in batch]
@@ -323,7 +418,14 @@ class LLMGraphExtractor:
             response = await self.chat_model.complete(
                 self._build_request(chunks, texts, reference_terms)
             )
+            stats.input_tokens += int(
+                getattr(response.usage, "input_tokens", 0) or 0
+            )
+            stats.output_tokens += int(
+                getattr(response.usage, "output_tokens", 0) or 0
+            )
             if response.finish_reason is ChatFinishReason.LENGTH:
+                stats.truncations += 1
                 logger.warning(
                     "LLM 图抽取输出达到 max_tokens 被截断: chunks=%d "
                     "output_tokens=%s",
@@ -331,7 +433,8 @@ class LLMGraphExtractor:
                     getattr(response.usage, "output_tokens", None),
                 )
                 if len(batch) > 1:
-                    return await self._split_retry(batch)
+                    return await self._split_retry(batch, stats)
+                stats.failed_batches += 1
                 return {}
             payload = _loads_json(_response_text(response))
             parsed = _parse_batch(payload, chunks)
@@ -344,7 +447,8 @@ class LLMGraphExtractor:
                     len(parsed),
                 )
                 if len(batch) > 1:
-                    return await self._split_retry(batch)
+                    return await self._split_retry(batch, stats)
+                stats.failed_batches += 1
                 return {}
         except ValueError as exc:
             # JSON/结构不合法：批量响应可能被截断或模型漏了 chunk_id，
@@ -355,9 +459,11 @@ class LLMGraphExtractor:
                 exc,
             )
             if len(batch) > 1:
-                return await self._split_retry(batch)
+                return await self._split_retry(batch, stats)
+            stats.failed_batches += 1
             return {}
         except Exception as exc:  # noqa: BLE001 - 第三方调用异常统一降级
+            stats.failed_batches += 1
             logger.warning(
                 "LLM 图抽取失败，返回空结果: chunks=%d err=%s",
                 len(batch),
@@ -373,17 +479,22 @@ class LLMGraphExtractor:
                     chunk_id=chunk.chunk_id
                 )
             else:
-                result[chunk.chunk_id] = self._to_extraction(chunk, item)
+                extraction = self._to_extraction(chunk, item, stats)
+                stats.entities += len(extraction.keywords)
+                stats.relations += len(extraction.relations)
+                result[chunk.chunk_id] = extraction
         return result
 
     async def _split_retry(
         self,
         batch: list[_PendingChunk],
+        stats: _ExtractionStats,
     ) -> dict[str, ChunkGraphExtraction]:
         """把一个失败批次对半拆分重试；递归深度受 batch_size 限制。"""
+        stats.retries += 1
         middle = len(batch) // 2
-        left = await self._extract_batch_items(batch[:middle])
-        right = await self._extract_batch_items(batch[middle:])
+        left = await self._extract_batch_items(batch[:middle], stats)
+        right = await self._extract_batch_items(batch[middle:], stats)
         return {**left, **right}
 
     # ——————————————————— Prompt 构建 ———————————————————
@@ -485,13 +596,13 @@ class LLMGraphExtractor:
         self,
         chunk: Chunk,
         parsed: _LLMResultItem,
+        stats: _ExtractionStats,
     ) -> ChunkGraphExtraction:
         """把单个 chunk 的 LLM 结果归一为标准名、补类型并过滤关系。"""
         max_entities = self.config.graph_max_keywords_per_chunk
         all_entities: list[GraphKeyword] = []
         types: dict[str, str] = {}
         seen: set[str] = set()
-        unknown_types: list[tuple[str, str]] = []
         for entity in parsed.entities:
             raw = normalize_keyword(entity.name)
             if not raw:
@@ -509,8 +620,9 @@ class LLMGraphExtractor:
                 # 未声明类型只记录日志，便于后续补画像，不写入 Neo4j。
                 resolved = self.profile.resolve_entity_type(entity.type or "")
                 if resolved is None:
-                    unknown_types.append(
-                        (name, (entity.type or "").strip() or "<empty>")
+                    stats.add_unknown_type(
+                        name,
+                        (entity.type or "").strip() or "<empty>",
                     )
                     continue
                 entity_type = resolved
@@ -525,7 +637,6 @@ class LLMGraphExtractor:
         # 避免第 11 个实体恰好是关系宾语时把关系一起丢掉。
         candidates: list[GraphRelation] = []
         required: set[str] = set()
-        unknown_relations: list[tuple[str, str, str]] = []
         for item in parsed.relations:
             subject = self._canonical_name(item.subject)
             obj = self._canonical_name(item.object)
@@ -544,7 +655,7 @@ class LLMGraphExtractor:
                 continue
             if relation not in self.allowed_relations:
                 # 关系类型同理：未声明关系暂不入图，只记录日志。
-                unknown_relations.append((subject, relation, obj))
+                stats.add_unknown_relation(subject, relation, obj)
                 continue
             confidence = (
                 item.confidence
@@ -563,27 +674,6 @@ class LLMGraphExtractor:
                 )
             )
 
-        # 未声明类型/关系只做聚合日志：避免每个实体/关系一行把日志刷乱。
-        if unknown_types:
-            logger.info(
-                "图抽取跳过未声明类型: chunk=%s count=%d types=%s samples=%s",
-                chunk.chunk_id,
-                len(unknown_types),
-                sorted({item[1] for item in unknown_types}),
-                [item[0] for item in unknown_types[:5]],
-            )
-        if unknown_relations:
-            logger.info(
-                "图抽取跳过未声明关系: chunk=%s count=%d relations=%s "
-                "samples=%s",
-                chunk.chunk_id,
-                len(unknown_relations),
-                sorted({item[1] for item in unknown_relations}),
-                [
-                    f"{item[0]}-{item[1]}->{item[2]}"
-                    for item in unknown_relations[:5]
-                ],
-            )
 
         # 关系端点优先，其余实体按 LLM 输出顺序补足到上限。
         entities = [

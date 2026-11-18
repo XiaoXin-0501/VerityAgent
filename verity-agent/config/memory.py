@@ -32,6 +32,8 @@ class MemoryConfig(ConfigModel):
     extraction_max_input_tokens: int = Field(default=4000, ge=256)
     # 每次画像确认的 confidence 提升步长
     profile_confidence_step: float = Field(default=0.05, gt=0.0, le=1.0)
+    # 每个画像段保留的 source_msg_ids 上限；只保留最近证据，避免无限增长
+    profile_source_msg_limit: int = Field(default=20, ge=1)
     # 画像抽取输出 token 上限
     extraction_max_output_tokens: int = Field(default=1024, ge=128)
 
@@ -49,6 +51,20 @@ class MemoryConfig(ConfigModel):
     compression_max_output_tokens: int = Field(default=2048, ge=128)
     # 压缩 LLM 超时（秒）
     compression_timeout_s: float = Field(default=60.0, gt=0)
+    # 摘要 topic/fact 的来源锚点上限；只保留最近证据，避免无限增长
+    compression_source_msg_limit: int = Field(default=20, ge=1)
+    # 单个 topic 保留的轮次锚点上限
+    compression_topic_round_limit: int = Field(default=20, ge=1)
+    # 成功压缩次数超过该值才启用 topic 遗忘
+    compression_topic_forget_after: int = Field(default=5, ge=0)
+    # topic 条数超过该值才触发遗忘
+    compression_max_topics: int = Field(default=10, ge=1)
+    # mention_count <= 该值的 topic 视为“插话”候选
+    compression_interjection_max_mentions: int = Field(default=1, ge=1)
+    # 最新 last_mentioned_at 的 topic 是否永不删除
+    compression_protect_latest_topic: bool = True
+    # 单次压缩最多遗忘的 topic 数
+    compression_max_forget_per_compression: int = Field(default=5, ge=1)
 
     # 是否注入长期事实（Weaviate UserFact BM25）
     facts_enabled: bool = True

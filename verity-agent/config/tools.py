@@ -23,6 +23,7 @@ from .base import ConfigModel
 
 __all__ = [
     "SearchKbToolConfig",
+    "RecallRoundToolConfig",
     "ToolRoutingMode",
     "ToolRoutingConfig",
     "ToolsConfig",
@@ -54,6 +55,30 @@ class SearchKbToolConfig(ConfigModel):
         if self.default_top_k > self.max_top_k:
             raise ValueError("search_kb.default_top_k 不能大于 max_top_k")
         return self
+
+
+class RecallRoundToolConfig(ConfigModel):
+    """内置 ``recall_round`` 的启用条件与返回上限。
+
+    该工具按轮次 id 召回“用户提问 + 最终回答”，中间工具调用与过程消息省略。
+    只有会话摘要成功压缩到 ``min_compressions`` 次后，才会在运行时向模型暴露；
+    摘要 topic 的 ``source_round_ids`` 是模型可用的轮次 id 来源。
+    """
+
+    # 是否注册轮次召回工具；注册不等于每次运行都暴露
+    enabled: bool = True
+    # 摘要压缩次数达到该值后向 LLM 暴露工具；0 表示始终暴露
+    min_compressions: int = Field(default=2, ge=0)
+    # 单次最多召回几个轮次，避免一次拉回过多历史
+    max_rounds: int = Field(default=5, ge=1, le=20)
+    # 单次返回文本的字符上限；超出截断并提示
+    max_chars: int = Field(default=4000, ge=200)
+    # 工具暴露所需的内部权限码；由 Agent 在满足阈值时动态授予
+    permission_code: str = Field(
+        default="tool:memory:recall_round",
+        min_length=1,
+        max_length=100,
+    )
 
 
 class ToolRoutingMode(StrEnum):
@@ -93,6 +118,10 @@ class ToolsConfig(ConfigModel):
     routing: ToolRoutingConfig = Field(default_factory=ToolRoutingConfig)
     # 内置 search_kb 的默认召回数与缓存/限流策略
     search_kb: SearchKbToolConfig = Field(default_factory=SearchKbToolConfig)
+    # 内置 recall_round 的启用条件与返回上限
+    recall_round: RecallRoundToolConfig = Field(
+        default_factory=RecallRoundToolConfig
+    )
     # 单批工具并行上限；Agent 可再用 AgentPolicy.max_parallel_tools 收紧
     max_batch_concurrency: int = Field(default=4, ge=1)
     # 单个工具入参 JSON 的字节上限；防止超大参数打爆校验/日志

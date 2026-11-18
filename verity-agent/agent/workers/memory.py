@@ -35,7 +35,7 @@ from store.pg.models.memory import (
 )
 from store.pg.repositories import UserMemoryRepository, UserMessageRepository
 from .text import messages_text, parse_json_object
-from utils.time import utcnow
+from utils.time import isoformat_z, utcnow
 
 __all__ = ["MemoryProfileWorker"]
 
@@ -130,16 +130,26 @@ class MemoryProfileWorker:
             content_text = messages_text(items, self.config.extraction_max_input_tokens)
             data = await self._extract(current.value, content_text)
             fact_count: int | None = None
+            facts_written = 0
             if self.facts_store is not None and self.config.fact_write_enabled:
                 facts = [
                     item for item in (data.get("facts") or [])
                     if isinstance(item, dict)
                 ]
                 if facts:
-                    await self._apply_facts(
+                    facts_written = await self._apply_facts(
                         user_id=user_id,
                         facts=facts,
-                        source_msg_ids=[str(item.message_id) for item in items],
+                        allowed_msg_ids={
+                            str(item.message_id) for item in items
+                        },
+                        default_source_msg_ids=[
+                            str(item.message_id) for item in items
+                        ],
+                        message_times={
+                            str(item.message_id): isoformat_z(item.created_at)
+                            for item in items
+                        },
                     )
                     limit = getattr(self.facts_store, "enforce_fact_limit", None)
                     if callable(limit):
@@ -153,8 +163,15 @@ class MemoryProfileWorker:
                         latest.value,
                         data,
                         step=self.config.profile_confidence_step,
+                        source_msg_ids=[item.message_id for item in items],
+                        source_limit=self.config.profile_source_msg_limit,
                     ),
                     fact_count=fact_count,
+                    # 事实集发生写入时递增版本，供事实缓存失效；幂等重试只在
+                    # 成功 apply 后 +1，不会因为队列重试无限增长。
+                    facts_revision=(
+                        latest.facts_revision + 1 if facts_written else None
+                    ),
                 ),
             )
             await self.messages.mark_processing_done(ids)
@@ -182,20 +199,37 @@ class MemoryProfileWorker:
         *,
         user_id: UUID,
         facts: list[dict[str, Any]],
-        source_msg_ids: list[str],
-    ) -> None:
-        """写入事实；启用冲突判定时按 duplicate/supersede 决策处理。"""
+        allowed_msg_ids: set[str],
+        default_source_msg_ids: list[str],
+        message_times: Mapping[str, str],
+    ) -> int:
+        """写入事实；每条事实使用模型给出的 ``msg_id``，缺失时回退到本批消息。
+
+        启用冲突判定时按 duplicate/supersede 决策处理。逐条写入是为了让
+        ``source_msg_ids`` 精确到单条用户消息，而不是整批消息的并集；
+        ``last_confirmed_at`` 使用来源消息的时间，保证与证据一致。
+        返回实际处理的非空事实数。
+        """
         assert self.facts_store is not None
-        if self.conflict_service is None:
-            await self.facts_store.upsert_facts(
-                user_id=user_id,
-                facts=facts,
-                source_msg_ids=source_msg_ids,
-            )
-            return
+        written = 0
         for fact in facts:
             content = str(fact.get("content") or "").strip()
             if not content:
+                continue
+            written += 1
+            sources = _fact_sources(
+                fact,
+                allowed_msg_ids=allowed_msg_ids,
+                default_source_msg_ids=default_source_msg_ids,
+            )
+            confirmed_at = _confirmed_at(sources, message_times)
+            if self.conflict_service is None:
+                await self.facts_store.upsert_facts(
+                    user_id=user_id,
+                    facts=[fact],
+                    source_msg_ids=sources,
+                    confirmed_at=confirmed_at,
+                )
                 continue
             candidates = await self.facts_store.find_similar(
                 user_id=user_id,
@@ -206,6 +240,22 @@ class MemoryProfileWorker:
                 new_fact=fact,
                 candidates=candidates,
             )
+            if decision.decision == "unresolved":
+                # 证据不足：新事实与候选都置 disputed，等待下次对话确认。
+                await self.facts_store.upsert_facts(
+                    user_id=user_id,
+                    facts=[fact],
+                    source_msg_ids=sources,
+                    confirmed_at=confirmed_at,
+                    status="disputed",
+                )
+                mark_disputed = getattr(self.facts_store, "mark_disputed", None)
+                if decision.target_id and callable(mark_disputed):
+                    await mark_disputed(
+                        user_id=user_id,
+                        fact_ids=[decision.target_id],
+                    )
+                continue
             if decision.decision == "duplicate" and decision.target_id:
                 target = next(
                     (
@@ -219,7 +269,8 @@ class MemoryProfileWorker:
             await self.facts_store.upsert_facts(
                 user_id=user_id,
                 facts=[fact],
-                source_msg_ids=source_msg_ids,
+                source_msg_ids=sources,
+                confirmed_at=confirmed_at,
             )
             if decision.decision == "supersede" and decision.target_id:
                 new_id = self.facts_store.fact_id_for(
@@ -231,6 +282,7 @@ class MemoryProfileWorker:
                     old_fact_id=decision.target_id,
                     new_fact_id=new_id,
                 )
+        return written
 
     async def _extract(self, current: MemoryValue, content_text: str) -> dict[str, Any]:
         """调用小模型生成画像更新字段（只返回解析后的 JSON）。"""
@@ -291,27 +343,78 @@ class MemoryProfileWorker:
             logger.warning("记忆 worker Hook 发送失败: %s", event.value, exc_info=True)
 
 
+def _fact_sources(
+    fact: Mapping[str, Any],
+    *,
+    allowed_msg_ids: set[str],
+    default_source_msg_ids: list[str],
+) -> list[str]:
+    """解析一条事实的 ``msg_id``；越界/缺失时回退到本批消息。
+
+    回退而不是丢弃事实：旧 prompt 或模型偶尔漏字段时仍可沉淀事实，只是
+    来源粒度变成本批消息；正常情况只保留单条最直接证据。
+    """
+    raw = fact.get("msg_id")
+    try:
+        message_id = str(UUID(str(raw)))
+    except (TypeError, ValueError, AttributeError):
+        return list(default_source_msg_ids)
+    if message_id not in allowed_msg_ids:
+        return list(default_source_msg_ids)
+    return [message_id]
+
+
+def _confirmed_at(
+    sources: list[str],
+    message_times: Mapping[str, str],
+) -> str | None:
+    """返回来源消息中最大的时间；缺失时交给存储层使用当前时间。"""
+    values = [message_times[item] for item in sources if item in message_times]
+    return max(values) if values else None
+
+
 def _apply_profile(
     current: MemoryValue,
     data: Mapping[str, Any],
     *,
     step: float = 0.05,
-) -> MemoryValue:
-    """只接受已知 7 段字段；未知字段忽略，缺失字段保留旧值。"""
+    source_msg_ids: list[UUID] | None = None,
+    source_limit: int = 20,
+) -> MemoryValue | None:
+    """只接受已知 7 段字段；未知字段忽略，缺失字段保留旧值。
+
+    画像段被本次抽取更新时，把本批用户消息 id 并入该段的
+    ``source_msg_ids``；只保留最近 ``source_limit`` 条证据。没有任何段变化
+    时返回 ``None``，避免无意义地刷新 ``last_updated``/revision。
+
+    注意：模型把旧值原样复制回来不算变化；只有文本实际改变才更新
+    ``updated_at``/confidence，避免每次抽取都膨胀置信度。
+    """
     now = utcnow()
+    sources = list(source_msg_ids or [])
+    changed = False
 
     def section(name: str, old: MemorySection) -> MemorySection:
-        """合并单个画像段；空值保留旧段。"""
+        """合并单个画像段；空值或原样返回保留旧段（含旧证据）。"""
+        nonlocal changed
         value = data.get(name)
         if not isinstance(value, str) or not value.strip():
             return old
+        text = value.strip()
+        if text == old.summary.strip():
+            return old
+        changed = True
+        merged = list(dict.fromkeys([*old.source_msg_ids, *sources]))
+        if source_limit > 0:
+            merged = merged[-source_limit:]
         # DBJsonModel 的字段带 JSON 别名；用 model_validate 同时接受 snake_case
         # 字段名并保留 Pydantic 校验，避免直接构造时只认别名。
         return MemorySection.model_validate(
             {
-                "summary": value.strip(),
+                "summary": text,
                 "updated_at": now,
                 "confidence": min(0.95, max(0.5, old.confidence + step)),
+                "source_msg_ids": merged,
             }
         )
 
@@ -340,6 +443,8 @@ def _apply_profile(
             ),
         }
     )
+    if not changed:
+        return None
     return MemoryValue.model_validate(
         {"last_updated": now, "user": user, "history": history}
     )

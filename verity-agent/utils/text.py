@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from .cjk import is_cjk_char
 
@@ -26,6 +28,7 @@ __all__ = [
     "join_wrapped_lines",
     "filename_to_title",
     "is_meaningful_filename",
+    "extract_content_text",
 ]
 
 _WHITESPACE = re.compile(r"[ \t ]+")
@@ -47,6 +50,30 @@ def normalize_whitespace(text: str, *, keep_newlines: bool = True) -> str:
 def strip_control_chars(text: str) -> str:
     """移除 ASCII 控制字符，保留换行/制表以外的可见文本。"""
     return _CONTROL.sub("", text)
+
+
+def extract_content_text(value: Any) -> str:
+    """递归提取消息 content 中的文本片段；忽略二进制/结构元数据。
+
+    消息 content 是版本化 JSON（v2），文本可能位于 ``text`` 字段或嵌套的
+    parts 数组；本函数只做通用文本收集，不解释业务结构。
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Mapping):
+        if isinstance(value.get("text"), str):
+            return value["text"].strip()
+        parts: list[str] = []
+        for item in value.values():
+            text = extract_content_text(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    if isinstance(value, (list, tuple)):
+        return "\n".join(
+            text for item in value if (text := extract_content_text(item))
+        )
+    return ""
 
 
 def truncate(text: str, max_chars: int, *, suffix: str = "…") -> str:

@@ -48,7 +48,10 @@ from store.neo4j import (
     init_schema as init_graph_schema,
 )
 from store.pg import close_pg, init_pg, init_schema
-from store.pg.repositories import ConversationRepository
+from store.pg.repositories import (
+    ConversationMessageRepository,
+    ConversationRepository,
+)
 from store.redis import close_redis, init_redis
 from store.weaviate import (
     SchemaManager,
@@ -593,8 +596,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             retriever=rag_retriever,
             conflict_enabled=settings.rag.retriever.chunk_conflict_tool_enabled,
             search_kb=settings.tools.search_kb,
+            recall_round=settings.tools.recall_round,
         )
         app.state.tool_registry = tool_registry
+        # 轮次召回工具通过 app.state 共享 PG 仓库，不 import 全局单例。
+        app.state.conversation_messages = ConversationMessageRepository()
         tool_pipeline = build_tool_pipeline(tool_registry, settings.tools)
         app.state.tool_pipeline = tool_pipeline
         agent = await build_default_agent(

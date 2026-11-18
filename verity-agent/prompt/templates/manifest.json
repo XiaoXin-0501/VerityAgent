@@ -254,7 +254,7 @@
     },
     "memory.extraction.system": {
       "file": "memory/extraction.system.md",
-      "version": 1,
+      "version": 3,
       "description": "长期画像与原子事实抽取 system prompt",
       "purpose": "memory.extraction",
       "static": true,
@@ -263,7 +263,7 @@
     },
     "memory.compression.system": {
       "file": "memory/compression.system.md",
-      "version": 2,
+      "version": 5,
       "description": "会话摘要压缩 system prompt",
       "purpose": "memory.compression",
       "static": true,
@@ -272,7 +272,7 @@
     },
     "memory.fact_conflict.system": {
       "file": "memory/fact_conflict.system.md",
-      "version": 1,
+      "version": 2,
       "description": "UserFact 冲突判定 system prompt",
       "purpose": "memory.fact_conflict",
       "static": true,

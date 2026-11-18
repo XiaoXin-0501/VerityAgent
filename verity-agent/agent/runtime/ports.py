@@ -79,19 +79,32 @@ class MessagePort(Protocol):
         *,
         client_message_id: UUID,
         user_id: UUID | None = None,
+        round_id: UUID | None = None,
     ) -> StoredMessage:
         """追加用户消息并分配 seq_no。
 
         ``user_id`` 非空时，实现方应在同一事务内同步写入长期记忆暂存行
         （``user_messages``，``ready_at`` 仍为空），避免崩溃后漏抽取。
+        ``round_id`` 标识“一次提问到完整回答”的轮次，同一回合的后续
+        assistant/tool 消息必须复用同一个值。
         """
         ...
 
-    async def append_assistant(self, message: AssistantMessage) -> StoredMessage:
+    async def append_assistant(
+        self,
+        message: AssistantMessage,
+        *,
+        round_id: UUID | None = None,
+    ) -> StoredMessage:
         """追加 assistant 消息并分配 seq_no。"""
         ...
 
-    async def append_tool(self, message: ToolMessage) -> StoredMessage:
+    async def append_tool(
+        self,
+        message: ToolMessage,
+        *,
+        round_id: UUID | None = None,
+    ) -> StoredMessage:
         """追加 ToolMessage 并分配 seq_no。"""
         ...
 
@@ -205,6 +218,10 @@ class MemoryPort(Protocol):
         """返回可注入 system 的会话摘要文本；无摘要返回 None。"""
         ...
 
+    async def compression_count(self, conversation_id: UUID) -> int:
+        """返回会话摘要成功压缩次数；无摘要返回 0。"""
+        ...
+
 
 class RagPort(Protocol):
     """INJECTED RAG 只读检索端口；返回 RAG 领域结果，由 Agent 渲染成 section。"""
@@ -271,6 +288,10 @@ class AgentDependencies:
     fact_min_confidence: float | None = None
     # 回合后会话摘要压缩；为空表示不压缩
     compressor: Any = None
+    # 轮次召回工具的暴露条件：摘要压缩达到阈值后，把 permission_code
+    # 追加到本次运行的工具权限集合。permission_code 为空表示不启用。
+    recall_round_permission: str | None = None
+    recall_round_min_compressions: int = 0
     # Redis 事件/快照存储；为空表示只使用内存 ring buffer
     event_store: Any = None
     # 后台任务运行器；为空时 Agent 自己创建一个进程内 runner

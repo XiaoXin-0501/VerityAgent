@@ -7,7 +7,12 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from exception import NotFoundError, PermissionDeniedError, ValidationError
+from exception import (
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+    ValidationError,
+)
 
 from ..connection import Row
 from ..models.enums import (
@@ -416,9 +421,15 @@ class DocumentRepository(BaseRepository):
         description: str | None = None,
         parse_manifest_key: str | None = None,
         status: DocumentStatus = DocumentStatus.PENDING,
+        require_active_kb: bool = False,
         conn: AsyncConnection[Row] | None = None,
     ) -> Document:
-        """登记文档元数据；索引前状态为 pending。"""
+        """登记文档元数据；索引前状态为 pending。
+
+        ``require_active_kb=True`` 时用 ``INSERT ... SELECT ... WHERE EXISTS``
+        原子校验知识库仍为 active 且未删除；删除知识库与上传并发时，晚到的
+        登记会失败而不是留下孤儿文档。
+        """
         original_filename = require_text(original_filename, "original_filename")
         source_object_key = require_text(source_object_key, "source_object_key")
         if size_bytes < 0:
@@ -430,7 +441,14 @@ class DocumentRepository(BaseRepository):
                 INSERT INTO documents
                     (kb_id, original_filename, description, extension, size_bytes,
                      sha256, source_object_key, parse_manifest_key, uploaded_by, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                WHERE NOT %s
+                   OR EXISTS (
+                       SELECT 1 FROM knowledge_bases
+                       WHERE id = %s
+                         AND status = 'active'
+                         AND deleted_at IS NULL
+                   )
                 RETURNING *
                 """,
                 (
@@ -444,9 +462,15 @@ class DocumentRepository(BaseRepository):
                     parse_manifest_key,
                     as_uuid(uploaded_by),
                     _param(status),
+                    require_active_kb,
+                    as_uuid(kb_id),
                 ),
             )
-        assert row is not None
+        if row is None:
+            raise ConflictError(
+                "知识库已删除或停用，不能登记文档",
+                details={"kb_id": str(kb_id)},
+            )
         return Document.model_validate(row)
 
     async def get(

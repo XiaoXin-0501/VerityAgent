@@ -9,7 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 from store.weaviate import WeaviateStore
 from store.pg.models.enums import MAX_USER_FACTS
 from utils.text import normalize_whitespace
-from utils.time import utcnow
+from utils.time import parse_datetime, utcnow
 
 __all__ = ["WeaviateFactStore"]
 
@@ -59,6 +59,14 @@ class WeaviateFactStore:
                     "content": str(props.get("content") or ""),
                     "category": props.get("category"),
                     "confidence": confidence,
+                    "confirmation_count": int(
+                        props.get("confirmation_count") or 0
+                    ),
+                    "last_confirmed_at": props.get("last_confirmed_at"),
+                    "created_at": props.get("created_at"),
+                    "updated_at": props.get("updated_at"),
+                    "status": props.get("status"),
+                    "source_type": props.get("source_type"),
                     "score": float(getattr(metadata, "score", 0.0) or 0.0),
                     "source_msg_ids": props.get("source_msg_ids") or [],
                 }
@@ -104,8 +112,16 @@ class WeaviateFactStore:
                     "content": str(props.get("content") or ""),
                     "category": props.get("category"),
                     "confidence": float(props.get("confidence") or 0.0),
+                    "confirmation_count": int(
+                        props.get("confirmation_count") or 0
+                    ),
+                    "last_confirmed_at": props.get("last_confirmed_at"),
+                    "created_at": props.get("created_at"),
+                    "updated_at": props.get("updated_at"),
                     "context": props.get("context"),
                     "scope": props.get("scope"),
+                    "source_type": props.get("source_type"),
+                    "status": props.get("status"),
                     "score": float(getattr(metadata, "score", 0.0) or 0.0),
                 }
             )
@@ -147,12 +163,20 @@ class WeaviateFactStore:
         user_id: Any,
         facts: list[dict[str, Any]],
         source_msg_ids: list[str],
+        confirmed_at: str | None = None,
+        status: str = "active",
     ) -> int:
-        """按确定性 id 写入/更新 active 事实；返回处理条数。"""
+        """按确定性 id 写入/更新事实；返回处理条数。
+
+        ``confirmed_at`` 是该事实证据消息的时间；缺省使用当前时间。更新时
+        ``last_confirmed_at`` 取旧值与新证据时间的较大者。``status`` 默认
+        active；冲突判定为 unresolved 时写入 disputed。
+        """
         if not facts:
             return 0
         collection = self.store.user_facts
         now = utcnow().isoformat()
+        confirmed = confirmed_at or now
         written = 0
         for fact in facts:
             content = normalize_whitespace(str(fact.get("content") or ""), keep_newlines=False)
@@ -165,6 +189,8 @@ class WeaviateFactStore:
                 user_id=user_id,
                 source_msg_ids=source_msg_ids,
                 now=now,
+                confirmed_at=confirmed,
+                status=status,
             )
             try:
                 existing = await self.store.maybe_to_thread(
@@ -187,11 +213,17 @@ class WeaviateFactStore:
                         *source_msg_ids,
                     }
                 )
+                old_confirmed = str(old.get("last_confirmed_at") or "")
                 properties.update(
                     {
                         "revision": int(old.get("revision") or 0) + 1,
                         "source_msg_ids": merged_sources,
                         "confirmation_count": len(merged_sources),
+                        # 证据时间是消息时间，可能早于上次写入；保持单调不回退。
+                        "last_confirmed_at": _max_iso(
+                            old_confirmed,
+                            confirmed,
+                        ),
                         "created_at": old.get("created_at") or now,
                     }
                 )
@@ -266,8 +298,40 @@ class WeaviateFactStore:
         ]
         return await self.deprecate_facts(user_id=user_id, fact_ids=ids)
 
-    async def penalize_facts(
+    async def mark_disputed(
         self,
+        *,
+        user_id: Any,
+        fact_ids: list[str],
+    ) -> int:
+        """把事实标记为 disputed；用于冲突判定 unresolved 的两条事实。"""
+        collection = self.store.user_facts
+        now = utcnow().isoformat()
+        changed = 0
+        for fact_id in fact_ids:
+            try:
+                existing = await self.store.maybe_to_thread(
+                    collection.query.fetch_object_by_id,
+                    fact_id,
+                )
+                if existing is None or str(
+                    (getattr(existing, "properties", {}) or {}).get("user_id")
+                ) != str(user_id):
+                    continue
+                await self.store.maybe_to_thread(
+                    collection.data.update,
+                    uuid=fact_id,
+                    properties={
+                        "status": "disputed",
+                        "updated_at": now,
+                    },
+                )
+                changed += 1
+            except Exception:  # noqa: BLE001 - 标记失败不阻断新事实写入
+                logger.warning("事实置 disputed 失败: %s", fact_id, exc_info=True)
+        return changed
+
+    async def penalize_facts(        self,
         *,
         user_id: Any,
         fact_ids: list[str],
@@ -317,6 +381,18 @@ class WeaviateFactStore:
         return int(getattr(result, "total_count", 0) or 0)
 
 
+def _max_iso(left: str, right: str) -> str:
+    """比较两个 ISO 时间字符串，返回较晚者；格式异常时退回字符串比较。"""
+    if not left:
+        return right
+    if not right:
+        return left
+    try:
+        return max(left, right, key=parse_datetime)
+    except ValueError:
+        return max(left, right)
+
+
 def _fact_properties(
     fact: dict[str, Any],
     *,
@@ -324,6 +400,8 @@ def _fact_properties(
     user_id: Any,
     source_msg_ids: list[str],
     now: str,
+    confirmed_at: str,
+    status: str = "active",
 ) -> dict[str, Any]:
     """把抽取 fact 规范成 UserFact properties。"""
     confidence = float(fact.get("confidence") or 0.5)
@@ -339,12 +417,12 @@ def _fact_properties(
         "category": category,
         "confidence": confidence,
         "confirmation_count": len(sources),
-        "last_confirmed_at": now,
+        "last_confirmed_at": confirmed_at,
         "source_msg_ids": sources,
         "context": fact.get("context"),
         "scope": fact.get("scope"),
         "source_type": fact.get("source_type") or "user_inferred",
-        "status": "active",
+        "status": status,
         "created_at": now,
         "updated_at": now,
     }

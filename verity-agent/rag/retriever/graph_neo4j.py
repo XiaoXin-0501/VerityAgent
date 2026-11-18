@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextvars import ContextVar
 from typing import Any
 
 from rag.shared.models import GraphExpansionPolicy
 from store.neo4j import GraphStore
+from utils.log_summary import summary_block
 
 __all__ = ["Neo4jGraphExpander"]
 
@@ -57,29 +59,52 @@ class Neo4jGraphExpander:
                 "graph_max_hops=%s，v1 只执行 1 跳",
                 policy.max_hops,
             )
+        started = time.perf_counter()
+        ids = list(dict.fromkeys(str(item) for item in kb_ids))
         next_hops: list[str] = []
         seen: set[str] = set()
+        seed_kbs: set[str] = set()
+        next_hop_kbs: set[str] = set()
         try:
-            for kb_id in kb_ids:
-                for seed in seed_entities:
-                    rows = await self.store.expand_next_hops(
-                        seed=seed,
-                        kb_id=str(kb_id),
-                        allowed_relations=policy.allowed_relations,
-                        min_evidence=policy.min_evidence,
-                        limit=max(1, policy.max_next_hops),
-                        hub_as_intermediate=policy.hub_as_intermediate,
-                    )
-                    for row in rows:
-                        name = str(row.get("next_hop_name") or "").strip()
-                        if not name or name in seen:
-                            continue
-                        seen.add(name)
-                        next_hops.append(name)
-                        if len(next_hops) >= policy.max_next_hops:
-                            return next_hops
+            for seed in seed_entities:
+                # 一次查询覆盖全部授权 KB：seed/关系/下一跳都允许来自
+                # kb_ids 集合内的任意库，不再按单库串行展开。
+                rows = await self.store.expand_next_hops(
+                    seed=seed,
+                    kb_ids=ids,
+                    allowed_relations=policy.allowed_relations,
+                    min_evidence=policy.min_evidence,
+                    limit=max(1, policy.max_next_hops),
+                    hub_as_intermediate=policy.hub_as_intermediate,
+                )
+                for row in rows:
+                    name = str(row.get("next_hop_name") or "").strip()
+                    if row.get("seed_kb_id"):
+                        seed_kbs.add(str(row["seed_kb_id"]))
+                    if row.get("next_hop_kb_id"):
+                        next_hop_kbs.add(str(row["next_hop_kb_id"]))
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+                    next_hops.append(name)
+                    if len(next_hops) >= policy.max_next_hops:
+                        break
+                if len(next_hops) >= policy.max_next_hops:
+                    break
         except Exception as exc:  # noqa: BLE001 - 图失败必须降级，不抛穿
             self._last_error.set(str(exc))
             logger.warning("Neo4j 图扩展失败: %s", exc)
             return []
+        logger.info(
+            "%s",
+            summary_block(
+                "图扩展",
+                [
+                    f"seeds={len(seed_entities)} | 授权KB={len(ids)} "
+                    f"| seed 命中KB={len(seed_kbs)} "
+                    f"| 下一跳={len(next_hops)} 个（KB {len(next_hop_kbs)} 个）",
+                    f"耗时={int((time.perf_counter() - started) * 1000)}ms",
+                ],
+            ),
+        )
         return next_hops

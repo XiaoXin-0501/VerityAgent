@@ -99,7 +99,8 @@ class QualityPolicyConfig(ConfigModel):
 
     # 有文本页占比低于此值 → 拒绝或 OCR
     min_text_coverage: float = Field(default=0.3, ge=0.0, le=1.0)
-    # chunk 最小 token
+    # 质量闸门的短块阈值：低于该 token 数标记为短块（默认保留并告警）；
+    # 它与 IndexerConfig.min_chunk_tokens（切片合并下限）是不同阶段的阈值。
     min_chunk_tokens: int = Field(default=50, ge=0)
     # 表格置信度下限
     min_table_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
@@ -197,7 +198,8 @@ class IndexerConfig(ConfigModel):
     )
     # 入库是否建图；v1 默认 true（D-56）。开启后必须注入图抽取 LLM。
     graph_build_enabled: bool = True
-    # 垂直领域画像名；一个部署只接入一个领域（默认宠物医疗参考画像）。
+    # 全局默认领域画像名：知识库未绑定 ``knowledge_bases.domain_profile``
+    # 时回退到这里。一个知识库最多绑定一个画像，同一部署可同时接入多个领域。
     # 画像只提供类型、补充词白名单/黑名单和关系白名单，不直接产出图节点。
     domain_profile: str = "pet_medical"
     # 自定义领域画像目录；为空时使用内置 domains/ 目录
@@ -208,10 +210,9 @@ class IndexerConfig(ConfigModel):
     graph_keyword_blacklist: list[str] = Field(default_factory=list)
     # 每个 chunk 最多注入多少个“文本中实际出现的”补充词参考（仅用于统一标准名）
     graph_llm_reference_terms_per_chunk: int = Field(default=20, ge=0, le=100)
-    # 单次 LLM 图抽取最多包含的 chunk 数
-    graph_llm_batch_size: int = Field(default=4, ge=1, le=20)
-    # 单次请求所有 chunk 的正文总字符上限
-    graph_llm_batch_max_chars: int = Field(default=8000, ge=500)
+    # 单次 LLM 图抽取的 chunk 正文 token 预算；chunk 是最小单位，
+    # 按 token 预算装入最多 chunk，不再限制单批 chunk 数
+    graph_llm_batch_max_input_tokens: int = Field(default=6000, ge=500)
     # 同一文档并发进行的图抽取请求数
     graph_llm_concurrency: int = Field(default=4, ge=1, le=32)
     # 是否缓存 chunk 级图抽取结果（重试/重灌直接复用）
@@ -232,7 +233,7 @@ class IndexerConfig(ConfigModel):
     graph_llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     # LLM 图抽取最大输出 token；推理模型会把 reasoning 计入该上限，
     # 800 会在 JSON 尚未输出完时被截断，默认留足 4096。
-    graph_llm_max_output_tokens: int = Field(default=4096, ge=64)
+    graph_llm_max_output_tokens: int = Field(default=8192, ge=64)
     # LLM 未返回 confidence 时的兜底置信度
     graph_llm_default_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
@@ -247,7 +248,8 @@ class IndexerConfig(ConfigModel):
     chunk_size_tokens: int = Field(default=300, ge=64)
     # chunk 硬上限 token
     max_chunk_tokens: int = Field(default=600, ge=64)
-    # chunk 最小 token；低于合并/丢弃
+    # 切片阶段的最小 token：相邻碎块低于该值时优先合并；
+    # 质量闸门的短块阈值见 QualityPolicyConfig.min_chunk_tokens。
     min_chunk_tokens: int = Field(default=40, ge=0)
     # 相邻文本 chunk 重叠 token
     chunk_overlap_tokens: int = Field(default=80, ge=0)
@@ -271,6 +273,9 @@ class IndexerConfig(ConfigModel):
     index_lease_seconds: int = Field(default=300, ge=30)
     # 入库失败退避基数（秒）
     index_retry_backoff_s: float = Field(default=30.0, gt=0)
+    # 删除知识库/文档时，等待在途上传与入库任务响应取消信号的最长时间（秒）；
+    # 超时后删除照常推进，由上传的原子登记与删除状态机兜底。
+    cancel_wait_s: float = Field(default=10.0, gt=0)
 
 
 class RetrieverConfig(ConfigModel):
@@ -294,7 +299,7 @@ class RetrieverConfig(ConfigModel):
     permission_mode: str = "KB_AND_DOC"
     # 最终 top-k 确定后是否按 doc_id 批量补文档描述（D-103）
     include_doc_meta: bool = True
-    # 预留：是否注册/暴露 resolve_chunk_conflict 工具（D-88）
+    # 是否注册/暴露 resolve_chunk_conflict 工具（D-88）
     chunk_conflict_tool_enabled: bool = False
 
     # 是否启用 rerank
@@ -308,7 +313,7 @@ class RetrieverConfig(ConfigModel):
     # rerank 最低分
     rerank_min_score: float | None = None
 
-    # 预留：是否启用 query 改写（D-81，当前未接入 LLM 改写）
+    # 是否启用 query 改写（D-81）；开启后由 query_rewrite_model_id 或默认 chat 模型执行
     query_rewrite_enabled: bool = False
     # query 改写应用模型 id；为空使用 LLM 默认模型
     query_rewrite_model_id: str | None = None

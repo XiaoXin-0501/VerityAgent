@@ -6,8 +6,9 @@
 2. ``directory``：配置的领域目录，按 ``{name}.json`` 查找；
 3. 内置目录 ``rag/indexer/enrichment/domains``。
 
-外部接入新领域时，把 JSON 放进 ``domain_profile_dir`` 并改
-``IndexerConfig.domain_profile`` 即可，不需要改代码。
+外部接入新领域时，把 JSON 放进 ``domain_profile_dir``，再在管理端为知识库
+选择画像（``knowledge_bases.domain_profile``）即可，不需要改代码；未绑定的
+知识库回退到全局默认 ``IndexerConfig.domain_profile``。
 """
 
 from __future__ import annotations

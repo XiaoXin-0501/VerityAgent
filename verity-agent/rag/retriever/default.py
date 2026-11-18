@@ -69,6 +69,7 @@ from rag.shared.models import (
     RerankPolicy,
     RagContext,
 )
+from utils.log_summary import summary_block
 from utils.serialization import canonical_json
 from utils.tokens import estimate_tokens
 from utils.hashing import short_digest
@@ -691,6 +692,31 @@ class DefaultRetrievalPipeline:
             duration_ms=elapsed,
         )
         await self._write_cache(cache_key, result)
+        graph_stage = next(
+            (item for item in stages if item.stage is RetrievalStage.GRAPH),
+            None,
+        )
+        query_preview = " ".join(query.split())[:80]
+        logger.info(
+            "%s",
+            summary_block(
+                "检索",
+                [
+                    f"trace={trace_id[:8]} | mode={request.mode.value} "
+                    f"| KB={len(authorized_kbs)} | 耗时={elapsed}ms",
+                    f"候选={len(all_candidates)} -> 选中="
+                    f"{len(selected_with_citations)} | 图下一跳="
+                    f"{graph_stage.output_count if graph_stage is not None else 0} "
+                    f"| warnings={len(warnings)}",
+                    "阶段: "
+                    + " | ".join(
+                        f"{name}={value}ms"
+                        for name, value in stage_timings.items()
+                    ),
+                    f"query: {query_preview}",
+                ],
+            ),
+        )
         return result
 
     # ——————————————————— 权限 / 分析 ———————————————————

@@ -107,6 +107,7 @@ class PgMessageAdapter:
         *,
         client_message_id: UUID,
         user_id: UUID | None = None,
+        round_id: UUID | None = None,
     ) -> StoredMessage:
         """追加用户消息；``user_id`` 非空时与记忆暂存行同事务写入。"""
         content = encode_content(message)
@@ -118,6 +119,7 @@ class PgMessageAdapter:
                 message.conversation_id,
                 content,
                 client_message_id=client_message_id,
+                round_id=round_id,
             )
             return decode_stored_row(row.model_dump())
         row = await self.repository.append(
@@ -126,26 +128,39 @@ class PgMessageAdapter:
             content,
             status=PgMessageStatus(AgentMessageStatus.COMPLETED.value),
             client_message_id=client_message_id,
+            round_id=round_id,
         )
         return decode_stored_row(row.model_dump())
 
-    async def append_assistant(self, message: AssistantMessage) -> StoredMessage:
+    async def append_assistant(
+        self,
+        message: AssistantMessage,
+        *,
+        round_id: UUID | None = None,
+    ) -> StoredMessage:
         """追加 assistant 消息；framework 阶段一次写入终态。"""
         row = await self.repository.append(
             message.conversation_id,
             PgMessageRole(AgentMessageRole.ASSISTANT.value),
             encode_content(message),
             status=PgMessageStatus(message.status.value),
+            round_id=round_id,
         )
         return decode_stored_row(row.model_dump())
 
-    async def append_tool(self, message: ToolMessage) -> StoredMessage:
+    async def append_tool(
+        self,
+        message: ToolMessage,
+        *,
+        round_id: UUID | None = None,
+    ) -> StoredMessage:
         """追加 ToolMessage；ToolResult -> ToolMessage 已由 Agent 完成。"""
         row = await self.repository.append(
             message.conversation_id,
             PgMessageRole(AgentMessageRole.TOOL.value),
             encode_content(message),
             status=PgMessageStatus(message.status.value),
+            round_id=round_id,
         )
         return decode_stored_row(row.model_dump())
 

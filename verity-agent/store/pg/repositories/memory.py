@@ -384,7 +384,7 @@ class UserMessageRepository(BaseRepository):
         async with self._transaction(conn) as c:
             return await self._execute(
                 c,
-                "DELETE FROM user_messages WHERE id = ANY(%s) AND status = 'processing'",
+                "DELETE FROM user_messages WHERE id = ANY(%s::uuid[]) AND status = 'processing'",
                 (ids,),
             )
 
@@ -425,7 +425,7 @@ class UserMessageRepository(BaseRepository):
                     locked_until = NULL,
                     locked_by = NULL,
                     updated_at = now()
-                WHERE id = ANY(%s) AND status = 'processing'
+                WHERE id = ANY(%s::uuid[]) AND status = 'processing'
                 """,
                 (max_attempts, error, max_attempts, retry_backoff_s, ids),
             )
@@ -442,7 +442,7 @@ class UserMessageRepository(BaseRepository):
             return 0
         async with self._transaction(conn) as c:
             return await self._execute(
-                c, "DELETE FROM user_messages WHERE id = ANY(%s)", (ids,)
+                c, "DELETE FROM user_messages WHERE id = ANY(%s::uuid[])", (ids,)
             )
 
     async def count_ready(

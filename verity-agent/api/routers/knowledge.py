@@ -20,8 +20,10 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from api.routers.auth import require_admin, verify_password
+from api.upload_tracker import kb_uploads
 from config import settings
 from exception import (
+    ConflictError,
     NotFoundError,
     PermissionDeniedError,
     UnavailableError,
@@ -141,6 +143,20 @@ async def _require_kb(kb_id: UUID) -> KnowledgeBase:
     if kb is None:
         raise NotFoundError("知识库", kb_id)
     return kb
+
+
+async def _list_all_documents(kb_id: UUID) -> list[Document]:
+    """分页拉取知识库下全部未删除文档，供删除/统计使用。"""
+    documents = DocumentRepository()
+    rows: list[Document] = []
+    offset = 0
+    while True:
+        page = await documents.list_by_kb(kb_id, limit=200, offset=offset)
+        rows.extend(page)
+        if len(page) < 200:
+            break
+        offset += 200
+    return rows
 
 
 def _available_domain_profiles() -> list[str]:
@@ -266,10 +282,13 @@ async def delete_knowledge_base(
     request: Request,
     user: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    """删除知识库：校验管理员密码后软删并提交文档清理任务。
+    """删除知识库：校验管理员密码后停止上传、软删并提交文档清理任务。
 
-    知识库先被标记 deleting/deleted_at，立即从管理列表与检索中消失；
-    Weaviate/Neo4j/MinIO/PG 文档清理由 Indexer 后台任务完成。
+    顺序很重要：
+    1. 预检 Indexer，避免只删元数据、留下索引孤儿；
+    2. 向该库的在途上传发取消信号并等待退出，避免删除过程中又登记新文档；
+    3. 软删知识库，立即从管理列表与检索中消失；
+    4. 重新拉一次文档列表（兜底跨实例晚到登记），逐文档提交跨存储删除。
     """
     if not verify_password(payload.password, user.password_hash):
         logger.warning(
@@ -280,28 +299,54 @@ async def delete_knowledge_base(
             details={"kb_id": str(kb_id)},
         )
     await _require_kb(kb_id)
-    documents = DocumentRepository()
-    rows: list[Document] = []
-    offset = 0
-    while True:
-        page = await documents.list_by_kb(kb_id, limit=200, offset=offset)
-        rows.extend(page)
-        if len(page) < 200:
-            break
-        offset += 200
+
+    rows = await _list_all_documents(kb_id)
     pending = [
         item
         for item in rows
         if item.status not in (DocumentStatus.DELETING, DocumentStatus.DELETED)
     ]
-    # 有文档时必须先确认 Indexer 可用，避免只删元数据、留下索引孤儿。
-    indexer = _indexer(request) if pending else None
-    if pending:
-        assert indexer is not None
+    # 有文档时必须先确认 Indexer 可用，避免只删元数据、留下索引孤儿；
+    # 这个检查放在取消上传之前，避免删除最终失败却先打断了上传。
+    indexer = _indexer(request) if pending else getattr(
+        request.app.state, "indexer", None
+    )
+
+    # 停止本实例的在途上传；跨实例上传由“写后原子校验 KB 状态”兜底。
+    cancelled = kb_uploads.cancel_kb(kb_id)
+    settled = await kb_uploads.wait_settled(
+        kb_id,
+        settings.rag.indexer.cancel_wait_s,
+    )
+    if cancelled and not settled:
+        logger.warning(
+            "删除知识库时仍有上传未退出，继续删除并依赖登记校验: kb=%s active=%d",
+            kb_id,
+            kb_uploads.active_count(kb_id),
+        )
 
     kb = await KnowledgeBaseRepository().soft_delete(kb_id)
-    submitted = 0
+
+    # 软删后补拉一次：跨实例上传可能在第一步之后、软删之前完成登记。
+    seen = {item.id: item for item in pending}
+    for item in await _list_all_documents(kb_id):
+        if item.status in (DocumentStatus.DELETING, DocumentStatus.DELETED):
+            continue
+        seen.setdefault(item.id, item)
+    pending = list(seen.values())
     failed = 0
+    if pending and indexer is None:
+        # 空库删除后仍出现文档，说明跨实例上传抢在软删前登记；此时没有
+        # Indexer 只能记录，等待运维补跑清理。
+        failed = len(pending)
+        logger.error(
+            "知识库删除后仍有待清理文档但 Indexer 不可用: kb=%s docs=%d",
+            kb_id,
+            len(pending),
+        )
+        pending = []
+
+    submitted = 0
     if pending:
         assert indexer is not None
         for item in pending:
@@ -318,9 +363,11 @@ async def delete_knowledge_base(
                 )
     return {
         "knowledge_base": _kb_payload(kb),
-        "document_count": len(pending),
+        "document_count": submitted + failed,
         "submitted": submitted,
         "failed": failed,
+        "cancelled_uploads": cancelled,
+        "uploads_settled": settled,
     }
 
 
@@ -341,6 +388,28 @@ async def list_documents(
     return {"items": [_document_payload(item) for item in items], "next_cursor": None}
 
 
+def _upload_cancelled(kb_id: UUID) -> ConflictError:
+    """构造“知识库删除导致上传取消”的统一错误。"""
+    return ConflictError(
+        "知识库正在删除或已删除，上传已取消",
+        details={"kb_id": str(kb_id)},
+    )
+
+
+async def _delete_uploaded_object(
+    storage: MinioStorage,
+    kb_id: UUID,
+    doc_id: UUID,
+    extension: str,
+    object_key: str,
+) -> None:
+    """清理失败/取消的上传对象；清理失败只记日志，不覆盖原始异常。"""
+    try:
+        await storage.delete_kb_document(kb_id, doc_id, extension=extension)
+    except Exception:  # noqa: BLE001 - 清理失败不覆盖原始异常
+        logger.warning("清理上传孤儿对象失败: %s", object_key)
+
+
 @router.post("/{kb_id}/documents", status_code=201)
 async def upload_document(
     kb_id: UUID,
@@ -349,8 +418,18 @@ async def upload_document(
     description: str | None = Form(default=None),
     user: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    """上传原件到 MinIO（分块流式）、登记文档并提交后台入库。"""
+    """上传原件到 MinIO（分块流式）、登记文档并提交后台入库。
+
+    上传期间登记取消令牌；删除知识库会先置位令牌，读文件循环在分块边界
+    退出；写 MinIO 后再检查一次，并用 ``require_active_kb`` 原子登记兜底
+    跨实例的并发删除。
+    """
     kb = await _require_kb(kb_id)
+    if kb.status is not KnowledgeBaseStatus.ACTIVE:
+        raise ConflictError(
+            "知识库未启用，不能上传文档",
+            details={"kb_id": str(kb_id), "status": kb.status.value},
+        )
     indexer = _indexer(request)
 
     filename = (file.filename or "").strip()
@@ -373,15 +452,14 @@ async def upload_document(
     size = 0
     sha = ""
     storage = MinioStorage()
+    token = kb_uploads.begin(kb.id)
+    document: Document | None = None
 
-    # 关键：不把 UploadFile 一次性 read() 进内存。先按块计算 sha256/大小，
-    # 再 seek(0) 把同一个临时文件句柄交给 MinIO put_object 分片流式上传。
-    digest = sha256()
-    size = 0
-    sha = ""
-    storage = MinioStorage()
     try:
+        # 1) 分块读取：每块都响应取消信号，避免删除知识库后继续吞大文件。
         while True:
+            if token.is_cancelled:
+                raise _upload_cancelled(kb.id)
             chunk = await file.read(_UPLOAD_CHUNK_BYTES)
             if not chunk:
                 break
@@ -398,6 +476,11 @@ async def upload_document(
         if size == 0:
             raise ValidationError("文件内容为空")
         sha = digest.hexdigest()
+        if token.is_cancelled:
+            raise _upload_cancelled(kb.id)
+
+        # 2) 关键：不把 UploadFile 一次性 read() 进内存。seek(0) 后把同一个
+        # 临时文件句柄交给 MinIO put_object 分片流式上传。
         await file.seek(0)
         await storage.put_kb_source_stream(
             kb.id,
@@ -411,20 +494,15 @@ async def upload_document(
                 "sha256": sha,
             },
         )
-    finally:
-        await file.close()
+        if token.is_cancelled:
+            raise _upload_cancelled(kb.id)
+        # 跨实例删除兜底：上传完成后重新确认知识库仍可写。
+        latest = await KnowledgeBaseRepository().get(kb.id)
+        if latest is None or latest.status is not KnowledgeBaseStatus.ACTIVE:
+            raise _upload_cancelled(kb.id)
 
-    logger.info(
-        "知识库文档上传完成: kb=%s doc=%s size_bytes=%d",
-        kb.id,
-        doc_id,
-        size,
-    )
-
-    documents = DocumentRepository()
-    document: Document | None = None
-    try:
-        document = await documents.create(
+        # 3) 原子登记：KB 已在并发删除时 INSERT 不会产生行，避免孤儿文档。
+        document = await DocumentRepository().create(
             kb.id,
             filename,
             extension,
@@ -434,8 +512,26 @@ async def upload_document(
             sha256=sha,
             description=(description or "").strip() or None,
             status=DocumentStatus.PENDING,
+            require_active_kb=True,
         )
+        logger.info(
+            "知识库文档上传完成: kb=%s doc=%s size_bytes=%d",
+            kb.id,
+            doc_id,
+            size,
+        )
+    except Exception:
+        # 文档尚未登记成功：清理已写对象，避免 MinIO 孤儿文件。
+        await _delete_uploaded_object(
+            storage, kb.id, doc_id, extension, object_key
+        )
+        raise
+    finally:
+        kb_uploads.end(token)
+        await file.close()
 
+    assert document is not None
+    try:
         index_request = IndexDocumentRequest(
             kb_id=kb.id,
             doc_id=document.id,
@@ -451,22 +547,12 @@ async def upload_document(
         )
         job = await indexer.index(index_request)
     except Exception:
-        # PG 登记失败时清理刚上传的对象，避免 MinIO 孤儿文件；
-        # 入库提交失败时保留原件并置 failed，便于后续重试/删除。
-        if document is None:
-            try:
-                await storage.delete_kb_document(
-                    kb.id, doc_id, extension=extension
-                )
-            except Exception:  # noqa: BLE001 - 清理失败不覆盖原始异常
-                logger.warning("清理上传孤儿对象失败: %s", object_key)
-        else:
-            try:
-                await documents.mark_failed(document.id)
-            except Exception:  # noqa: BLE001 - 状态回写失败不覆盖原始异常
-                logger.warning("文档置 failed 失败: %s", document.id)
+        # 登记成功但入库提交失败：保留原件并置 failed，便于后续重试/删除。
+        try:
+            await DocumentRepository().mark_failed(document.id)
+        except Exception:  # noqa: BLE001 - 状态回写失败不覆盖原始异常
+            logger.warning("文档置 failed 失败: %s", document.id)
         raise
-    assert document is not None
     return {
         "document": _document_payload(document),
         "job": job.model_dump(mode="json"),

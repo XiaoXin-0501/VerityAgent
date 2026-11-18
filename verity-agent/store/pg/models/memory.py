@@ -33,6 +33,8 @@ class MemorySection(DBJsonModel):
     summary: str = ""
     updated_at: datetime = Field(default_factory=utcnow, alias="updatedAt")
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # 支撑该段的用户消息 id；由 worker 写入本批消息，供审计/回溯。
+    source_msg_ids: list[UUID] = Field(default_factory=list)
 
 
 class MemoryUserSections(DBJsonModel):

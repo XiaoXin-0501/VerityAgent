@@ -64,6 +64,8 @@ from agent.tools.models import ToolContext, ToolResult
 from config.agent import AgentConfig
 from exception import ConfigurationError
 from utils.ids import uuid7
+from utils.log_context import bind_run_context, reset_run_context
+from utils.log_summary import summary_block
 from utils.time import utcnow
 
 if TYPE_CHECKING:
@@ -101,7 +103,22 @@ class AgentLoop:
         warnings: list[AgentWarningData] = []
         message_ids: list[UUID] = []
         final_assistant: AssistantMessage | None = None
+        llm_calls = 0
+        tool_rounds = 0
         conversation_id = request.conversation_id
+        # 日志上下文：后续所有 LLM/工具/RAG 日志都带同一个 run/conv 短 id。
+        log_tokens = bind_run_context(
+            run_id=run_id,
+            conversation_id=str(conversation_id),
+        )
+        logger.info(
+            "Agent run 开始: content_chars=%d images=%d files=%d "
+            "client_message_id=%s",
+            len(request.content or ""),
+            len(request.images),
+            len(request.files),
+            request.client_message_id,
+        )
         # 心跳续租失败与用户取消分开标记：前者终态是 EXPIRED，后者是 CANCELLED。
         lease_lost = asyncio.Event()
         # 提前初始化，避免异常路径依赖 locals() 判断；这些值在 finally 中一定会用到。
@@ -196,9 +213,16 @@ class AgentLoop:
                     "conversation_id": str(conversation_id),
                 },
             )
+            # 轮次 id：从本次用户提问到最终回答的所有消息共用；摘要 topic
+            # 的 source_round_ids 与轮次召回工具都以它为锚点。
+            round_id = uuid7()
             await emit(
                 AgentEventType.TURN_STARTED,
-                {"turn_id": turn_id, "conversation_id": str(conversation_id)},
+                {
+                    "turn_id": turn_id,
+                    "round_id": str(round_id),
+                    "conversation_id": str(conversation_id),
+                },
             )
             await self._emit_hook(
                 "run.start",
@@ -229,6 +253,7 @@ class AgentLoop:
                 user_id=(
                     request.user_id if self.deps.memory_queue is not None else None
                 ),
+                round_id=round_id,
             )
             message_ids.append(user_stored.message.id)
             await self._emit_hook(
@@ -255,14 +280,18 @@ class AgentLoop:
                 history.append(user_stored)
 
             limits = self._limits(request)
+            # 轮次召回工具只在摘要压缩到阈值后暴露：工具已在注册表里，
+            # 这里按会话压缩次数动态追加权限码，不修改全局注册表。
+            effective_permissions = await self._tool_permissions(
+                request.permissions,
+                conversation_id,
+            )
             tool_selection = (
-                self.deps.tools.select(request.permissions)
+                self.deps.tools.select(effective_permissions)
                 if self.deps.tools is not None
                 else None
             )
             tools = self._tool_descriptors(tool_selection)
-            tool_rounds = 0
-            llm_calls = 0
             llm_messages = await self._assemble_context(
                 history,
                 request,
@@ -412,7 +441,10 @@ class AgentLoop:
                     conversation_id=conversation_id,
                     assistant_id=assistant_id,
                 )
-                assistant_stored = await self.deps.messages.append_assistant(assistant)
+                assistant_stored = await self.deps.messages.append_assistant(
+                    assistant,
+                    round_id=round_id,
+                )
                 message_ids.append(assistant_stored.message.id)
                 await self._emit_hook(
                     "message.appended",
@@ -537,6 +569,7 @@ class AgentLoop:
                     tool_messages = await self._execute_tools(
                         assistant,
                         request=request,
+                        permissions=effective_permissions,
                         run_id=run_id,
                         turn_id=turn_id,
                         conversation_id=conversation_id,
@@ -545,7 +578,10 @@ class AgentLoop:
                         cancel_event=cancel_event,
                     )
                     for tool_message in tool_messages:
-                        stored = await self.deps.messages.append_tool(tool_message)
+                        stored = await self.deps.messages.append_tool(
+                            tool_message,
+                            round_id=round_id,
+                        )
                         message_ids.append(stored.message.id)
                         converted = _to_llm_message(stored.message)
                         if converted is not None:
@@ -574,7 +610,7 @@ class AgentLoop:
                                     tool_selection = activate(
                                         tool_selection,
                                         call.name,
-                                        request.permissions,
+                                        effective_permissions,
                                     )
                                 except Exception:  # noqa: BLE001 - 路由失败不阻断回合
                                     logger.warning(
@@ -665,6 +701,22 @@ class AgentLoop:
                 result.model_dump(mode="json"),
             )
             await emit(AgentEventType.DONE, {"run_id": run_id, "status": "completed"})
+            logger.info(
+                "%s",
+                summary_block(
+                    "Agent 完成",
+                    [
+                        f"status=completed | 耗时={duration}ms | "
+                        f"消息={len(message_ids)} | LLM={llm_calls} 次 | "
+                        f"工具轮={tool_rounds}",
+                        f"tokens: 输入={usage.input_tokens} "
+                        f"输出={usage.output_tokens} "
+                        f"缓存输入={usage.cached_input_tokens} "
+                        f"总计={usage.total_tokens}",
+                        f"warnings={len(warnings)}",
+                    ],
+                ),
+            )
             return result
         except AgentRuntimeError as exc:
             duration = int((utcnow() - started).total_seconds() * 1000)
@@ -683,6 +735,20 @@ class AgentLoop:
                 warnings=[_public_warning(item) for item in warnings],
                 error=exc.error,
                 duration_ms=duration,
+            )
+            logger.warning(
+                "%s",
+                summary_block(
+                    "Agent 失败",
+                    [
+                        f"status={status.value} | 耗时={duration}ms | "
+                        f"error={exc.error.code.value}",
+                        f"消息={len(message_ids)} | LLM={llm_calls} 次 | "
+                        f"工具轮={tool_rounds}",
+                        f"tokens: 输入={usage.input_tokens} "
+                        f"输出={usage.output_tokens}",
+                    ],
+                ),
             )
             turn_status = (
                 TurnStatus.CANCELLED
@@ -752,6 +818,20 @@ class AgentLoop:
                 error=error,
                 duration_ms=duration,
             )
+            logger.error(
+                "%s",
+                summary_block(
+                    "Agent 失败",
+                    [
+                        f"status=failed | 耗时={duration}ms | "
+                        f"error={error.code.value}",
+                        f"消息={len(message_ids)} | LLM={llm_calls} 次 | "
+                        f"工具轮={tool_rounds}",
+                        f"tokens: 输入={usage.input_tokens} "
+                        f"输出={usage.output_tokens}",
+                    ],
+                ),
+            )
             await emit_turn_terminal(
                 TurnStatus.FAILED,
                 error=error.model_dump(mode="json"),
@@ -805,6 +885,8 @@ class AgentLoop:
                 )
             except Exception:  # noqa: BLE001 - 释放失败不能覆盖 result
                 logger.warning("释放 run 租约失败: %s", run_id, exc_info=True)
+            # 收尾日志也保留 run/conv 上下文，最后再恢复。
+            reset_run_context(log_tokens)
 
     async def _replay_existing_turn(
         self,
@@ -966,6 +1048,31 @@ class AgentLoop:
             max_llm_calls=policy.max_llm_calls_per_run,
             max_parallel_tools=policy.max_parallel_tools,
         )
+
+    async def _tool_permissions(
+        self,
+        permissions: frozenset[str],
+        conversation_id: UUID,
+    ) -> frozenset[str]:
+        """按会话摘要次数决定是否授予轮次召回工具的权限。
+
+        工具注册表启动后只读；动态能力通过“运行时追加权限码”控制暴露，
+        避免为单个会话修改全局注册表。
+        """
+        code = self.deps.recall_round_permission
+        if not code or self.deps.memory is None:
+            return permissions
+        loader = getattr(self.deps.memory, "compression_count", None)
+        if not callable(loader):
+            return permissions
+        try:
+            count = int(await loader(conversation_id))
+        except Exception:  # noqa: BLE001 - 摘要计数失败不阻断对话
+            logger.warning("读取会话压缩次数失败，跳过轮次召回工具", exc_info=True)
+            return permissions
+        if count < max(0, int(self.deps.recall_round_min_compressions)):
+            return permissions
+        return permissions | {code}
 
     @staticmethod
     def _check_runtime(
@@ -1533,6 +1640,7 @@ class AgentLoop:
         assistant: AssistantMessage,
         *,
         request: AgentRequest,
+        permissions: frozenset[str],
         run_id: str,
         turn_id: str,
         conversation_id: UUID,
@@ -1568,7 +1676,7 @@ class AgentLoop:
             )
         context = ToolContext(
             user_id=request.user_id,
-            permissions=request.permissions,
+            permissions=permissions,
             conversation_id=conversation_id,
             turn_id=turn_id,
             run_id=run_id,

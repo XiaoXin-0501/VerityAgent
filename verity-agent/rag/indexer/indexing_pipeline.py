@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -44,6 +45,8 @@ from rag.shared.models import (
 )
 from store.pg.models.knowledge import Document
 from utils.hashing import sha256_bytes
+from utils.log_context import bind_index_context, reset_index_context
+from utils.log_summary import summary_block
 from utils.serialization import json_dumps
 from utils.time import utcnow
 
@@ -134,6 +137,11 @@ class DefaultIndexingPipeline:
         self.run_in_background = run_in_background
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancelled: set[str] = set()
+        # 文档 -> 运行中的入库 job；删除文档时先取消并等待它退出，
+        # 避免入库在删除之后继续写向量/图造成孤儿数据。
+        self._index_jobs_by_doc: dict[UUID, str] = {}
+        # 正在删除的文档；禁止同一进程内再次提交入库。
+        self._deleting_docs: set[UUID] = set()
 
     # ——————————————————— 公共接口 ———————————————————
 
@@ -159,6 +167,12 @@ class DefaultIndexingPipeline:
             raise RagError(
                 RagErrorCode.INVALID_REQUEST,
                 "删除请使用 Indexer.delete(doc_id)",
+            )
+        if request.doc_id in self._deleting_docs:
+            raise RagError(
+                RagErrorCode.CONFLICT,
+                "文档正在删除，不能提交入库",
+                details={"doc_id": str(request.doc_id)},
             )
         document = await self._get_document(request.doc_id)
         if document is not None:
@@ -193,6 +207,7 @@ class DefaultIndexingPipeline:
         )
         await self.job_store.put(job)
         source = self._with_description_override(request.source, request)
+        self._index_jobs_by_doc[request.doc_id] = job.job_id
         await self._launch(
             job,
             self._run_index(job, request, source),
@@ -220,7 +235,7 @@ class DefaultIndexingPipeline:
             await self._finish_cancelled(job)
 
     async def delete(self, doc_id: UUID) -> IndexingJobView:
-        """删除文档：PG 软删 → Weaviate → Neo4j → MinIO → PG 完成。"""
+        """删除文档：先停止在途入库，再 PG 软删 → Weaviate → Neo4j → MinIO。"""
         document = await self._get_document(doc_id)
         if document is None:
             raise RagError(
@@ -228,6 +243,14 @@ class DefaultIndexingPipeline:
                 "文档不存在",
                 details={"doc_id": str(doc_id)},
             )
+        # 先取消/等待同一文档的在途入库，防止删除后入库继续写入。
+        self._deleting_docs.add(doc_id)
+        try:
+            await self._stop_index_task(doc_id)
+        except BaseException:
+            # 删除请求本身被取消时不留下永久“正在删除”标记。
+            self._deleting_docs.discard(doc_id)
+            raise
         job = IndexingJob(
             job_id=str(uuid4()),
             kb_id=document.kb_id,
@@ -268,11 +291,46 @@ class DefaultIndexingPipeline:
         if background:
             task = asyncio.create_task(coro)
             self._tasks[job.job_id] = task
-            task.add_done_callback(
-                lambda _: self._tasks.pop(job.job_id, None)
-            )
+
+            def _cleanup(_: asyncio.Task) -> None:
+                """任务结束时清理索引表；协程未启动就被取消也会走到这里。"""
+                self._tasks.pop(job.job_id, None)
+                if self._index_jobs_by_doc.get(job.doc_id) == job.job_id:
+                    self._index_jobs_by_doc.pop(job.doc_id, None)
+
+            task.add_done_callback(_cleanup)
             return
         await coro
+
+    async def _stop_index_task(self, doc_id: UUID) -> None:
+        """取消并等待同一文档的在途入库任务。
+
+        删除操作必须先让入库停在阶段边界/取消点，否则删除完成后入库仍可能
+        继续写 Weaviate/Neo4j。等待超过 ``cancel_wait_s`` 后记录告警，
+        删除继续执行；随后入库若尝试提交会被 PG 的 deleted_at 条件挡住。
+        """
+        job_id = self._index_jobs_by_doc.get(doc_id)
+        if job_id is None:
+            return
+        await self.cancel(job_id)
+        task = self._tasks.get(job_id)
+        if task is None or task.done():
+            return
+        # 直接取消 asyncio 任务，让长时间 embedding/LLM 阶段也能尽快停下。
+        task.cancel()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.1, float(self.config.cancel_wait_s))
+        # 轮询 done 而不是 await 任务：子任务取消时的 CancelledError 不应被
+        # 误判为删除请求本身被取消；父任务真正取消时 sleep 会正常抛出。
+        while not task.done():
+            if loop.time() >= deadline:
+                logger.warning(
+                    "等待入库任务退出超时，继续删除: doc=%s job=%s",
+                    doc_id,
+                    job_id,
+                )
+                break
+            await asyncio.sleep(0.05)
 
     async def _run_index(
         self,
@@ -281,8 +339,12 @@ class DefaultIndexingPipeline:
         source: DocumentSource,
     ) -> None:
         """入库任务主流程；所有异常收敛为 FAILED/DEAD。"""
-        job = await self._begin(job)
+        log_tokens = bind_index_context(
+            doc_id=str(job.doc_id),
+            kb_id=str(job.kb_id),
+        )
         try:
+            job = await self._begin(job)
             job = await self._index(job, request, source)
         except _Cancelled:
             await self._finish_cancelled(job)
@@ -292,12 +354,19 @@ class DefaultIndexingPipeline:
         except Exception as exc:  # noqa: BLE001 - 任务边界统一收敛
             await self._finish_failed(job, exc)
         finally:
+            reset_index_context(log_tokens)
             self._tasks.pop(job.job_id, None)
+            if self._index_jobs_by_doc.get(job.doc_id) == job.job_id:
+                self._index_jobs_by_doc.pop(job.doc_id, None)
 
     async def _run_delete(self, job: IndexingJob) -> None:
         """删除任务主流程；失败时保留 deleting 状态供补偿重试。"""
-        job = await self._begin(job)
+        log_tokens = bind_index_context(
+            doc_id=str(job.doc_id),
+            kb_id=str(job.kb_id),
+        )
         try:
+            job = await self._begin(job)
             # 删除阶段同样会写 index_progress；先拿租约，满足 worker 校验。
             acquire = (
                 getattr(self.repository, "acquire_index_lease", None)
@@ -328,7 +397,9 @@ class DefaultIndexingPipeline:
                 ended_at=utcnow(),
             )
         finally:
+            reset_index_context(log_tokens)
             self._tasks.pop(job.job_id, None)
+            self._deleting_docs.discard(job.doc_id)
 
     async def _begin(self, job: IndexingJob) -> IndexingJob:
         """置 RUNNING 并累计尝试次数。"""
@@ -348,6 +419,17 @@ class DefaultIndexingPipeline:
         source: DocumentSource,
     ) -> IndexingJob:
         """执行入库的所有阶段。"""
+        started = time.perf_counter()
+        last = started
+        timings: dict[str, int] = {}
+
+        def mark(name: str) -> None:
+            """记录当前阶段耗时，供入库摘要日志分析。"""
+            nonlocal last
+            now = time.perf_counter()
+            timings[name] = int((now - last) * 1000)
+            last = now
+
         # 1) FETCHING：读取原件并校验内容哈希。
         job = await self._set_stage(job, IndexingStage.FETCHING)
         data = await self.source_store.read_bytes(source)
@@ -364,6 +446,7 @@ class DefaultIndexingPipeline:
                 IndexingWarningCode.PARSE_FALLBACK,
                 "源文件 sha256 与声明不一致，以实际内容为准",
             )
+        mark("fetch")
 
         # 2) PARSING：解析 + 切片 + 描述提取由 TextIngestionPipeline 完成。
         job = await self._set_stage(job, IndexingStage.PARSING)
@@ -374,6 +457,7 @@ class DefaultIndexingPipeline:
             kb_id=request.kb_id,
             parser_hint=request.parser_hint,
         )
+        mark("parse_chunk")
         if not result.chunks:
             raise RagError(
                 RagErrorCode.INVALID_REQUEST,
@@ -410,6 +494,7 @@ class DefaultIndexingPipeline:
             manifest,
             result.parsed.blocks,
         )
+        mark("manifest")
 
         # 本次写入的版本号与落库模型；后续图/向量阶段复用同一份 Chunk。
         index_version = job.index_version_before + 1
@@ -442,11 +527,13 @@ class DefaultIndexingPipeline:
                 IndexingWarningCode.GRAPH_SKIPPED,
                 "建图开关关闭，跳过 Neo4j 写入（仅测试/开发使用）",
             )
+        mark("graph_extract")
 
         # 5) EMBEDDING：使用 embedding_text，不落库正文。
         job = await self._set_stage(job, IndexingStage.EMBEDDING)
         vectors = await self.embedding.embed_chunks(result.chunks)
         self._check_dimensions(vectors)
+        mark("embedding")
 
         # 6) VECTOR_UPSERT：
         # Weaviate 批量 insert 对已存在 uuid 会报错，因此先删除“同 id 的旧版本”，
@@ -461,6 +548,7 @@ class DefaultIndexingPipeline:
         stale_ids = sorted(existing_ids - new_ids)
         if stale_ids:
             await self.vector_store.delete_chunks(stale_ids)
+        mark("vector_upsert")
 
         # 7) GRAPH_UPSERT：图写入失败不回滚 Weaviate（D-56/§8.4）。
         job = await self._set_stage(job, IndexingStage.GRAPH_UPSERT)
@@ -485,6 +573,7 @@ class DefaultIndexingPipeline:
                     str(chunk.kb_id),
                     extraction.relations,
                 )
+        mark("graph_upsert")
 
         # 8) COMMITTING：描述 + PG 状态 + 版本。
         job = await self._set_stage(job, IndexingStage.COMMITTING)
@@ -513,6 +602,30 @@ class DefaultIndexingPipeline:
             status=IndexingStatus.SUCCEEDED,
             index_version_after=index_version,
             ended_at=utcnow(),
+        )
+        mark("commit")
+        graph_entities = sum(len(item.keywords) for item in extractions.values())
+        graph_relations = sum(
+            len(item.relations) for item in extractions.values()
+        )
+        logger.info(
+            "%s",
+            summary_block(
+                "入库完成",
+                [
+                    f"doc={request.doc_id} | kb={request.kb_id} "
+                    f"| 大小={len(data)}B | 页={counts.pages} "
+                    f"| 块={counts.blocks}",
+                    f"chunks={len(chunks)} | tokens={counts.tokens} "
+                    f"| 版本={index_version} "
+                    f"| 图实体={graph_entities} 关系={graph_relations}",
+                    "阶段: "
+                    + " | ".join(
+                        f"{name}={value}ms" for name, value in timings.items()
+                    ),
+                    f"总耗时={int((time.perf_counter() - started) * 1000)}ms",
+                ],
+            ),
         )
         return job
 
