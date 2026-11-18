@@ -52,6 +52,11 @@ class HybridRecaller(Protocol):
         top_k_vector: int,
         filters=None,
         mode: str = "hybrid",
+        explain: bool = False,
     ) -> HybridRecallResult:
-        """返回 BM25 与向量两路候选；权限过滤必须在召回前完成。"""
+        """返回 BM25 与向量两路候选；权限过滤必须在召回前完成。
+
+        ``explain=True`` 时 BM25 额外请求 explainScore，用于规则路径下的
+        seed 实体提取；默认关闭，避免不必要的响应体积。
+        """
         ...

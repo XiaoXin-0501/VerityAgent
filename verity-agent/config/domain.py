@@ -5,10 +5,17 @@
 
 职责边界（重要）：
 
-- 画像**不是**图构建专属资产：图抽取、检索期 seed 实体、Agent 领域目录/
-  system prompt、管理端知识库绑定都会消费它；
-- 因此模型/加载保留在 ``config``，各消费方只依赖配置资产；
-  真正的图抽取实现仍在 ``rag/indexer/enrichment/``，不把配置反向塞进 RAG 内部。
+- **画像只做辅助**：提供类型体系、补充词/别名、黑名单、关系白名单与提示词；
+  **不是实体枚举，也不负责生成检索 seed**；实体必须由 LLM 抽取或由
+  BM25 explainScore 从实际召回中提取；
+- **主画像**（``master`` 为空）只给全局使用：Agent system prompt、
+  查询规划领域目录、未绑定 KB 的兜底；不要求绑定到具体知识库；
+- **子画像**（``master`` 非空）绑定知识库，用于具体知识库的图构建、
+  检索期关系白名单与实体归一；
+- 画像**不是**图构建专属资产：图抽取、检索 seed 归一、Agent 领域目录/
+  system prompt、管理端知识库绑定都会消费它；因此模型/加载保留在
+  ``config``，各消费方只依赖配置资产，真正的图抽取实现仍在
+  ``rag/indexer/enrichment/``。
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from pydantic import (
 )
 
 from exception import RagError, RagErrorCode
+from utils.text import normalize_whitespace
 
 __all__ = [
     "BUILTIN_DOMAIN_DIR",
@@ -48,13 +56,10 @@ __all__ = [
 
 # ——————————————————— 画像模型 ———————————————————
 
-# 别名中的水平空白统一压成一个空格，避免 “阿司匹林 片” 匹配不到 “阿司匹林片”。
-_WHITESPACE = re.compile(r"\s+")
-
-
 def _key(value: str) -> str:
     """匹配键：去首尾空白、压缩空白，英文统一小写。"""
-    return _WHITESPACE.sub(" ", (value or "").strip()).lower()
+    # 水平空白统一压成一个空格，避免 “阿司匹林 片” 匹配不到 “阿司匹林片”。
+    return normalize_whitespace((value or "").strip(), keep_newlines=False).lower()
 
 
 def _alias_pattern(alias: str) -> str:
@@ -494,8 +499,9 @@ def load_master_profile(
     时也能拿到“宠物医疗”这一层的主题。
     """
     base_dir = _resolve_base_dir(directory)
+    profile_path = resolve_domain_profile_path(name, path=path, directory=base_dir)
     payload = _load_payload_with_master(
-        resolve_domain_profile_path(name, path=path, directory=base_dir),
+        profile_path,
         directory=base_dir,
         seen=(),
     )
@@ -504,11 +510,7 @@ def load_master_profile(
         return _validate(payload, source=None, name=name)
     master_path = _resolve_master_path(
         master_name,
-        current_file=resolve_domain_profile_path(
-            name,
-            path=path,
-            directory=base_dir,
-        ),
+        current_file=profile_path,
         directory=base_dir,
     )
     master_payload = _load_payload_with_master(

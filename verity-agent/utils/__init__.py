@@ -36,8 +36,10 @@ from .sampling import stable_sample
 from .serialization import (
     canonical_json,
     deep_merge,
+    extract_json_object,
     json_dumps,
     json_loads,
+    parse_json_object,
     to_jsonable,
     without_none,
 )
@@ -49,6 +51,7 @@ from .text import (
     is_meaningful_filename,
     join_wrapped_lines,
     mask_secret,
+    normalize_query,
     normalize_whitespace,
     smart_join,
     split_sentences,
@@ -94,6 +97,8 @@ __all__ = [
     "to_jsonable",
     "json_dumps",
     "json_loads",
+    "extract_json_object",
+    "parse_json_object",
     "canonical_json",
     "deep_merge",
     "without_none",
@@ -111,6 +116,7 @@ __all__ = [
     "truncate_to_tokens",
     "split_by_tokens",
     # text
+    "normalize_query",
     "normalize_whitespace",
     "strip_control_chars",
     "truncate",

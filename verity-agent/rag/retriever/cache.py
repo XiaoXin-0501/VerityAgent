@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any
 
-from store.redis.cache import CacheKey, CacheScope
+from store.redis.cache import CacheKey, CachePort, CacheScope
 from utils.hashing import sha256_text, short_digest
 from utils.serialization import canonical_json
 
@@ -19,22 +19,8 @@ __all__ = [
 ]
 
 
-class RetrievalCache(Protocol):
-    """检索缓存最小协议；与入库缓存结构一致，便于测试注入 fake。"""
-
-    async def get(self, key: CacheKey) -> Any | None:
-        """按结构化 key 读取；miss/失败返回 None。"""
-        ...
-
-    async def set(
-        self,
-        key: CacheKey,
-        value: Any,
-        *,
-        ttl_s: int | None = None,
-    ) -> bool:
-        """写入缓存；失败返回 False，不抛穿。"""
-        ...
+# 检索缓存与入库缓存使用同一个最小协议；保留旧名字兼容调用方。
+RetrievalCache = CachePort
 
 
 def query_digest(query: str) -> str:

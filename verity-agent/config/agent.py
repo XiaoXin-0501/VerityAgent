@@ -23,7 +23,9 @@ class QueryPlanConfig(ConfigModel):
     历史和垂直领域目录，输出改写 query、RAG 召回意图与用户意图。
     """
 
-    # 是否启用 query 规划；关闭时直接使用用户原话，不做改写/意图识别
+    # 是否启用 query 规划；关闭时不做意图识别/改写/RAG 决策。
+    # 注意：INJECTED RAG 依赖该决策，关闭后不会自动注入检索上下文；
+    # 工具模式（LLM 主动调用 search_kb）仍正常工作。
     enabled: bool = True
     # 规则无法判断时是否调用 LLM 兜底
     use_llm: bool = True

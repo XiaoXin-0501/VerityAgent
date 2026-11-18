@@ -37,6 +37,7 @@ from agent.llm import (
     TextPart,
     ThinkingPart,
     ToolChoice,
+    merge_usage,
 )
 from agent.message.enum import MessageStatus
 from agent.message.models import (
@@ -355,7 +356,7 @@ class AgentLoop:
             # 规划阶段如果调用了 LLM，计一次调用与 token；规则结果不计。
             if plan_result is not None and plan_result.model_id is not None:
                 llm_calls += 1
-                usage = _add_usage(usage, plan_result.usage)
+                usage = merge_usage(usage, plan_result.usage)
             # 工具调用历史只用于反思输入与流程日志；不进入 LLM 上下文。
             tool_history: list[dict[str, Any]] = []
             # 反思判定止损后，下一轮主 LLM 不再暴露工具并强制最终回答。
@@ -380,7 +381,7 @@ class AgentLoop:
                         flow=flow,
                     )
                     if reflection is not None:
-                        usage = _add_usage(usage, reflection.usage)
+                        usage = merge_usage(usage, reflection.usage)
                         decision = reflection.decision
                         if decision.action is ReflectionAction.ADJUST:
                             guidance = decision.guidance or decision.reason
@@ -619,7 +620,7 @@ class AgentLoop:
                 assistant_llm = _to_llm_message(assistant)
                 if assistant_llm is not None:
                     llm_messages.append(assistant_llm)
-                usage = _add_usage(usage, response.usage)
+                usage = merge_usage(usage, response.usage)
                 if flow is not None:
                     flow.event(
                         "llm.response",
@@ -1366,6 +1367,7 @@ class AgentLoop:
                 original_query=request.content,
                 rewritten_query=query_plan.rewritten_query,
                 rag_intent=query_plan.rag_intent_label,
+                entities=list(query_plan.entities),
                 kb_ids=kb_ids,
                 user_id=request.user_id,
                 permissions=request.permissions,
@@ -1381,6 +1383,7 @@ class AgentLoop:
                     original_query=request.content,
                     rewritten_query=query_plan.rewritten_query,
                     rag_intent=query_plan.rag_intent_label,
+                    entities=list(query_plan.entities),
                 )
             return None
         chunks = list(getattr(result, "chunks", []) or [])
@@ -1391,6 +1394,7 @@ class AgentLoop:
                 original_query=request.content,
                 rewritten_query=query_plan.rewritten_query,
                 rag_intent=query_plan.rag_intent_label,
+                entities=list(query_plan.entities),
                 kb_ids=[str(item) for item in kb_ids],
                 chunk_count=len(chunks),
                 retrieved_ms=getattr(result, "duration_ms", None),
@@ -1522,6 +1526,7 @@ class AgentLoop:
                 "rewritten_query": query_plan.rewritten_query,
                 "rag_intent": query_plan.rag_intent_label,
                 "user_intent": query_plan.user_intent,
+                "entities": list(query_plan.entities),
                 "source": query_plan.source.value,
                 "confidence": query_plan.confidence,
                 "reason": query_plan.reason,
@@ -1542,6 +1547,7 @@ class AgentLoop:
                 rewritten_query=query_plan.rewritten_query,
                 rag_intent=query_plan.rag_intent_label,
                 user_intent=query_plan.user_intent,
+                entities=list(query_plan.entities),
                 source=query_plan.source.value,
                 confidence=query_plan.confidence,
                 reason=query_plan.reason,
@@ -2427,17 +2433,6 @@ def _tool_error(call: ToolCall):
         code=ToolErrorCode.UPSTREAM_ERROR,
         message="工具执行失败",
         details={"tool": call.name},
-    )
-
-
-def _add_usage(left: LLMUsage, right: LLMUsage) -> LLMUsage:
-    """累加两次 LLM 用量。"""
-    return LLMUsage(
-        input_tokens=left.input_tokens + right.input_tokens,
-        output_tokens=left.output_tokens + right.output_tokens,
-        total_tokens=left.total_tokens + right.total_tokens,
-        cached_input_tokens=left.cached_input_tokens + right.cached_input_tokens,
-        reasoning_tokens=left.reasoning_tokens + right.reasoning_tokens,
     )
 
 

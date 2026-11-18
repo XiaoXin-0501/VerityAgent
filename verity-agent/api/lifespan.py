@@ -169,7 +169,9 @@ async def _build_rag_retriever(
         cfg.retriever,
         embedding_model=embedding_model,
         rerank_model=rerank_model,
-        domain_profile_name=cfg.indexer.domain_profile,
+        # 显式加载，确保自定义 domain_profile_dir/path 生效；仅传名字会让
+        # rag.bootstrap 回退内置目录。
+        domain_profile=_load_domain_profile_by_name(cfg.indexer.domain_profile),
         embedding_dimensions=cfg.indexer.embedding_dimensions,
         embedding_version=cfg.indexer.embedding_version,
         max_query_chars=cfg.max_query_chars,

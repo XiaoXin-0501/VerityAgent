@@ -14,25 +14,20 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Iterable
 
-from utils.text import normalize_whitespace
+from utils.text import normalize_query
 
 from .models import QueryPlan, QueryPlanSource, RagRecallIntent
 
 __all__ = [
     "RuleResult",
     "build_rule_plan",
-    "estimate_language",
     "fallback_needs_rag",
     "normalize_query",
     "evaluate_rules",
 ]
-
-_CJK = re.compile(r"[一-鿿]")
-_LATIN = re.compile(r"[A-Za-z]")
 
 # 明确不需要知识库的场景：寒暄、闲聊、能力/身份、个人记忆、纯计算。
 _NO_RAG_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -109,23 +104,6 @@ class RuleResult:
     def decided(self) -> bool:
         """规则是否已给出明确结论。"""
         return self.needs_rag is not None
-
-
-def normalize_query(query: str) -> str:
-    """全半角归一、空白压缩；保留原始大小写用于实体匹配。"""
-    value = unicodedata.normalize("NFKC", query or "")
-    return normalize_whitespace(value, keep_newlines=False)
-
-
-def estimate_language(text: str) -> str | None:
-    """粗粒度语言判断：zh / en；混合或无法判断返回 None。"""
-    cjk = len(_CJK.findall(text))
-    latin = len(_LATIN.findall(text))
-    if cjk and cjk >= latin:
-        return "zh"
-    if latin and latin > cjk:
-        return "en"
-    return None
 
 
 def evaluate_rules(

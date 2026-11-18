@@ -39,16 +39,6 @@ class RagRecallIntent(StrEnum):
     SUMMARIZE = "SUMMARIZE"
     HOWTO = "HOWTO"
 
-    @property
-    def title(self) -> str:
-        """给 rerank/日志使用的中文短标签。"""
-        return {
-            self.LOOKUP: "查询事实",
-            self.COMPARE: "比较对象",
-            self.SUMMARIZE: "总结内容",
-            self.HOWTO: "步骤方法",
-        }[self]
-
 
 class QueryPlanSource(StrEnum):
     """规划结果来源。"""
@@ -72,6 +62,9 @@ class QueryPlan(_Model):
     rag_intent: RagRecallIntent | None = None
     # 用户真正想完成的事；用于长期事实 BM25 召回
     user_intent: str = ""
+    # 需要 RAG 时由图/实体链接使用的实体；规划器只做“顺手提取”，
+    # 不要求穷举领域，也不依赖领域画像白名单。
+    entities: list[str] = Field(default_factory=list)
     source: QueryPlanSource = QueryPlanSource.RULE
     # 规划置信度；规则命中/LLM 解析成功时为高值，兜底为低值
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)

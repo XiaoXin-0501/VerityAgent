@@ -19,9 +19,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
-from store.redis import CacheKey, CacheScope, RedisCache
+from store.redis import CacheKey, CachePort, CacheScope, RedisCache
 from utils.hashing import sha256_text, short_digest
 from utils.serialization import canonical_json
 
@@ -38,22 +38,8 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-class ChunkCache(Protocol):
-    """RAG 入库缓存的最小协议；Redis/内存/测试 fake 都实现这两个方法。"""
-
-    async def get(self, key: CacheKey) -> Any | None:
-        """按结构化 key 读取缓存值；miss/失败返回 None。"""
-        ...
-
-    async def set(
-        self,
-        key: CacheKey,
-        value: Any,
-        *,
-        ttl_s: int | None = None,
-    ) -> bool:
-        """写入缓存值；失败返回 False，不抛穿。"""
-        ...
+# 入库缓存与检索缓存使用同一个最小协议；保留旧名字兼容调用方。
+ChunkCache = CachePort
 
 
 def embedding_cache_key(

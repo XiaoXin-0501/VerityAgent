@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from .cjk import is_cjk_char
 
 __all__ = [
     "normalize_whitespace",
+    "normalize_query",
     "strip_control_chars",
     "truncate",
     "ensure_prefix",
@@ -45,6 +47,15 @@ def normalize_whitespace(text: str, *, keep_newlines: bool = True) -> str:
     else:
         value = value.replace("\n", " ")
     return value.strip()
+
+
+def normalize_query(query: str) -> str:
+    """查询文本归一：NFKC 全半角归一，水平空白压成一个空格。
+
+    只做检索无关的通用清洗；实体大小写/原始写法保留，归一后不改变语义。
+    """
+    value = unicodedata.normalize("NFKC", query or "")
+    return normalize_whitespace(value, keep_newlines=False)
 
 
 def strip_control_chars(text: str) -> str:

@@ -15,7 +15,6 @@ from .planner import QueryPlanner
 from .rules import (
     RuleResult,
     build_rule_plan,
-    estimate_language,
     evaluate_rules,
     fallback_needs_rag,
     normalize_query,
@@ -30,7 +29,6 @@ __all__ = [
     "RagRecallIntent",
     "RuleResult",
     "build_rule_plan",
-    "estimate_language",
     "evaluate_rules",
     "fallback_needs_rag",
     "normalize_query",

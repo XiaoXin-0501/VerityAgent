@@ -27,6 +27,8 @@ __all__ = [
     "to_jsonable",
     "json_dumps",
     "json_loads",
+    "extract_json_object",
+    "parse_json_object",
     "canonical_json",
     "deep_merge",
     "without_none",
@@ -69,6 +71,38 @@ def json_dumps(value: Any, *, sort_keys: bool = False) -> str:
 def json_loads(value: str | bytes | bytearray) -> Any:
     """解析 JSON 文本/字节；异常直接抛给调用方。"""
     return json.loads(value)
+
+
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    """从模型输出中截取最外层 JSON 对象；失败返回 None。
+
+    容忍 Markdown 代码围栏、前后说明文本；只接受 object，不接受数组/标量。
+    """
+    value = (text or "").strip()
+    if value.startswith("```"):
+        lines = value.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        value = "\n".join(lines).strip()
+    start = value.find("{")
+    end = value.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(value[start : end + 1])
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def parse_json_object(text: str) -> dict[str, Any]:
+    """解析模型输出为 JSON 对象；失败抛 ``ValueError``。"""
+    payload = extract_json_object(text)
+    if payload is None:
+        raise ValueError("模型输出不包含合法 JSON 对象")
+    return payload
 
 
 def canonical_json(value: Any) -> str:

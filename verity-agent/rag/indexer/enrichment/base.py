@@ -14,6 +14,7 @@ from typing import Protocol
 
 from config.rag import IndexerConfig
 from rag.shared.enums import BlockType
+from rag.shared.noise import is_noise_term
 from rag.shared.models import Chunk, GraphRelation, ChunkGraphExtraction
 
 __all__ = [
@@ -108,16 +109,6 @@ GENERIC_KEYWORD_BLACKLIST = frozenset(
     }
 )
 
-# 图/表编号、章节编号、页码等版式标签不是领域概念。
-_LABEL_RE = re.compile(
-    r"^(?:图|表|figure|table|fig\.?|tab\.?)\s*\d+(?:[-.]\d+)*$",
-    re.IGNORECASE,
-)
-_NUMERIC_RE = re.compile(r"^[\d\W_]+$", re.UNICODE)
-# 8 位以上纯十六进制串（uuid 片段/内容哈希）不作为关键词。
-_HASH_RE = re.compile(r"^[0-9a-f]{8,}$", re.IGNORECASE)
-
-
 class GraphExtractor(Protocol):
     """图抽取协议；IndexingPipeline 只依赖这一层。"""
 
@@ -163,10 +154,8 @@ def is_valid_keyword(
     key = (value or "").strip().lower()
     if not key or key in blacklist:
         return False
-    if _NUMERIC_RE.match(value) or _LABEL_RE.match(value):
-        return False
-    # URL/邮箱/长哈希不是可检索概念。
-    if "@" in value or "://" in value or _HASH_RE.match(value):
+    # 纯数值/版式标签/URL/邮箱/长哈希不是可检索概念。
+    if is_noise_term(value):
         return False
     # 中文单字信息量低；英文/技术词允许 2 个字符（如 AI、DB）。
     if len(value) < 2:

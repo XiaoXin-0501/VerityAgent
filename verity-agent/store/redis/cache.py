@@ -10,7 +10,7 @@ import random
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +23,7 @@ from .connection import RedisConnectionManager, get_redis
 from .keys import RedisKeyPrefix, make_key
 
 __all__ = [
+    "CachePort",
     "CacheScope",
     "CachePolicy",
     "CacheKey",
@@ -31,6 +32,24 @@ __all__ = [
     "RedisCache",
     "make_cache_key",
 ]
+
+
+class CachePort(Protocol):
+    """最小缓存协议；Redis / 内存 / 测试 fake 都实现 get/set。"""
+
+    async def get(self, key: "CacheKey") -> Any | None:
+        """按结构化 key 读取；miss/失败返回 None。"""
+        ...
+
+    async def set(
+        self,
+        key: "CacheKey",
+        value: Any,
+        *,
+        ttl_s: int | None = None,
+    ) -> bool:
+        """写入缓存；失败返回 False，不抛穿。"""
+        ...
 
 
 class CacheScope(StrEnum):

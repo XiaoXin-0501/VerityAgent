@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from prompt import PromptId, PromptRegistry, get_default_prompt_registry
+from provider.llm.helpers import response_text
 from store.redis import CacheKey
 from utils.text import truncate
 
@@ -193,7 +194,7 @@ class ChatTableDescriber:
             response = await self.chat_model.complete(
                 self._build_request(request)
             )
-            text = _response_text(response).strip()
+            text = response_text(response).strip()
         except Exception as exc:  # noqa: BLE001 - LLM 失败要降级而非中断
             logger.warning("表格语义描述生成失败: %s", exc)
             return None
@@ -319,7 +320,7 @@ class ChatCodeDescriber:
             response = await self.chat_model.complete(
                 self._build_request(request)
             )
-            text = _response_text(response).strip()
+            text = response_text(response).strip()
         except Exception as exc:  # noqa: BLE001 - LLM 失败要降级而非中断
             logger.warning("代码语义描述生成失败: %s", exc)
             return None
@@ -385,14 +386,3 @@ class ChatCodeDescriber:
             ),
             stream=False,
         )
-
-
-def _response_text(response: Any) -> str:
-    """从 ChatModelResponse 取文本 part；忽略 thinking/tool parts。"""
-    from provider.llm.types import ModelTextPart
-
-    return "".join(
-        part.text
-        for part in response.message.content
-        if isinstance(part, ModelTextPart)
-    )

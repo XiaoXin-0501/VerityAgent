@@ -13,6 +13,8 @@
 - 权限、参数错误直接抛 ``RagError``；rerank/图/邻居等可降级阶段只记
   ``RetrievalWarning``，不静默失败；
 - 文档状态过滤在 PG 中批量完成，避免重切片/删除期间旧 chunk 混入结果；
+- 图 seed 来自 Agent 查询规划实体；规则路径由主 BM25 explainScore 提取，
+  领域画像只做标准名归一/黑名单，不枚举实体；
 - 最终 `documents` 按 unique doc_id 批量补文档描述（D-103），不把描述塞进
   每个 chunk；
 - 检索结果缓存 key 带权限摘要、索引版本、模型与过滤条件，避免跨权限/
@@ -45,8 +47,8 @@ from rag.retriever.graph import GraphExpander
 from rag.retriever.hybrid import HybridRecallResult, HybridRecaller
 from rag.retriever.metadata import RetrievalMetadataStore
 from rag.retriever.neighbor import NeighborExpander
-from rag.retriever.query import estimate_language, normalize_query
 from rag.retriever.rerank import Reranker
+from rag.retriever.seed import canonicalize_entities, extract_seeds_from_bm25
 from rag.shared.enums import (
     RAGMode,
     RetrievalStage,
@@ -76,6 +78,7 @@ from rag.shared.models import (
     RagContext,
 )
 from utils.serialization import canonical_json
+from utils.text import detect_language, normalize_query
 from utils.tokens import estimate_tokens
 from utils.hashing import short_digest
 from utils.time import utcnow
@@ -142,6 +145,18 @@ def _chunk_tokens(chunk: RetrievedChunk) -> int:
     if isinstance(value, int) and value >= 0:
         return value
     return estimate_tokens(chunk.content)
+
+
+def _strip_bm25_explain(chunk: RetrievedChunk) -> RetrievedChunk:
+    """移除仅用于 seed 提取的 explainScore，保留其它 metadata。"""
+    if "bm25_explain" not in chunk.metadata:
+        return chunk
+    metadata = {
+        key: value
+        for key, value in chunk.metadata.items()
+        if key != "bm25_explain"
+    }
+    return chunk.model_copy(update={"metadata": metadata})
 
 
 def _dedupe_ranking(chunks: Iterable[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -366,6 +381,7 @@ class DefaultRetrievalPipeline:
             metadata={
                 "language": analysis.language,
                 "entities": analysis.entities,
+                "seed_source": analysis.seed_source,
                 "keywords": analysis.keywords,
             },
         )
@@ -416,14 +432,50 @@ class DefaultRetrievalPipeline:
         #    主 query 失败仍抛错。意图/改写已由 Agent 查询规划完成，
         #    RAG 不再调用 LLM。
         recall_started = time.perf_counter()
+        # 图扩展开启且规划器没有给实体时，主 BM25 顺带请求 explainScore；
+        # seed 从实际召回词中提取，不依赖领域画像枚举。
+        need_bm25_seed = graph_policy.enabled and not analysis.entities
         recalled = await self._recall_variants(
             [normalized, *analysis.variants],
             request=request,
             authorized_kbs=authorized_kbs,
             hybrid=hybrid,
             warnings=warnings,
+            explain=need_bm25_seed,
         )
         warnings.extend(recalled.issues)
+        if need_bm25_seed:
+            seed_started = time.perf_counter()
+            extraction = extract_seeds_from_bm25(
+                recalled.bm25,
+                # 变体 query 也可能贡献 BM25 词；seed 过滤同时接受原 query
+                # 与改写 query，避免改写补全的实体被误过滤。
+                query=" ".join([normalized, *analysis.variants]),
+                profiles=domain_profiles,
+            )
+            analysis = analysis.model_copy(
+                update={
+                    "entities": extraction.entities,
+                    "seed_source": (
+                        "bm25_explain" if extraction.entities else "none"
+                    ),
+                }
+            )
+            _stage(
+                stages,
+                RetrievalStage.ANALYZE,
+                seed_started,
+                input_count=len(recalled.bm25),
+                output_count=len(extraction.entities),
+                metadata={
+                    "seed_source": analysis.seed_source,
+                    "explain_chunks": extraction.explain_chunks,
+                    "candidates": extraction.candidates,
+                },
+            )
+            # explainScore 只服务 seed 提取；从候选中移除，避免进入融合结果/
+            # 检索缓存，造成不必要的数据膨胀。
+            recalled.bm25 = [_strip_bm25_explain(item) for item in recalled.bm25]
         for stage_name, stage in (
             ("BM25", RetrievalStage.BM25),
             ("VECTOR", RetrievalStage.VECTOR),
@@ -830,19 +882,15 @@ class DefaultRetrievalPipeline:
         domain_profiles: list[DomainProfile],
     ) -> QueryAnalysis:
         """规范化 query 后的轻量分析：语言、关键词、图 seed 实体。"""
-        entities: list[str] = []
-        for profile in domain_profiles:
-            for match in profile.match(normalized):
-                if match.name not in entities:
-                    entities.append(match.name)
+        # 领域画像不枚举实体，也不负责生成 seed；只把规划器/调用方给出的
+        # 实体归一为标准名。规则路径的 seed 由主 BM25 explainScore 提取。
+        requested: list[str] = list(request.entities)
         extra_entities = request.metadata.get("seed_entities") or request.metadata.get(
             "entities"
         )
         if isinstance(extra_entities, (list, tuple, set)):
-            for item in extra_entities:
-                value = str(item).strip()
-                if value and value not in entities:
-                    entities.append(value)
+            requested.extend(str(item) for item in extra_entities)
+        entities = canonicalize_entities(requested, domain_profiles)
         keywords: list[str] = []
         for match in (*_CJK_TERM.findall(normalized), *_LATIN_TERM.findall(normalized)):
             value = match.strip()
@@ -854,9 +902,10 @@ class DefaultRetrievalPipeline:
             variants.append(rewritten)
         return QueryAnalysis(
             normalized_query=normalized,
-            language=estimate_language(normalized),
+            language=detect_language(normalized),
             keywords=keywords[:20],
-            entities=entities[:20],
+            entities=entities,
+            seed_source="planner" if entities else None,
             intent=request.rag_intent,
         )
 
@@ -870,6 +919,7 @@ class DefaultRetrievalPipeline:
         authorized_kbs: list[UUID],
         hybrid: HybridPolicy,
         warnings: list[RetrievalWarning],
+        explain: bool = False,
     ) -> HybridRecallResult:
         """并发召回原 query 与改写变体；主 query 失败抛错，变体失败降级。"""
         # 主 query 单独调用，保持原有错误语义：主召回不可用应整体失败。
@@ -878,6 +928,7 @@ class DefaultRetrievalPipeline:
             request=request,
             authorized_kbs=authorized_kbs,
             hybrid=hybrid,
+            explain=explain,
         )
         if len(queries) == 1:
             return primary
@@ -889,6 +940,7 @@ class DefaultRetrievalPipeline:
                     request=request,
                     authorized_kbs=authorized_kbs,
                     hybrid=hybrid,
+                    explain=explain,
                 )
                 for query in queries[1:]
             ],
@@ -929,6 +981,7 @@ class DefaultRetrievalPipeline:
         request: RetrievalRequest,
         authorized_kbs: list[UUID],
         hybrid: HybridPolicy,
+        explain: bool = False,
     ):
         """调用混合召回；底层异常统一映射为 RagError。"""
         try:
@@ -940,6 +993,7 @@ class DefaultRetrievalPipeline:
                 top_k_vector=hybrid.top_k_vector,
                 filters=request.filters,
                 mode=request.mode.value,
+                explain=explain,
             )
         except RagError:
             raise
@@ -988,7 +1042,7 @@ class DefaultRetrievalPipeline:
             warnings.append(
                 _warning(
                     RetrievalWarningCode.GRAPH_SKIPPED,
-                    "query 未匹配到图 seed 实体",
+                    "query 未提供实体，且 BM25 explainScore 未提取到图 seed 实体",
                     stage=RetrievalStage.GRAPH,
                 )
             )
@@ -1076,6 +1130,7 @@ class DefaultRetrievalPipeline:
             input_count=len(analysis.entities),
             output_count=len(next_hops),
             metadata={
+                "seed_source": analysis.seed_source,
                 "next_hops": next_hops,
                 "candidates": len(graph_bm25) + len(graph_vector),
             },
@@ -1991,6 +2046,7 @@ class DefaultRetrievalPipeline:
                     "min_quality_score": self._effective_min_quality(request),
                     "rewritten_query": request.rewritten_query,
                     "rag_intent": request.rag_intent,
+                    "entities": sorted(request.entities),
                 }
             ),
             32,

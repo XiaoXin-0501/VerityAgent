@@ -17,6 +17,7 @@ from provider.llm.types import (
     ModelMessage,
     ModelTextPart,
 )
+from utils.serialization import parse_json_object
 from utils.text import normalize_whitespace
 
 __all__ = ["FactConflictDecision", "FactConflictService"]
@@ -109,7 +110,7 @@ class FactConflictService:
                 self.model.complete(request),
                 timeout=self.timeout_s,
             )
-            data = _parse_json(_response_text(response))
+            data = parse_json_object(_response_text(response))
             decision = str(data.get("decision") or "compatible").lower()
             if decision not in {"compatible", "duplicate", "supersede", "unresolved"}:
                 decision = "compatible"
@@ -126,20 +127,3 @@ class FactConflictService:
 def _normalize(value: str) -> str:
     """规范化事实文本用于精确去重。"""
     return normalize_whitespace(value, keep_newlines=False).lower()
-
-
-def _parse_json(text: str) -> dict[str, Any]:
-    """解析模型 JSON；容忍 Markdown 围栏。"""
-    value = text.strip()
-    if value.startswith("```"):
-        value = value.strip("`")
-        if value.startswith("json"):
-            value = value[4:]
-    start = value.find("{")
-    end = value.rfind("}")
-    if start >= 0 and end > start:
-        value = value[start : end + 1]
-    data = json.loads(value)
-    if not isinstance(data, dict):
-        raise ValueError("冲突判定结果不是 JSON object")
-    return data

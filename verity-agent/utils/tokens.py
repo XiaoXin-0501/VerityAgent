@@ -17,16 +17,11 @@ from .cjk import is_cjk_char
 __all__ = ["estimate_tokens", "fits_budget", "truncate_to_tokens", "split_by_tokens"]
 
 
-def _is_cjk(char: str) -> bool:
-    """判断单个字符是否属于 CJK 文字（不包含全角标点）。"""
-    return is_cjk_char(char)
-
-
 def estimate_tokens(text: str) -> int:
     """估算文本 token 数；空文本返回 0。"""
     if not text:
         return 0
-    cjk = sum(1 for char in text if _is_cjk(char))
+    cjk = sum(1 for char in text if is_cjk_char(char))
     other = len(text) - cjk
     return cjk + (other + 3) // 4
 
@@ -55,7 +50,7 @@ def truncate_to_tokens(text: str, max_tokens: int, *, suffix: str = "…") -> st
     end = 0
     pending_ascii = 0
     for index, char in enumerate(text):
-        if _is_cjk(char):
+        if is_cjk_char(char):
             if pending_ascii:
                 pending_ascii = 0
             used += 1

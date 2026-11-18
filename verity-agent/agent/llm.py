@@ -52,6 +52,8 @@ __all__ = [
     "LLMRequest",
     "LLMResponse",
     "LLMStreamEvent",
+    "response_text",
+    "merge_usage",
     "LLMStreamPhase",
 ]
 
@@ -323,3 +325,24 @@ class LLMStreamEvent(_Model):
     usage: LLMUsage | None = None
     error_code: str | None = None
     error_message: str | None = None
+
+
+def response_text(response: Any) -> str:
+    """从应用层 LLMResponse 提取普通文本，忽略 thinking/tool parts。"""
+    message = getattr(response, "message", None)
+    parts = getattr(message, "content", None) or []
+    return "".join(
+        part.text for part in parts if isinstance(part, TextPart)
+    ).strip()
+
+
+def merge_usage(left: LLMUsage, right: LLMUsage) -> LLMUsage:
+    """逐字段累加两次 LLM 用量；source 取右侧（最新一次调用）。"""
+    return LLMUsage(
+        input_tokens=left.input_tokens + right.input_tokens,
+        output_tokens=left.output_tokens + right.output_tokens,
+        total_tokens=left.total_tokens + right.total_tokens,
+        cached_input_tokens=left.cached_input_tokens + right.cached_input_tokens,
+        reasoning_tokens=left.reasoning_tokens + right.reasoning_tokens,
+        source=right.source,
+    )

@@ -245,8 +245,9 @@ def build_default_retrieval_pipeline(
     - ``embedding_version`` 应传入库时 ``IndexerConfig.embedding_version``，
       用于 query embedding 缓存失效；
     - ``domain_profile`` 为空且 ``domain_profile_name`` 非空时加载对应领域
-      画像，用于 query → 图 seed 实体链接；``domain_profile_resolver`` 用于
-      按 KB 绑定的画像名按需加载；图扩展默认关闭，不额外查询图；
+      画像，用于图 seed/实体的标准名归一与图关系白名单（画像不生成 seed）；
+      ``domain_profile_resolver`` 用于按 KB 绑定的画像名按需加载；
+      图扩展默认关闭，不额外查询图；
     - 意图识别/query 改写由 Agent 查询规划完成，RAG 不再注入相关模型。
     """
     cfg = config or RetrieverConfig()

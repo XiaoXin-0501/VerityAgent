@@ -24,7 +24,7 @@ class ImagePdfConfig(ConfigModel):
     """纯图片/扫描 PDF 的版式解析配置。
 
     默认使用 MinerU pipeline（非 LLM）；不可用时降级到 RapidOCR。
-    LLM 相关开关默认关闭，为后续后处理预留。
+    主链路不调用 LLM。
     """
 
     # 是否启用图片 PDF 版式解析
@@ -63,12 +63,6 @@ class ImagePdfConfig(ConfigModel):
     mineru_timeout_s: int = Field(default=3600, ge=30)
     # MinerU 模型源：modelscope / huggingface / auto
     mineru_model_source: str = "modelscope"
-    # 预留 LLM 后处理；默认关闭
-    llm_enhance_enabled: bool = False
-    # LLM 后处理模型 id；llm_enhance_enabled=true 时使用
-    llm_model_id: str | None = None
-    # LLM 后处理要执行的 processor 名称；空表示全部
-    llm_processors: list[str] = Field(default_factory=list)
 
 
 class OcrConfig(ConfigModel):
@@ -199,12 +193,13 @@ class IndexerConfig(ConfigModel):
     # 入库是否建图；v1 默认 true（D-56）。开启后必须注入图抽取 LLM。
     graph_build_enabled: bool = True
     # 全局默认领域画像名：知识库未绑定 ``knowledge_bases.domain_profile``
-    # 时回退到这里。通常写主画像（如 pet_medical）或某个子画像。
+    # 时回退到这里。通常写某个子画像；没有子画像时才回退主画像。
     # 一个知识库最多绑定一个画像，同一部署可同时接入多个领域。
-    # 画像只提供类型、补充词白名单/黑名单和关系白名单，不直接产出图节点。
+    # 画像只做辅助（类型/补充词/黑名单/关系/提示词），不枚举实体，
+    # 也不生成检索 seed；实体由 LLM 或 BM25 explainScore 提供。
     domain_profile: str = "pet_medical"
-    # 主画像名：奠定垂直领域主题，用于 Agent system prompt 与查询规划；
-    # 子画像通过 JSON 的 ``master`` 字段继承主画像的公共定义。
+    # 主画像名：只给全局使用（Agent system prompt / 查询规划领域目录 /
+    # 未绑定 KB 的兜底）；子画像通过 JSON 的 ``master`` 字段继承主画像。
     master_profile: str = "pet_medical"
     # 自定义领域画像目录；为空时使用内置 ``config/domains/`` 目录
     domain_profile_dir: str | None = None

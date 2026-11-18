@@ -61,6 +61,8 @@ def build_default_agent_dependencies(
     facts: Any | None = None,
     event_store: Any | None = None,
     query_planner: Any | None = None,
+    query_plan_config: Any | None = None,
+    reflection_model_id: str | None = None,
     flow_log: Any | None = None,
     domain_catalog: str | None = None,
 ) -> AgentDependencies:
@@ -103,10 +105,21 @@ def build_default_agent_dependencies(
         max_context_tokens=max_context_tokens,
         reserved_output_tokens=min(2048, max(128, max_context_tokens // 4)),
     )
+    # 查询规划/反思可以配置独立小模型；它们同样必须能通过 ModelRegistry
+    # 的白名单，否则请求会在路由层被拒绝并静默退化。这里把显式配置的
+    # agent 辅助模型并入白名单（LLM model_ids 为空时仍不做限制）。
+    agent_model_ids = list(settings.llm.model_ids)
+    effective_plan_config = query_plan_config or settings.agent.query_plan
+    for model_id in (
+        effective_plan_config.model_id,
+        reflection_model_id or settings.agent.reflection.model_id,
+    ):
+        if model_id and model_id not in agent_model_ids:
+            agent_model_ids.append(model_id)
     model_registry = ModelRegistry(
         provider_registry,
         default_model_id=target_model_id,
-        model_ids=settings.llm.model_ids,
+        model_ids=agent_model_ids,
         fallback_model_ids=settings.llm.fallback_model_ids,
     )
     # 未显式注入时使用内置基础 system prompt；lifespan 会注入带领域信息的版本。
@@ -130,7 +143,7 @@ def build_default_agent_dependencies(
     else:
         catalog, terms = domain_catalog, ()
     planner = query_planner or QueryPlanner(
-        settings.agent.query_plan,
+        effective_plan_config,
         llm=llm_service,
         llm_model_id=target_model_id,
         domain_terms=terms,
@@ -202,8 +215,11 @@ async def build_default_agent(
 ) -> Agent:
     """构造默认 Agent；依赖由 ``build_default_agent_dependencies`` 提供。"""
     resolved_config = config or AgentConfig()
-    # history_limit 属于依赖端口；未显式传入时跟随 AgentConfig，避免两套默认值。
+    # history_limit / query_plan 属于依赖端口；未显式传入时跟随 AgentConfig，
+    # 避免“AgentLoop 用传入配置、bootstrap 却用全局 Settings”的两套默认值。
     kwargs.setdefault("history_limit", resolved_config.history_limit)
+    kwargs.setdefault("query_plan_config", resolved_config.query_plan)
+    kwargs.setdefault("reflection_model_id", resolved_config.reflection.model_id)
     dependencies = build_default_agent_dependencies(
         provider_registry=provider_registry,
         **kwargs,

@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from config.rag import IndexerConfig
 from provider.enums import ChatFinishReason
 from prompt import PromptId, PromptRegistry, get_default_prompt_registry
+from provider.llm.helpers import response_text
 from rag.shared.events import (
     RagEvent,
     RagEventName,
@@ -46,6 +47,7 @@ from rag.shared.models import (
     GraphRelation,
 )
 from utils.hashing import short_digest
+from utils.serialization import parse_json_object
 from utils.text import truncate
 from utils.tokens import estimate_tokens
 
@@ -416,7 +418,7 @@ class LLMGraphExtractor:
                     return await self._split_retry(batch, metrics)
                 metrics["failed_batches"] += 1
                 return {}
-            payload = _loads_json(_response_text(response))
+            payload = parse_json_object(response_text(response))
             parsed = _parse_batch(payload, chunks)
             if len(parsed) < len(chunks):
                 # 协议要求每个 chunk 返回一条 results（可为空）；漏项说明
@@ -750,34 +752,3 @@ def _is_valid_entity_name(
         and len(value) <= 64
         and is_valid_keyword(value, blacklist=blacklist)
     )
-
-
-def _response_text(response: Any) -> str:
-    """从 ChatModelResponse 中取文本 part；忽略 thinking/tool parts。"""
-    from provider.llm.types import ModelTextPart
-
-    return "".join(
-        part.text
-        for part in response.message.content
-        if isinstance(part, ModelTextPart)
-    ).strip()
-
-
-def _loads_json(text: str) -> dict[str, Any]:
-    """解析模型输出：去掉 Markdown 代码块，截取最外层 JSON 对象。"""
-    value = (text or "").strip()
-    if value.startswith("```"):
-        lines = value.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        value = "\n".join(lines).strip()
-    start = value.find("{")
-    end = value.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("模型输出不包含 JSON 对象")
-    payload = json.loads(value[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("模型输出 JSON 必须是对象")
-    return payload

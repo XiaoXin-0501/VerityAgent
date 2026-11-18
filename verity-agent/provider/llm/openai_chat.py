@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
@@ -22,6 +21,7 @@ from provider.enums import (
 )
 from exception.provider import ProviderError, ProviderErrorCode
 from provider.llm.base import ChatModel, ChatProvider
+from provider.llm.helpers import image_part_url
 from provider.sdk import (
     build_openai_client,
     sdk_dump,
@@ -127,20 +127,6 @@ def _usage(data: Mapping[str, Any] | None) -> ChatUsage:
     )
 
 
-def _image_url(part: ModelImagePart) -> str:
-    """把图片 part 转成 URL 或 data URI。"""
-    if part.url:
-        return part.url
-    if part.data:
-        mime = part.mime_type or "image/png"
-        encoded = base64.b64encode(part.data).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
-    raise ProviderError(
-        ProviderErrorCode.INVALID_REQUEST,
-        "图片 part 缺少 url/data",
-    )
-
-
 def _content_parts(parts: list[ModelContentPart]) -> str | list[dict[str, Any]]:
     """纯文本压成 string，多模态才用 parts 数组。"""
     texts = [part.text for part in parts if isinstance(part, ModelTextPart)]
@@ -156,7 +142,7 @@ def _content_parts(parts: list[ModelContentPart]) -> str | list[dict[str, Any]]:
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": _image_url(part),
+                        "url": image_part_url(part),
                         **({"detail": part.detail} if part.detail else {}),
                     },
                 }

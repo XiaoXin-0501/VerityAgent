@@ -24,7 +24,6 @@ from uuid import UUID
 from exception import RagError, RagErrorCode
 from rag.indexer.embedding import EmbeddingService
 from rag.retriever.hybrid import HybridRecallResult
-from rag.retriever.query import content_field_for_query, estimate_language
 from rag.shared.enums import (
     BlockType,
     RetrievalStage,
@@ -38,6 +37,7 @@ from rag.shared.models import (
     RetrievedChunk,
 )
 from store.weaviate import WeaviateStore
+from utils.text import detect_language
 
 __all__ = ["WeaviateHybridRecaller", "WeaviateNeighborExpander"]
 
@@ -64,6 +64,11 @@ DOC_CHUNK_PROPERTIES = [
     "token_count",
     "created_at",
 ]
+
+
+def _content_field_for_query(query: str) -> str:
+    """按 query 主语言选择 BM25 字段：中文查 content_zh，英文查 content_en。"""
+    return "content_en" if detect_language(query) == "en" else "content_zh"
 
 
 def _enum_value(value: Any) -> Any:
@@ -267,6 +272,7 @@ class WeaviateHybridRecaller:
         top_k_vector: int,
         filters: RetrievalFilter | None = None,
         mode: str = "hybrid",
+        explain: bool = False,
     ) -> HybridRecallResult:
         """按模式召回 BM25/向量候选；单通道失败在 HYBRID 下降级并告警。"""
         where, filter_warnings = _build_where(kb_ids, filters)
@@ -289,7 +295,12 @@ class WeaviateHybridRecaller:
                 (
                     "bm25",
                     asyncio.create_task(
-                        self._bm25(query, where=where, limit=top_k_bm25)
+                        self._bm25(
+                            query,
+                            where=where,
+                            limit=top_k_bm25,
+                            explain=explain,
+                        )
                     ),
                 )
             )
@@ -365,7 +376,7 @@ class WeaviateHybridRecaller:
             and not bm25_failed
         ):
             message = "BM25 未返回候选"
-            if estimate_language(query) == "zh":
+            if detect_language(query) == "zh":
                 message += (
                     "；中文查询请确认 Weaviate 已启用 "
                     "ENABLE_TOKENIZER_GSE_CH=true，且 collection 使用 gse_ch"
@@ -404,12 +415,18 @@ class WeaviateHybridRecaller:
         *,
         where: Any | None,
         limit: int,
+        explain: bool = False,
     ) -> tuple[list[RetrievedChunk], int, bool]:
         """执行 BM25；返回候选、耗时（毫秒）与固定 False 的 embedding 命中。"""
         from weaviate.classes.query import MetadataQuery
 
-        field = content_field_for_query(query)
+        field = _content_field_for_query(query)
         started = time.perf_counter()
+        metadata_query = (
+            MetadataQuery(score=True, explain_score=True)
+            if explain
+            else MetadataQuery(score=True)
+        )
         response = await self.store.maybe_to_thread(
             self.store.doc_chunks.query.bm25,
             query=query,
@@ -417,18 +434,24 @@ class WeaviateHybridRecaller:
             limit=max(1, int(limit)),
             filters=where,
             return_properties=DOC_CHUNK_PROPERTIES,
-            return_metadata=MetadataQuery(score=True),
+            return_metadata=metadata_query,
         )
         elapsed = int((time.perf_counter() - started) * 1000)
         chunks: list[RetrievedChunk] = []
         for obj in getattr(response, "objects", []) or []:
             chunk = _chunk_from_object(obj)
-            score = _score_from_metadata(getattr(obj, "metadata", None), vector=False)
+            metadata = getattr(obj, "metadata", None)
+            score = _score_from_metadata(metadata, vector=False)
+            extra = {"bm25_score": score}
+            explain_text = getattr(metadata, "explain_score", None)
+            if explain_text:
+                # 只在需要 seed 提取时回传；截断避免大响应进入缓存/日志。
+                extra["bm25_explain"] = str(explain_text)[:8000]
             chunks.append(
                 chunk.model_copy(
                     update={
                         "bm25_score": score,
-                        "metadata": {**chunk.metadata, "bm25_score": score},
+                        "metadata": {**chunk.metadata, **extra},
                     }
                 )
             )

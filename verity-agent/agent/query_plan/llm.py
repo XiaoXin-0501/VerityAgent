@@ -15,7 +15,6 @@ LLM 输出短 JSON：是否需要 RAG、改写 query、RAG 召回意图、用户
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from typing import Any
@@ -30,9 +29,11 @@ from agent.llm import (
     LLMUsage,
     ModelPurpose,
     TextPart,
+    response_text,
 )
 from prompt import PromptId, PromptRegistry, get_default_prompt_registry
 from utils.ids import new_request_id
+from utils.serialization import extract_json_object
 
 from .models import QueryPlan, QueryPlanSource, RagRecallIntent, parse_rag_intent
 from .rules import RuleResult
@@ -150,7 +151,7 @@ class LLMQueryPlanner:
             logger.warning("query 规划失败: %s", exc)
             return None
         latency_ms = int((time.perf_counter() - started) * 1000)
-        raw = _response_text(response)
+        raw = response_text(response)
         plan = _parse_plan(
             raw,
             original_query=original_query,
@@ -201,33 +202,6 @@ def _build_user_prompt(
     return "\n\n".join(parts)
 
 
-def _response_text(response: Any) -> str:
-    """从 LLMResponse 中取文本 part；忽略 thinking/tool calls。"""
-    message = getattr(response, "message", None)
-    content = getattr(message, "content", None) or []
-    return "".join(
-        part.text for part in content if isinstance(part, TextPart)
-    ).strip()
-
-
-def _extract_json(text: str) -> dict[str, Any] | None:
-    """从模型输出中截取最外层 JSON 对象。"""
-    value = (text or "").strip()
-    if value.startswith("```"):
-        value = value.strip("`")
-        if value.lower().startswith("json"):
-            value = value[4:]
-    start = value.find("{")
-    end = value.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        payload = json.loads(value[start : end + 1])
-    except (TypeError, ValueError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _parse_plan(
     raw: str,
     *,
@@ -235,7 +209,7 @@ def _parse_plan(
     normalized_query: str,
 ) -> QueryPlan | None:
     """解析规划 JSON；字段缺失时按保守默认值补齐。"""
-    payload = _extract_json(raw)
+    payload = extract_json_object(raw)
     if payload is None:
         return None
     needs_rag = _as_bool(payload.get("needs_rag"))
@@ -243,9 +217,11 @@ def _parse_plan(
         return None
     rewritten = str(payload.get("rewritten_query") or "").strip()
     intent = parse_rag_intent(payload.get("rag_intent"))
+    entities = _parse_entities(payload.get("entities"))
     if not needs_rag:
         rewritten = None
         intent = None
+        entities = []
     else:
         rewritten = rewritten or normalized_query
         intent = intent or RagRecallIntent.LOOKUP
@@ -258,10 +234,32 @@ def _parse_plan(
         rewritten_query=rewritten,
         rag_intent=intent,
         user_intent=user_intent,
+        entities=entities,
         source=QueryPlanSource.LLM,
         confidence=0.85,
         reason=reason or "LLM 规划",
     )
+
+
+def _parse_entities(value: Any) -> list[str]:
+    """解析实体数组；去空、去重、限长，只保留字符串。"""
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = " ".join(str(item or "").split()).strip(" ,，、;；。")
+        # 中文允许单字实体（如“犬”“猫”），英文至少两个字符。
+        if (len(text) < 2 and text.isascii()) or len(text) > 60:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= 8:
+            break
+    return result
 
 
 def _as_bool(value: Any) -> bool | None:

@@ -45,9 +45,15 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
     if not chunks:
         return "未检索到与问题相关的知识库片段。", {
             "query": getattr(result, "query", None),
+            "rewritten_query": getattr(result, "rewritten_query", None),
+            "rag_intent": getattr(result, "rag_intent", None),
             "chunks": [],
             "documents": {},
             "citations": [],
+            "warnings": [
+                getattr(item, "code", None) and str(getattr(item, "code"))
+                for item in (getattr(result, "warnings", []) or [])
+            ],
             "trace_id": getattr(getattr(result, "trace", None), "trace_id", None),
             "duration_ms": getattr(result, "duration_ms", None),
         }
@@ -59,6 +65,8 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
         lines.append(f"[{index}] {label}\n{chunk.content}".strip())
     data = {
         "query": getattr(result, "query", None),
+        "rewritten_query": getattr(result, "rewritten_query", None),
+        "rag_intent": getattr(result, "rag_intent", None),
         "chunks": [
             {
                 "chunk_id": chunk.chunk_id,
@@ -125,11 +133,13 @@ async def search_kb_executor(
     rag_intent = (
         getattr(plan, "rag_intent_label", None) if plan is not None else None
     )
+    entities = list(getattr(plan, "entities", []) or []) if plan is not None else []
     request = RetrievalRequest(
         query=arguments.query,
         original_query=original_query,
         rewritten_query=rewritten_query,
         rag_intent=rag_intent,
+        entities=entities,
         kb_ids=list(arguments.kb_ids),
         user_id=context.user_id,
         permissions=context.permissions,

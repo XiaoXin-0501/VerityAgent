@@ -943,6 +943,13 @@ class DefaultIndexingPipeline:
             path=profile_path,
             directory=self.config.domain_profile_dir,
         )
+        if profile.is_master:
+            # 主画像是全局主题底座，图构建应优先绑定具体子画像；这里仍可
+            # 兜底运行，但显式告警，避免所有 KB 都退化成同一套图约束。
+            logger.warning(
+                "图构建使用主画像 %s（全局兜底）；建议为知识库绑定具体子画像",
+                profile.name,
+            )
         extractor = build_graph_extractor(
             self.config,
             profile=profile,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
@@ -18,6 +17,7 @@ from provider.enums import (
 )
 from exception.provider import ProviderError, ProviderErrorCode
 from provider.llm.base import ChatModel, ChatProvider
+from provider.llm.helpers import image_part_url
 from provider.sdk import (
     build_openai_client,
     sdk_dump,
@@ -79,16 +79,6 @@ def _usage(payload: Mapping[str, Any] | None) -> ChatUsage:
     )
 
 
-def _image_url(part: ModelImagePart) -> str:
-    """把图片 part 转成 URL 或 data URI。"""
-    if part.url:
-        return part.url
-    if part.data:
-        mime = part.mime_type or "image/png"
-        return f"data:{mime};base64,{base64.b64encode(part.data).decode('ascii')}"
-    raise ProviderError(ProviderErrorCode.INVALID_REQUEST, "图片 part 缺少 url/data")
-
-
 def _content(parts: list[ModelContentPart], *, assistant: bool) -> list[dict[str, Any]]:
     """把统一 content part 转为 Responses content；assistant 用 output_text。"""
     text_type = "output_text" if assistant else "input_text"
@@ -97,7 +87,7 @@ def _content(parts: list[ModelContentPart], *, assistant: bool) -> list[dict[str
         if isinstance(part, ModelTextPart):
             result.append({"type": text_type, "text": part.text})
         elif isinstance(part, ModelImagePart):
-            result.append({"type": "input_image", "image_url": _image_url(part)})
+            result.append({"type": "input_image", "image_url": image_part_url(part)})
         elif isinstance(part, ModelFilePart):
             if part.text:
                 result.append(

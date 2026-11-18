@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from store.pg.models.memory import UserMessage
+from utils.serialization import parse_json_object
 from utils.text import extract_content_text
 from utils.tokens import estimate_tokens, truncate_to_tokens
 
@@ -27,20 +25,3 @@ def messages_text(items: list[UserMessage], max_tokens: int) -> str:
     if max_tokens > 0 and estimate_tokens(value) > max_tokens:
         value = truncate_to_tokens(value, max_tokens)
     return value
-
-
-def parse_json_object(text: str) -> dict[str, Any]:
-    """解析模型 JSON；容忍 ```json 围栏与前后说明文本。"""
-    value = text.strip()
-    if value.startswith("```"):
-        value = value.strip("`")
-        if value.startswith("json"):
-            value = value[4:]
-    start = value.find("{")
-    end = value.rfind("}")
-    if start >= 0 and end > start:
-        value = value[start : end + 1]
-    data = json.loads(value)
-    if not isinstance(data, dict):
-        raise ValueError("模型输出不是 JSON object")
-    return data

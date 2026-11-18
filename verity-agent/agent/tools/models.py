@@ -73,7 +73,7 @@ __all__ = [
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _PERMISSION_RE = re.compile(r"^[A-Za-z0-9_*:{}.\-]+$")
-_TEMPLATE_FIELD_RE = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)}")
+TEMPLATE_FIELD_RE = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)}")
 
 
 class _Model(BaseModel):
@@ -162,7 +162,7 @@ class ToolSpec(_Model):
             return None
         if not _PERMISSION_RE.fullmatch(value):
             raise ValueError("resource_permission_template 只能是权限码模板")
-        if not _TEMPLATE_FIELD_RE.search(value):
+        if not TEMPLATE_FIELD_RE.search(value):
             raise ValueError("resource_permission_template 必须包含 {field} 占位")
         return value
 

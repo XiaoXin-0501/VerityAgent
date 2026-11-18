@@ -571,6 +571,9 @@ class RetrievalRequest(_Model):
     rewritten_query: str | None = None
     # Agent 查询规划的 RAG 召回意图；rerank 使用，不参与 BM25/向量召回
     rag_intent: str | None = None
+    # Agent 查询规划提取的实体；用于图 seed/实体链接。
+    # 为空且图扩展开启时，RAG 用 BM25 explainScore 兜底提取。
+    entities: list[str] = Field(default_factory=list)
     kb_ids: list[UUID]
     user_id: UUID
     permissions: frozenset[str] = frozenset()
@@ -701,6 +704,8 @@ class QueryAnalysis(_Model):
     entities: list[str] = Field(default_factory=list)
     # 召回意图标签（如 LOOKUP/COMPARE）；由 Agent 查询规划注入
     intent: str | None = None
+    # 图 seed 实体来源：planner / bm25_explain / none
+    seed_source: str | None = None
     suggested_filters: RetrievalFilter | None = None
     # Agent 查询规划产出的改写 query；未启用/不需要 RAG 时为空
     variants: list[str] = Field(default_factory=list)

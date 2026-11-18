@@ -28,10 +28,12 @@ from agent.llm import (
     LLMUsage,
     ModelPurpose,
     TextPart,
+    response_text,
 )
 from config.agent import ReflectionConfig
 from prompt import PromptId, PromptRegistry, get_default_prompt_registry
 from utils.ids import new_request_id
+from utils.serialization import extract_json_object
 
 from .models import AgentLimits
 
@@ -188,7 +190,7 @@ class ReflectionEngine:
             logger.warning("主循环反思失败: %s", exc)
             return None
         latency_ms = int((time.perf_counter() - started) * 1000)
-        raw = _response_text(response)
+        raw = response_text(response)
         decision = _parse_decision(raw)
         if decision is None:
             logger.warning("主循环反思输出无法解析: %r", raw[:200])
@@ -260,31 +262,10 @@ def _compact(value: Any) -> str:
     return text[:500]
 
 
-def _response_text(response: Any) -> str:
-    """从 LLMResponse 中取文本 part。"""
-    message = getattr(response, "message", None)
-    content = getattr(message, "content", None) or []
-    return "".join(
-        part.text for part in content if isinstance(part, TextPart)
-    ).strip()
-
-
 def _parse_decision(raw: str) -> ReflectionDecision | None:
     """解析反思 JSON；action 非法时返回 None。"""
-    value = (raw or "").strip()
-    if value.startswith("```"):
-        value = value.strip("`")
-        if value.lower().startswith("json"):
-            value = value[4:]
-    start = value.find("{")
-    end = value.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        payload = json.loads(value[start : end + 1])
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
+    payload = extract_json_object(raw)
+    if payload is None:
         return None
     action_text = str(payload.get("action") or "").strip().lower()
     try:

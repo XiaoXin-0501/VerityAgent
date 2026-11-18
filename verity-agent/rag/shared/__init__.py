@@ -25,6 +25,13 @@ from .enums import (
     SourceType,
     SymbolType,
 )
+from .noise import (
+    is_hash_like,
+    is_label_like,
+    is_noise_term,
+    is_numeric_like,
+    is_url_like,
+)
 from .models import (
     ArtifactRef,
     Chunk,
@@ -145,4 +152,9 @@ __all__ = [
     "RetrievalWarning",
     "RetrievalResult",
     "QueryAnalysis",
+    "is_noise_term",
+    "is_label_like",
+    "is_numeric_like",
+    "is_hash_like",
+    "is_url_like",
 ]

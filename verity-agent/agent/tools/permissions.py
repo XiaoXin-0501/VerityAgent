@@ -10,13 +10,12 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from typing import Any
 
 from exception.tool import ToolArgumentValidationError, ToolPermissionDeniedError
 
-from .models import ToolCatalog, ToolGroup, ToolSpec
+from .models import TEMPLATE_FIELD_RE, ToolCatalog, ToolGroup, ToolSpec
 
 __all__ = [
     "has_required_permission",
@@ -26,9 +25,6 @@ __all__ = [
     "missing_resource_permissions",
     "check_resource_permissions",
 ]
-
-_TEMPLATE_FIELD_RE = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)}")
-
 
 def has_required_permission(
     spec: ToolSpec,
@@ -90,7 +86,7 @@ def required_resource_permissions(
     template = spec.resource_permission_template
     if not template:
         return []
-    fields = _TEMPLATE_FIELD_RE.findall(template)
+    fields = TEMPLATE_FIELD_RE.findall(template)
     if not fields:
         return [template]
 
