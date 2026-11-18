@@ -12,9 +12,14 @@ import time
 from contextvars import ContextVar
 from typing import Any
 
+from rag.shared.events import (
+    RagEvent,
+    RagEventName,
+    RagEventSink,
+    emit_rag_event,
+)
 from rag.shared.models import GraphExpansionPolicy
 from store.neo4j import GraphStore
-from utils.log_summary import summary_block
 
 __all__ = ["Neo4jGraphExpander"]
 
@@ -28,9 +33,11 @@ class Neo4jGraphExpander:
         self,
         *,
         graph_store: GraphStore | None = None,
+        event_sink: RagEventSink | None = None,
     ) -> None:
-        """保存图存储门面；连接在首次查询时惰性建立。"""
+        """保存图存储门面与事件接收端；连接在首次查询时惰性建立。"""
         self.store = graph_store or GraphStore()
+        self.event_sink = event_sink
         # 最近一次扩展失败原因；用 ContextVar 隔离并发请求，避免 A 请求的
         # 失败被 B 请求读到。pipeline 读取后写 GRAPH_FAILED 告警。
         self._last_error: ContextVar[str | None] = ContextVar(
@@ -48,6 +55,7 @@ class Neo4jGraphExpander:
         seed_entities: list[str],
         kb_ids: list[Any],
         policy: GraphExpansionPolicy,
+        trace_id: str | None = None,
     ) -> list[str]:
         """返回去重后的下一跳实体；按证据数/种子顺序稳定去重。"""
         self._last_error.set(None)
@@ -94,17 +102,31 @@ class Neo4jGraphExpander:
         except Exception as exc:  # noqa: BLE001 - 图失败必须降级，不抛穿
             self._last_error.set(str(exc))
             logger.warning("Neo4j 图扩展失败: %s", exc)
+            await emit_rag_event(
+                self.event_sink,
+                RagEvent(
+                    name=RagEventName.GRAPH_END,
+                    payload={"status": "failed", "cause": str(exc)[:300]},
+                    trace_id=trace_id,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                ),
+            )
             return []
-        logger.info(
-            "%s",
-            summary_block(
-                "图扩展",
-                [
-                    f"seeds={len(seed_entities)} | 授权KB={len(ids)} "
-                    f"| seed 命中KB={len(seed_kbs)} "
-                    f"| 下一跳={len(next_hops)} 个（KB {len(next_hop_kbs)} 个）",
-                    f"耗时={int((time.perf_counter() - started) * 1000)}ms",
-                ],
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        await emit_rag_event(
+            self.event_sink,
+            RagEvent(
+                name=RagEventName.GRAPH_END,
+                payload={
+                    "seed_count": len(seed_entities),
+                    "kb_count": len(ids),
+                    "seed_hit_kb_count": len(seed_kbs),
+                    "next_hop_count": len(next_hops),
+                    "next_hop_kb_count": len(next_hop_kbs),
+                    "duration_ms": duration_ms,
+                },
+                trace_id=trace_id,
+                duration_ms=duration_ms,
             ),
         )
         return next_hops

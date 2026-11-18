@@ -78,6 +78,7 @@ class HookEvent(StrEnum):
     RAG_RETRIEVAL_END = "rag.retrieval.end"
     RAG_RERANK_END = "rag.rerank.end"
     RAG_GRAPH_END = "rag.graph.end"
+    RAG_GRAPH_EXTRACTION_END = "rag.graph.extraction.end"
     RAG_CACHE_HIT = "rag.cache.hit"
     RAG_CITATION = "rag.citation"
     RAG_CONTEXT_INJECTED = "rag.context.injected"

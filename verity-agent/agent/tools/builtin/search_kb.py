@@ -21,8 +21,6 @@ from agent.tools.policies import (
     ToolPolicy,
 )
 from agent.tools.registry import ToolRegistry
-from agent.hooks.enum import HookEvent, HookSource
-from agent.hooks.scope import HookScope
 from config.tools import SearchKbToolConfig
 from exception.tool import ToolErrorCode
 from rag.shared.models import RetrievalRequest
@@ -97,30 +95,6 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
     return "\n\n".join(lines), data
 
 
-async def _emit_rag_hook(
-    context: ToolContext,
-    event: HookEvent,
-    payload: dict[str, Any],
-) -> None:
-    """可选地发送 RAG 检索 span；Hook 失败不影响工具结果。"""
-    dispatcher = getattr(context.services, "hook_dispatcher", None)
-    if dispatcher is None:
-        return
-    try:
-        scope = HookScope(
-            dispatcher,
-            trace_id=context.trace_id,
-            run_id=context.run_id,
-            user_id=context.user_id,
-            conversation_id=context.conversation_id,
-            turn_id=context.turn_id,
-            source=HookSource.TOOL,
-        )
-        await scope.emit(event, payload, call_id=context.call_id)
-    except Exception:  # noqa: BLE001 - 观测失败不能阻断检索
-        logger.warning("RAG 检索 Hook 发送失败: %s", event.value, exc_info=True)
-
-
 async def search_kb_executor(
     arguments: SearchKbArgs,
     context: ToolContext,
@@ -152,36 +126,10 @@ async def search_kb_executor(
         trace_id=context.trace_id,
     )
     try:
-        await _emit_rag_hook(
-            context,
-            HookEvent.RAG_RETRIEVAL_START,
-            {
-                "query": arguments.query,
-                "kb_ids": [str(item) for item in arguments.kb_ids],
-                "top_k": top_k,
-            },
-        )
+        # RAG 检索事件由 Retriever 内部的 RagEventSink 统一发送，工具层
+        # 不再重复 emit rag.retrieval.*；工具执行本身由 ToolPipeline 记录。
         result = await retriever.retrieve(request)
-        await _emit_rag_hook(
-            context,
-            HookEvent.RAG_RETRIEVAL_END,
-            {
-                "query": arguments.query,
-                "chunk_count": len(getattr(result, "chunks", []) or []),
-                "duration_ms": getattr(result, "duration_ms", None),
-                "status": "ok",
-            },
-        )
     except Exception as exc:  # noqa: BLE001 - 工具错误统一结构化
-        await _emit_rag_hook(
-            context,
-            HookEvent.RAG_RETRIEVAL_END,
-            {
-                "query": arguments.query,
-                "status": "failed",
-                "cause": str(exc),
-            },
-        )
         logger.warning("search_kb 检索失败: %s", exc, exc_info=True)
         return ToolResult.failure(
             call_id=context.call_id,

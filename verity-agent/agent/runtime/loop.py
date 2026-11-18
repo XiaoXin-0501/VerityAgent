@@ -1121,9 +1121,6 @@ class AgentLoop:
     async def _injected_rag_section(
         self,
         request: AgentRequest,
-        *,
-        run_id: str,
-        turn_id: str,
     ) -> ContextSection | None:
         """INJECTED 模式：检索 KB 并渲染成 RAG section；失败降级不阻断。"""
         mode = getattr(request.rag_mode, "value", request.rag_mode)
@@ -1142,18 +1139,8 @@ class AgentLoop:
             logger.debug("INJECTED RAG 缺少 kb_ids 或 query，跳过注入")
             return None
         top_k = request.metadata.get("top_k")
-        await self._emit_hook(
-            "rag.retrieval.start",
-            {
-                "query": request.content,
-                "kb_ids": [str(item) for item in kb_ids],
-                "top_k": top_k,
-            },
-            request=request,
-            run_id=run_id,
-            turn_id=turn_id,
-        )
         try:
+            # 检索事件由 Retriever 的 RagEventSink 统一发出；Agent 只消费结果。
             result = await self.deps.rag.retrieve(
                 query=request.content,
                 kb_ids=kb_ids,
@@ -1164,23 +1151,9 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001 - 注入式 RAG 可降级
             logger.warning("INJECTED RAG 检索失败，按无 RAG 继续", exc_info=True)
-            await self._emit_hook(
-                "rag.retrieval.end",
-                {"chunk_count": 0, "status": "failed"},
-                request=request,
-                run_id=run_id,
-                turn_id=turn_id,
-            )
             return None
         chunks = list(getattr(result, "chunks", []) or [])
         if not chunks:
-            await self._emit_hook(
-                "rag.retrieval.end",
-                {"chunk_count": 0, "status": "empty"},
-                request=request,
-                run_id=run_id,
-                turn_id=turn_id,
-            )
             return None
         lines: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
@@ -1188,13 +1161,6 @@ class AgentLoop:
             heading = getattr(chunk, "heading", None)
             label = f"{title} / {heading}" if heading else title
             lines.append(f"[RAG {index}] {label}\n{chunk.content}".strip())
-        await self._emit_hook(
-            "rag.retrieval.end",
-            {"chunk_count": len(chunks), "status": "ok"},
-            request=request,
-            run_id=run_id,
-            turn_id=turn_id,
-        )
         return ContextSection(
             source="rag",
             name="injected_context",
@@ -1235,11 +1201,7 @@ class AgentLoop:
             except Exception:  # noqa: BLE001 - 画像读取失败不阻断对话
                 logger.warning("加载用户画像失败", exc_info=True)
         sections: list[ContextSection] = []
-        rag_section = await self._injected_rag_section(
-            request,
-            run_id=run_id,
-            turn_id=turn_id,
-        )
+        rag_section = await self._injected_rag_section(request)
         if rag_section is not None:
             sections.append(rag_section)
         if memory_text:

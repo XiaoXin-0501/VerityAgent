@@ -19,6 +19,7 @@ from exception import ConfigurationError, RedisError
 from agent.bootstrap import build_default_agent
 from agent.adapters.facts import WeaviateFactStore
 from agent.adapters.hooks import DispatcherHookAdapter
+from agent.adapters.rag_events import HookRagEventSink
 from agent.hooks.builtin.factory import build_dispatcher
 from agent.recovery import (
     recover_expired_leases,
@@ -129,7 +130,13 @@ def _load_domain_profile_by_name(name: str):
     )
 
 
-async def _build_rag_retriever(registry, prompt_registry, *, available: bool = True):
+async def _build_rag_retriever(
+    registry,
+    prompt_registry,
+    *,
+    available: bool = True,
+    event_sink=None,
+):
     """按 Settings 构造 RAG Retriever；向量库未就绪时返回 None。"""
     cfg = settings.rag
     if not settings.weaviate.enabled:
@@ -185,6 +192,7 @@ async def _build_rag_retriever(registry, prompt_registry, *, available: bool = T
         embedding_version=cfg.indexer.embedding_version,
         max_query_chars=cfg.max_query_chars,
         domain_profile_resolver=_load_domain_profile_by_name,
+        event_sink=event_sink,
     )
     logger.info(
         "RAG Retriever 就绪: embedding=%s rerank=%s rewrite=%s intent=%s",
@@ -196,7 +204,13 @@ async def _build_rag_retriever(registry, prompt_registry, *, available: bool = T
     return retriever
 
 
-async def _build_rag_indexer(registry, prompt_registry, *, available: bool = True):
+async def _build_rag_indexer(
+    registry,
+    prompt_registry,
+    *,
+    available: bool = True,
+    event_sink=None,
+):
     """按 Settings 构造 RAG Indexer；MinIO/Weaviate/embedding 未就绪时返回 None。"""
     cfg = settings.rag
     if not settings.weaviate.enabled or not settings.minio.enabled:
@@ -279,6 +293,7 @@ async def _build_rag_indexer(registry, prompt_registry, *, available: bool = Tru
         code_summary_chat_model=code_model,
         graph_chat_model=graph_model,
         prompt_registry=prompt_registry,
+        event_sink=event_sink,
     )
 
 
@@ -528,12 +543,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         system_prompt = _build_agent_system_prompt(prompts)
         await registry.init_all()
         app.state.provider_registry = registry
+        # Hooks 先于 RAG 装配：RAG 只向自己的 RagEventSink 发事件，
+        # Agent 侧适配器再转成 HookEvent，避免 rag -> agent 反向依赖。
+        hook_dispatcher = build_dispatcher(
+            settings.hooks,
+            conversation_repository=ConversationRepository(),
+        )
+        app.state.hook_dispatcher = hook_dispatcher
+        rag_event_sink = HookRagEventSink(hook_dispatcher)
         rag_retriever = None
         try:
             rag_retriever = await _build_rag_retriever(
                 registry,
                 prompts,
                 available=weaviate_ready,
+                event_sink=rag_event_sink,
             )
         except Exception as exc:  # noqa: BLE001 - RAG 装配失败不阻断普通对话
             logger.warning("RAG Retriever 装配失败，降级为无知识库工具: %s", exc)
@@ -543,15 +567,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 registry,
                 prompts,
                 available=weaviate_ready and minio_ready,
+                event_sink=rag_event_sink,
             )
         except Exception as exc:  # noqa: BLE001 - 管理面入库失败不阻断对话
             logger.warning("RAG Indexer 装配失败，知识库管理不可用: %s", exc)
         app.state.indexer = rag_indexer
-        hook_dispatcher = build_dispatcher(
-            settings.hooks,
-            conversation_repository=ConversationRepository(),
-        )
-        app.state.hook_dispatcher = hook_dispatcher
         memory_worker = _build_memory_worker(registry, hook_dispatcher, prompts)
         if memory_worker is not None:
             memory_worker_task = asyncio.create_task(

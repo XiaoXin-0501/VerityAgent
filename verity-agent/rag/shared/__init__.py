@@ -1,5 +1,11 @@
 """RAG 共享模型、枚举与注册表。"""
 
+from .events import (
+    RagEvent,
+    RagEventName,
+    RagEventSink,
+    emit_rag_event,
+)
 from .enums import (
     BlockType,
     CodeParseStatus,
@@ -69,6 +75,11 @@ from .models import (
 )
 
 __all__ = [
+    # observability
+    "RagEvent",
+    "RagEventName",
+    "RagEventSink",
+    "emit_rag_event",
     # enums
     "DocumentType",
     "BlockType",

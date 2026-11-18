@@ -52,6 +52,12 @@ from rag.shared.enums import (
     RetrievalStage,
     RetrievalWarningCode,
 )
+from rag.shared.events import (
+    RagEvent,
+    RagEventName,
+    RagEventSink,
+    emit_rag_event,
+)
 from rag.shared.models import (
     Citation,
     DocumentMeta,
@@ -69,7 +75,6 @@ from rag.shared.models import (
     RerankPolicy,
     RagContext,
 )
-from utils.log_summary import summary_block
 from utils.serialization import canonical_json
 from utils.tokens import estimate_tokens
 from utils.hashing import short_digest
@@ -235,6 +240,7 @@ class DefaultRetrievalPipeline:
         query_rewriter: Any | None = None,
         intent_classifier: Any | None = None,
         max_query_chars: int = 2000,
+        event_sink: RagEventSink | None = None,
     ) -> None:
         """保存检索配置与各阶段依赖；不主动建立外部连接。"""
         self.config = config or RetrieverConfig()
@@ -254,6 +260,7 @@ class DefaultRetrievalPipeline:
         self.query_rewriter = query_rewriter
         self.intent_classifier = intent_classifier
         self.max_query_chars = max(1, int(max_query_chars))
+        self.event_sink = event_sink
         self.embedding_model_id = str(
             getattr(recaller, "embedding_model_id", "embedding")
         )
@@ -278,6 +285,19 @@ class DefaultRetrievalPipeline:
         trace_id = request.trace_id or uuid4().hex
         stages: list[RetrievalStageTrace] = []
         warnings: list[RetrievalWarning] = []
+        await emit_rag_event(
+            self.event_sink,
+            RagEvent(
+                name=RagEventName.RETRIEVAL_START,
+                payload={
+                    "query_preview": " ".join(request.query.split())[:80],
+                    "kb_count": len(request.kb_ids),
+                    "top_k": request.top_k or self.config.top_k,
+                    "mode": request.mode.value,
+                },
+                trace_id=trace_id,
+            ),
+        )
 
         query = request.query
         if len(query) > self.max_query_chars:
@@ -470,6 +490,7 @@ class DefaultRetrievalPipeline:
             policy=graph_policy,
             warnings=warnings,
             stages=stages,
+            trace_id=trace_id,
         )
 
         # 6) 文档状态/文档级权限过滤；图候选和主候选都必须过。
@@ -696,25 +717,27 @@ class DefaultRetrievalPipeline:
             (item for item in stages if item.stage is RetrievalStage.GRAPH),
             None,
         )
-        query_preview = " ".join(query.split())[:80]
-        logger.info(
-            "%s",
-            summary_block(
-                "检索",
-                [
-                    f"trace={trace_id[:8]} | mode={request.mode.value} "
-                    f"| KB={len(authorized_kbs)} | 耗时={elapsed}ms",
-                    f"候选={len(all_candidates)} -> 选中="
-                    f"{len(selected_with_citations)} | 图下一跳="
-                    f"{graph_stage.output_count if graph_stage is not None else 0} "
-                    f"| warnings={len(warnings)}",
-                    "阶段: "
-                    + " | ".join(
-                        f"{name}={value}ms"
-                        for name, value in stage_timings.items()
+        await emit_rag_event(
+            self.event_sink,
+            RagEvent(
+                name=RagEventName.RETRIEVAL_END,
+                payload={
+                    "mode": request.mode.value,
+                    "kb_count": len(authorized_kbs),
+                    "candidate_count": len(all_candidates),
+                    "final_count": len(selected_with_citations),
+                    "graph_next_hops": (
+                        graph_stage.output_count
+                        if graph_stage is not None
+                        else 0
                     ),
-                    f"query: {query_preview}",
-                ],
+                    "warning_count": len(warnings),
+                    "stage_timings": stage_timings,
+                    "query_preview": " ".join(query.split())[:80],
+                    "duration_ms": elapsed,
+                },
+                trace_id=trace_id,
+                duration_ms=elapsed,
             ),
         )
         return result
@@ -1013,6 +1036,7 @@ class DefaultRetrievalPipeline:
         policy: GraphExpansionPolicy,
         warnings: list[RetrievalWarning],
         stages: list[RetrievalStageTrace],
+        trace_id: str | None = None,
     ) -> tuple[list[RetrievedChunk], list[RetrievedChunk]]:
         """执行可选图扩展；返回图召回的 BM25/向量候选。"""
         if not policy.enabled:
@@ -1058,6 +1082,7 @@ class DefaultRetrievalPipeline:
                 seed_entities=analysis.entities,
                 kb_ids=[str(item) for item in authorized_kbs],
                 policy=policy,
+                trace_id=trace_id,
             )
         except Exception as exc:  # noqa: BLE001 - 图扩展可降级
             next_hops = []

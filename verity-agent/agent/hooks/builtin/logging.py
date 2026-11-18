@@ -6,6 +6,8 @@ import logging
 from typing import Any
 
 from config.hooks import LoggingHookConfig
+from utils.log_summary import summary_block
+
 from ..enum import HookEvent, HookExecutionMode
 from ..models import HookContext, HookSpec
 from ..redaction import RedactionPolicy
@@ -13,7 +15,8 @@ from ..redaction import RedactionPolicy
 __all__ = ["LoggingHook", "DEFAULT_EVENTS"]
 
 # 默认只记录“分析系统/性能”真正有用的事件；run/turn 生命周期由 AgentLoop
-# 的完成摘要负责，避免同一件事在 app.log 里出现两遍。
+# 的完成摘要负责，避免同一件事在 app.log 里出现两遍。RAG 只发结构化事件，
+# 由这里统一格式化，RAG 内部不再拼日志。
 DEFAULT_EVENTS = frozenset(
     {
         HookEvent.LLM_ERROR,
@@ -23,6 +26,10 @@ DEFAULT_EVENTS = frozenset(
         HookEvent.FILE_PARSED,
         HookEvent.FILE_PARSE_FAILED,
         HookEvent.DELETION_FAILED,
+        HookEvent.RAG_INDEX_END,
+        HookEvent.RAG_RETRIEVAL_END,
+        HookEvent.RAG_GRAPH_END,
+        HookEvent.RAG_GRAPH_EXTRACTION_END,
     }
 )
 
@@ -153,6 +160,82 @@ def _format_event(context: HookContext, payload: dict[str, Any]) -> str:
         return (
             f"删除失败 | error={payload.get('error_code') or '-'}"
             f" | 耗时={duration or 0}ms"
+        )
+    if event is HookEvent.RAG_RETRIEVAL_END:
+        stages = payload.get("stage_timings") or {}
+        return summary_block(
+            "检索",
+            [
+                f"trace={context.trace_id[:8]} | mode={payload.get('mode') or '-'} "
+                f"| KB={payload.get('kb_count', 0)} "
+                f"| 耗时={payload.get('duration_ms') or duration or 0}ms",
+                f"候选={payload.get('candidate_count', 0)} -> "
+                f"选中={payload.get('final_count', 0)} "
+                f"| 图下一跳={payload.get('graph_next_hops', 0)} "
+                f"| warnings={payload.get('warning_count', 0)}",
+                "阶段: "
+                + " | ".join(f"{name}={value}ms" for name, value in stages.items()),
+                f"query: {payload.get('query_preview') or '-'}",
+            ],
+        )
+    if event is HookEvent.RAG_GRAPH_END:
+        return summary_block(
+            "图扩展",
+            [
+                f"seeds={payload.get('seed_count', 0)} "
+                f"| 授权KB={payload.get('kb_count', 0)} "
+                f"| seed 命中KB={payload.get('seed_hit_kb_count', 0)} "
+                f"| 下一跳={payload.get('next_hop_count', 0)} 个"
+                f"（KB {payload.get('next_hop_kb_count', 0)} 个）",
+                f"状态={payload.get('status') or 'ok'} "
+                f"| 耗时={payload.get('duration_ms') or duration or 0}ms",
+            ],
+        )
+    if event is HookEvent.RAG_GRAPH_EXTRACTION_END:
+        return summary_block(
+            "图抽取",
+            [
+                f"model={payload.get('model_id') or '-'} "
+                f"| chunks={payload.get('chunks_total', 0)} "
+                f"(跳过 {payload.get('chunks_skipped', 0)}, "
+                f"缓存 {payload.get('cache_hits', 0)}) "
+                f"| 批次={payload.get('batches', 0)} "
+                f"| LLM={payload.get('llm_calls', 0)} 次",
+                f"tokens 输入={payload.get('input_tokens', 0)} "
+                f"输出={payload.get('output_tokens', 0)} "
+                f"| 实体={payload.get('entities', 0)} "
+                f"关系={payload.get('relations', 0)} "
+                f"| 耗时={payload.get('duration_ms') or duration or 0}ms",
+                f"截断={payload.get('truncations', 0)} "
+                f"重试={payload.get('retries', 0)} "
+                f"失败批次={payload.get('failed_batches', 0)} "
+                f"输入截断={payload.get('input_truncated_chunks', 0)}",
+                f"未声明类型={payload.get('unknown_types', 0)} "
+                f"{payload.get('unknown_type_samples') or []} "
+                f"| 未声明关系={payload.get('unknown_relations', 0)} "
+                f"{payload.get('unknown_relation_samples') or []}",
+            ],
+        )
+    if event is HookEvent.RAG_INDEX_END:
+        stages = payload.get("stage_timings") or {}
+        title = "文档删除" if payload.get("mode") == "delete" else "入库完成"
+        return summary_block(
+            title,
+            [
+                f"doc={payload.get('doc_id') or context.metadata.get('doc_id') or '-'} "
+                f"| kb={payload.get('kb_id') or context.metadata.get('kb_id') or '-'} "
+                f"| 大小={payload.get('size_bytes', 0)}B "
+                f"| 页={payload.get('pages', 0)} | 块={payload.get('blocks', 0)}",
+                f"chunks={payload.get('chunks', 0)} "
+                f"| tokens={payload.get('tokens', 0)} "
+                f"| 版本={payload.get('index_version') or '-'} "
+                f"| 图实体={payload.get('graph_entities', 0)} "
+                f"关系={payload.get('graph_relations', 0)}",
+                "阶段: "
+                + " | ".join(f"{name}={value}ms" for name, value in stages.items()),
+                f"状态={payload.get('status') or '-'} "
+                f"| 耗时={payload.get('duration_ms') or duration or 0}ms",
+            ],
         )
     if event is HookEvent.RUN_END:
         usage = payload.get("usage") or {}

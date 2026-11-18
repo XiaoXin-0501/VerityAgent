@@ -15,6 +15,7 @@ from store.neo4j import GraphStore
 from store.weaviate import WeaviateStore
 
 from .facade import Indexer, RagDependencies, Retriever, create_indexer, create_retriever
+from .shared.events import RagEventSink
 from .indexer import (
     ChatCodeDescriber,
     ChatDescriptionRefiner,
@@ -100,6 +101,7 @@ def build_default_indexing_pipeline(
     code_describer: Any | None = None,
     description_refiner: Any | None = None,
     cache: ChunkCache | None = None,
+    event_sink: RagEventSink | None = None,
     worker_id: str = "rag-indexer",
     run_in_background: bool = True,
 ) -> DefaultIndexingPipeline:
@@ -171,6 +173,7 @@ def build_default_indexing_pipeline(
         graph_chat_model=graph_chat_model,
         prompt_registry=prompt_registry,
         graph_cache=rag_cache,
+        event_sink=event_sink,
         worker_id=worker_id,
         run_in_background=run_in_background,
     )
@@ -233,6 +236,7 @@ def build_default_retrieval_pipeline(
     intent_model: Any | None = None,
     prompt_registry: PromptRegistry | None = None,
     max_query_chars: int = 2000,
+    event_sink: RagEventSink | None = None,
 ) -> DefaultRetrievalPipeline:
     """装配默认检索流水线。
 
@@ -306,7 +310,8 @@ def build_default_retrieval_pipeline(
         recaller=recaller,
         reranker=reranker,
         graph_expander=Neo4jGraphExpander(
-            graph_store=graph_store or GraphStore()
+            graph_store=graph_store or GraphStore(),
+            event_sink=event_sink,
         ),
         neighbor_expander=WeaviateNeighborExpander(
             vector_store=weaviate_store or WeaviateStore()
@@ -318,6 +323,7 @@ def build_default_retrieval_pipeline(
         query_rewriter=query_rewriter,
         intent_classifier=intent_classifier,
         max_query_chars=max_query_chars,
+        event_sink=event_sink,
     )
 
 

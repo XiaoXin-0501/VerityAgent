@@ -35,6 +35,12 @@ from rag.shared.enums import (
     IndexingWarningCode,
     IndexMode,
 )
+from rag.shared.events import (
+    RagEvent,
+    RagEventName,
+    RagEventSink,
+    emit_rag_event,
+)
 from rag.shared.models import (
     DocumentSource,
     IndexDocumentRequest,
@@ -46,7 +52,6 @@ from rag.shared.models import (
 from store.pg.models.knowledge import Document
 from utils.hashing import sha256_bytes
 from utils.log_context import bind_index_context, reset_index_context
-from utils.log_summary import summary_block
 from utils.serialization import json_dumps
 from utils.time import utcnow
 
@@ -114,6 +119,7 @@ class DefaultIndexingPipeline:
         graph_chat_model: Any | None = None,
         prompt_registry: Any | None = None,
         graph_cache: Any | None = None,
+        event_sink: RagEventSink | None = None,
         worker_id: str = "rag-indexer",
         run_in_background: bool = True,
     ) -> None:
@@ -132,6 +138,7 @@ class DefaultIndexingPipeline:
         self._graph_chat_model = graph_chat_model
         self._prompt_registry = prompt_registry
         self._graph_cache = graph_cache
+        self.event_sink = event_sink
         self._graph_extractors: dict[str, GraphExtractor] = {}
         self.worker_id = worker_id
         self.run_in_background = run_in_background
@@ -208,6 +215,16 @@ class DefaultIndexingPipeline:
         await self.job_store.put(job)
         source = self._with_description_override(request.source, request)
         self._index_jobs_by_doc[request.doc_id] = job.job_id
+        await self._emit(
+            RagEventName.INDEX_START,
+            {
+                "job_id": job.job_id,
+                "mode": request.mode.value,
+                "index_version_before": index_version_before,
+            },
+            doc_id=request.doc_id,
+            kb_id=request.kb_id,
+        )
         await self._launch(
             job,
             self._run_index(job, request, source),
@@ -608,24 +625,26 @@ class DefaultIndexingPipeline:
         graph_relations = sum(
             len(item.relations) for item in extractions.values()
         )
-        logger.info(
-            "%s",
-            summary_block(
-                "入库完成",
-                [
-                    f"doc={request.doc_id} | kb={request.kb_id} "
-                    f"| 大小={len(data)}B | 页={counts.pages} "
-                    f"| 块={counts.blocks}",
-                    f"chunks={len(chunks)} | tokens={counts.tokens} "
-                    f"| 版本={index_version} "
-                    f"| 图实体={graph_entities} 关系={graph_relations}",
-                    "阶段: "
-                    + " | ".join(
-                        f"{name}={value}ms" for name, value in timings.items()
-                    ),
-                    f"总耗时={int((time.perf_counter() - started) * 1000)}ms",
-                ],
-            ),
+        await self._emit(
+            RagEventName.INDEX_END,
+            {
+                "job_id": job.job_id,
+                "mode": request.mode.value,
+                "status": "succeeded",
+                "size_bytes": len(data),
+                "pages": counts.pages,
+                "blocks": counts.blocks,
+                "chunks": len(chunks),
+                "tokens": counts.tokens,
+                "index_version": index_version,
+                "graph_entities": graph_entities,
+                "graph_relations": graph_relations,
+                "stage_timings": timings,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            },
+            doc_id=request.doc_id,
+            kb_id=request.kb_id,
+            duration_ms=int((time.perf_counter() - started) * 1000),
         )
         return job
 
@@ -654,6 +673,12 @@ class DefaultIndexingPipeline:
             await self.repository.bump_index_version(job.kb_id)
             await self.repository.mark_deleted(job.doc_id)
 
+        await self._emit(
+            RagEventName.INDEX_END,
+            {"job_id": job.job_id, "mode": "delete", "status": "succeeded"},
+            doc_id=job.doc_id,
+            kb_id=job.kb_id,
+        )
         return await self._update(
             job,
             stage=IndexingStage.DONE,
@@ -685,7 +710,39 @@ class DefaultIndexingPipeline:
                 include_deleted=job.mode is IndexMode.DELETE,
             )
         self._check_cancelled(job.job_id)
+        await self._emit(
+            RagEventName.INDEX_STAGE,
+            {
+                "job_id": job.job_id,
+                "stage": stage.value,
+                "progress": job.progress,
+                "mode": job.mode.value,
+            },
+            doc_id=job.doc_id,
+            kb_id=job.kb_id,
+        )
         return job
+
+    async def _emit(
+        self,
+        name: RagEventName,
+        payload: dict[str, Any],
+        *,
+        doc_id: UUID | None = None,
+        kb_id: UUID | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """发送入库事件；未注入 sink 时 no-op。"""
+        await emit_rag_event(
+            self.event_sink,
+            RagEvent(
+                name=name,
+                payload=payload,
+                doc_id=str(doc_id) if doc_id else None,
+                kb_id=str(kb_id) if kb_id else None,
+                duration_ms=duration_ms,
+            ),
+        )
 
     async def _update(self, job: IndexingJob, **updates) -> IndexingJob:
         """不可变 job 的统一替换 + 持久化。"""
@@ -711,6 +768,17 @@ class DefaultIndexingPipeline:
             for item in job.warnings
         ):
             return job
+        await self._emit(
+            RagEventName.INDEX_WARNING,
+            {
+                "job_id": job.job_id,
+                "code": code.value,
+                "message": message,
+                "stage": (stage or job.stage).value,
+            },
+            doc_id=job.doc_id,
+            kb_id=job.kb_id,
+        )
         return await self._update(
             job,
             warnings=[*job.warnings, wave],
@@ -748,6 +816,18 @@ class DefaultIndexingPipeline:
             ended_at=utcnow(),
         )
         await self._record_failure(job, error)
+        await self._emit(
+            RagEventName.INDEX_END,
+            {
+                "job_id": job.job_id,
+                "mode": job.mode.value,
+                "status": "cancelled",
+                "error_code": error.code.value,
+                "stage": job.stage.value,
+            },
+            doc_id=job.doc_id,
+            kb_id=job.kb_id,
+        )
 
     async def _finish_failed(self, job: IndexingJob, exc: Exception) -> None:
         """统一失败收尾：错误映射、DEAD 判定、PG 退避。"""
@@ -774,6 +854,18 @@ class DefaultIndexingPipeline:
             ended_at=utcnow(),
         )
         await self._record_failure(job, error)
+        await self._emit(
+            RagEventName.INDEX_END,
+            {
+                "job_id": job.job_id,
+                "mode": job.mode.value,
+                "status": status.value,
+                "error_code": error.code.value,
+                "stage": job.stage.value,
+            },
+            doc_id=job.doc_id,
+            kb_id=job.kb_id,
+        )
 
     async def _latest(self, job: IndexingJob) -> IndexingJob:
         """读取 JobStore 中的最新 job；不存在时回退到入参。"""
@@ -860,6 +952,7 @@ class DefaultIndexingPipeline:
             chat_model=self._graph_chat_model,
             prompts=self._prompt_registry,
             cache=self._graph_cache,
+            event_sink=self.event_sink,
         )
         self._graph_extractors[name] = extractor
         return extractor

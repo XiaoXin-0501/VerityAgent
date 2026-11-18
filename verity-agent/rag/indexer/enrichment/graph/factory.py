@@ -14,6 +14,7 @@ from typing import Any
 from config.rag import IndexerConfig
 from exception import RagError, RagErrorCode
 from prompt import PromptRegistry
+from rag.shared.events import RagEventSink
 
 from ..domain.loader import load_domain_profile
 from ..domain.models import DomainProfile
@@ -30,6 +31,7 @@ def build_graph_extractor(
     chat_model: Any | None = None,
     prompts: PromptRegistry | None = None,
     cache: Any | None = None,
+    event_sink: RagEventSink | None = None,
 ) -> GraphExtractor:
     """构造 LLM 图抽取器。
 
@@ -54,4 +56,5 @@ def build_graph_extractor(
         chat_model,
         prompts=prompts,
         cache=cache,
+        event_sink=event_sink,
     )
