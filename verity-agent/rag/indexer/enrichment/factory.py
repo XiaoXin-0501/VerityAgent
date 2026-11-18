@@ -11,13 +11,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from config.domain import DomainProfile, load_domain_profile
 from config.rag import IndexerConfig
 from exception import RagError, RagErrorCode
 from prompt import PromptRegistry
 from rag.shared.events import RagEventSink
 
-from ..domain.loader import load_domain_profile
-from ..domain.models import DomainProfile
 from .base import GraphExtractor
 from .extractor import LLMGraphExtractor
 

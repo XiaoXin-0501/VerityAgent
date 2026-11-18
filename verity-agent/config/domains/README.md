@@ -6,10 +6,21 @@
 > `whitelist` 不是领域全集，也不要求穷举；它主要用于补充 LLM 可能不认识的
 > 新药物、新技术、专有名词和别名。内置列表可按需裁剪，不影响未登录实体的抽取。
 
-默认 `pet_medical.json`（宠物医疗）；也可按知识库绑定不同画像。切换领域不需要改代码：
+本目录是 `config` 模块的一部分（`config/domain.py` 负责模型与加载），不再是 RAG
+内部实现。画像分两层：
 
-1. 在本目录（或 `IndexerConfig.domain_profile_dir` 指向的目录）新增 `<domain>.json`；
-2. 修改 `IndexerConfig.domain_profile`，或在知识库上设置 `domain_profile`；
+- **主画像**（`master` 为空）：奠定垂直领域主题，如 `pet_medical.json`（宠物医疗）；
+  Agent 的 system prompt 与查询规划使用 `IndexerConfig.master_profile`；
+- **子画像**（`master` 指向主画像名）：绑定到具体知识库，如
+  `pet_drug.json`（宠物药品）、`pet_case.json`（宠物医疗案例）、
+  `pet_category.json`（宠物类别）；加载时自动合并主画像的公共类型/关系/
+  黑名单/提示词，只声明差异。
+
+切换领域不需要改代码：
+
+1. 在本目录（或 `IndexerConfig.domain_profile_dir` 指向的目录）新增主画像/子画像 JSON；
+2. 修改 `IndexerConfig.master_profile` / `domain_profile`，或在知识库上设置
+   `domain_profile`（通常写子画像名）；
 3. 重建相关 KB 的索引（REINDEX）——实体是在入库时写入 Neo4j 的，换画像不会自动改旧数据。
 
 也可以设置 `IndexerConfig.domain_profile_path` 直接指向一个 JSON 文件（优先级最高）。
@@ -23,6 +34,8 @@
   "version": "1",
   "language": "zh",
   "description": "……",
+  // 主画像留空；子画像填主画像名，加载时自动继承公共定义
+  "master": "",
 
   // 实体类型：name 是写入 LLM 输出的 type；examples 用来展示垂直领域粒度
   "entity_types": [

@@ -49,8 +49,8 @@ from utils.hashing import short_digest
 from utils.text import truncate
 from utils.tokens import estimate_tokens
 
-from ...caching import ChunkCache, graph_extraction_cache_key
-from ..domain.models import DomainProfile
+from config.domain import DomainProfile
+from ..caching import ChunkCache, graph_extraction_cache_key
 from .base import (
     GENERIC_KEYWORD_BLACKLIST,
     filter_relations,
