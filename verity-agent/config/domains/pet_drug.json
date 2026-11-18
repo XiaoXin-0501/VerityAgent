@@ -1,0 +1,49 @@
+{
+  "name": "pet_drug",
+  "display_name": "宠物药品",
+  "master": "pet_medical",
+  "version": "1",
+  "description": "宠物药品细分画像：药物、活性成分、剂型、适应证、禁忌与相互作用；公共疾病/症状/检查类型沿用主画像“宠物医疗”。",
+  "entity_types": [
+    {
+      "name": "drug",
+      "label": "药物/活性成分",
+      "description": "宠物临床使用的具体药物、活性成分、生物制剂或药物类别",
+      "examples": [
+        "阿莫西林克拉维酸",
+        "头孢氨苄",
+        "恩诺沙星",
+        "甲硝唑",
+        "多西环素",
+        "泼尼松"
+      ]
+    },
+    {
+      "name": "dosage_form",
+      "label": "剂型/规格",
+      "description": "药品的剂型、浓度、规格或给药途径",
+      "examples": ["片剂", "注射液", "口服混悬液", "滴耳液", "缓释片"]
+    },
+    {
+      "name": "drug_class",
+      "label": "药物类别",
+      "description": "按药理作用划分的药物类别",
+      "examples": ["β-内酰胺类抗生素", "大环内酯类", "糖皮质激素", "非甾体抗炎药"]
+    }
+  ],
+  "whitelist": [
+    {"name": "阿莫西林克拉维酸", "type": "drug", "aliases": ["阿莫西林克拉维酸钾", "Augmentin"]},
+    {"name": "恩诺沙星", "type": "drug", "aliases": ["Enrofloxacin", "拜有利"]}
+  ],
+  "relations": [
+    {"name": "used_for", "label": "药物→适应证", "description": "药物用于治疗/预防的疾病或症状"},
+    {"name": "adverse_reaction", "label": "药物→不良反应", "description": "药物引起的不良反应或副作用"},
+    {"name": "dosage_form_of", "label": "剂型→药物", "description": "剂型/规格所属的药物"},
+    {"name": "drug_class_of", "label": "类别→药物", "description": "药物所属的药物类别"}
+  ],
+  "prompt": {
+    "role": "你是宠物药品知识图谱的实体与关系抽取器。",
+    "entity_guidance": "优先抽取具体药物、活性成分、剂型规格和药物类别；疾病/症状/检查等公共概念沿用主画像类型。",
+    "relation_guidance": "只抽取正文明确表达的药物-适应证、不良反应、剂型、类别关系。"
+  }
+}

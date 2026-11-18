@@ -308,6 +308,14 @@ class Agent:
         if self._cancel_tasks:
             await asyncio.gather(*list(self._cancel_tasks), return_exceptions=True)
         await self.background_tasks.close(self.config.cancel_grace_s)
+        # 流程日志由进程级 handler 持有；关闭 Agent 时一并释放文件。
+        flow_log = getattr(self.deps, "flow_log", None)
+        close_flow = getattr(flow_log, "close", None)
+        if callable(close_flow):
+            try:
+                close_flow()
+            except Exception:  # noqa: BLE001 - 日志关闭失败不影响退出
+                pass
 
     # ——————————————————— 内部 ———————————————————
 

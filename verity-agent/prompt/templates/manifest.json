@@ -228,26 +228,20 @@
         }
       ]
     },
-    "rag.query_rewrite.system": {
-      "file": "rag/query_rewrite.system.md",
+    "agent.query_plan.system": {
+      "file": "agent/query_plan.system.md",
       "version": 1,
-      "description": "查询改写 system prompt",
-      "purpose": "rag.query_rewrite",
-      "static": false,
+      "description": "查询规划 system prompt：规则未命中时的意图识别/query 改写/RAG 决策",
+      "purpose": "agent.query_plan",
+      "static": true,
       "cacheable": true,
-      "variables": [
-        {
-          "name": "max_variants",
-          "description": "最多输出的改写条数",
-          "required": true
-        }
-      ]
+      "variables": []
     },
-    "rag.intent.system": {
-      "file": "rag/intent.system.md",
+    "agent.reflection.system": {
+      "file": "agent/reflection.system.md",
       "version": 1,
-      "description": "规则未命中时的 LLM 意图分类 system prompt",
-      "purpose": "rag.intent",
+      "description": "主循环反思 system prompt：检查方向并继续/调整/止损",
+      "purpose": "agent.reflection",
       "static": true,
       "cacheable": true,
       "variables": []

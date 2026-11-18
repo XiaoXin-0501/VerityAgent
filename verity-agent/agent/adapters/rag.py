@@ -26,11 +26,17 @@ class RetrieverRagAdapter:
         permissions: frozenset[str],
         top_k: int | None = None,
         trace_id: str | None = None,
+        original_query: str | None = None,
+        rewritten_query: str | None = None,
+        rag_intent: str | None = None,
     ) -> Any:
         """执行一次只读检索；权限过滤由 RAG 流水线负责。"""
         return await self.retriever.retrieve(
             RetrievalRequest(
                 query=query,
+                original_query=original_query,
+                rewritten_query=rewritten_query,
+                rag_intent=rag_intent,
                 kb_ids=list(kb_ids),
                 user_id=user_id,
                 permissions=permissions,

@@ -6,7 +6,65 @@ from pydantic import Field, model_validator
 
 from .base import ConfigModel
 
-__all__ = ["AgentConfig", "AgentPolicy", "AgentStreamConfig"]
+__all__ = [
+    "AgentConfig",
+    "AgentPolicy",
+    "AgentStreamConfig",
+    "QueryPlanConfig",
+    "ReflectionConfig",
+]
+
+
+class QueryPlanConfig(ConfigModel):
+    """Query 规划（意图识别 + query 改写）配置。
+
+    Agent 在每次 run 的上下文装配前执行一次：先用可解释规则初筛，规则
+    无法确定是否需要 RAG 时再调用 LLM；LLM 输入包含用户画像、当前会话
+    历史和垂直领域目录，输出改写 query、RAG 召回意图与用户意图。
+    """
+
+    # 是否启用 query 规划；关闭时直接使用用户原话，不做改写/意图识别
+    enabled: bool = True
+    # 规则无法判断时是否调用 LLM 兜底
+    use_llm: bool = True
+    # 规划模型 id；为空时使用 Agent 默认 chat 模型
+    model_id: str | None = None
+    # LLM 超时（秒）；超时保留规则结果
+    timeout_s: float = Field(default=8.0, gt=0)
+    # LLM 最大输出 token；输出是短 JSON
+    max_output_tokens: int = Field(default=512, ge=64)
+    # 注入规划提示词的历史消息条数；0 表示不注入历史
+    history_messages: int = Field(default=8, ge=0)
+    # 用户画像注入上限（token）
+    profile_token_budget: int = Field(default=512, ge=0)
+    # 垂直领域目录注入上限（字符）
+    domain_catalog_chars: int = Field(default=2000, ge=0)
+    # 低于该字符数的 query 不调用 LLM，直接用规则结果
+    min_query_chars: int = Field(default=2, ge=1)
+
+
+class ReflectionConfig(ConfigModel):
+    """主循环反思配置。
+
+    一次 run 的循环每推进 ``interval_steps`` 次，插入一次独立反思调用：
+    检查当前方向是否仍在回答用户问题、工具结果是否有进展；可以继续、
+    调整方向或止损并强制收敛到最终回答。
+    """
+
+    # 是否启用循环反思
+    enabled: bool = True
+    # 每多少次主循环迭代反思一次；1 表示每轮都反思
+    interval_steps: int = Field(default=3, ge=1)
+    # 反思模型 id；为空时使用 Agent 默认 chat 模型
+    model_id: str | None = None
+    # 反思 LLM 超时（秒）
+    timeout_s: float = Field(default=15.0, gt=0)
+    # 反思 LLM 最大输出 token；输出是短 JSON
+    max_output_tokens: int = Field(default=512, ge=64)
+    # 注入反思提示词的单个工具结果最多字符数
+    max_tool_result_chars: int = Field(default=1200, ge=100)
+    # 反思判定“止损”时是否清空工具并强制最终回答
+    force_final_on_stop: bool = True
 
 
 class AgentStreamConfig(ConfigModel):
@@ -40,6 +98,10 @@ class AgentPolicy(ConfigModel):
 class AgentConfig(ConfigModel):
     # 运行限制（回合/工具/LLM 次数/租约）
     policy: AgentPolicy = Field(default_factory=AgentPolicy)
+    # Query 规划：规则初筛 + LLM 兜底（意图识别/query 改写/RAG 决策）
+    query_plan: QueryPlanConfig = Field(default_factory=QueryPlanConfig)
+    # 主循环反思：每 N 次循环检查方向，必要时止损
+    reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     # SSE 心跳与重放缓冲
     stream: AgentStreamConfig = Field(default_factory=AgentStreamConfig)
     # 运行期状态落 Redis 时的 TTL；必须大于 run 租约

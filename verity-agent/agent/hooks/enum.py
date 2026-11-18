@@ -23,6 +23,9 @@ class HookEvent(StrEnum):
     RUN_START = "run.start"
     RUN_END = "run.end"
     RUN_ERROR = "run.error"
+    # 查询规划与反思
+    AGENT_QUERY_PLAN = "query.plan"
+    AGENT_REFLECTION = "agent.reflection"
     # 回合
     TURN_START = "turn.start"
     TURN_END = "turn.end"

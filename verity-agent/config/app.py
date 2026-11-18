@@ -29,7 +29,7 @@ class LoggingConfig(ConfigModel):
     """本地文件日志配置。
 
     - 默认落盘到 Windows D 盘；路径可被 ``APP__LOG__DIRECTORY`` 覆盖；
-    - 使用标准库 ``RotatingFileHandler``，按用途分文件轮转（app/access/error/rag）；
+    - 使用标准库 ``RotatingFileHandler``，按用途分文件轮转（app/access/error/rag/flow）；
     - 多进程部署时标准库 handler 不保证跨进程安全，生产 worker=1 或改用
       外部日志采集。
     """
@@ -46,6 +46,17 @@ class LoggingConfig(ConfigModel):
     error_file_name: str = Field(default="error.log", min_length=1)
     # RAG 入库/检索组件日志；按 logger 前缀分流
     rag_file_name: str = Field(default="rag.log", min_length=1)
+    # 单次请求的流程详情日志（JSONL）：完整记录 prompt、工具调用、耗时、
+    # token、成功/失败等；与人类可读的 app 日志分开，便于机器分析。
+    flow_file_name: str = Field(default="flow.jsonl", min_length=1)
+    # 是否写流程详情日志
+    flow_enabled: bool = True
+    # 流程日志是否记录每次 LLM 请求的完整 prompt（含 system/历史/工具）
+    flow_include_prompts: bool = True
+    # 单次 prompt/消息在流程日志中的最大字符数；超出截断并标记
+    flow_max_prompt_chars: int = Field(default=20000, ge=500)
+    # 单个工具结果在流程日志中的最大字符数；超出截断并标记
+    flow_max_result_chars: int = Field(default=4000, ge=100)
     # 单文件大小上限（字节）；超过后轮转
     max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     # 保留的历史文件数量
@@ -57,12 +68,13 @@ class LoggingConfig(ConfigModel):
 
     @model_validator(mode="after")
     def _unique_file_names(self) -> "LoggingConfig":
-        """四类日志必须写到不同文件，避免重复 handler 互相覆盖/重复。"""
+        """各类日志必须写到不同文件，避免重复 handler 互相覆盖/重复。"""
         names = [
             self.file_name,
             self.access_file_name,
             self.error_file_name,
             self.rag_file_name,
+            self.flow_file_name,
         ]
         if len(set(names)) != len(names):
             raise ValueError("log 文件名不能重复")

@@ -27,7 +27,6 @@ __all__ = [
     "RetrievalStage",
     "RetrievalWarningCode",
     "RetrievalErrorCode",
-    "QueryIntent",
 ]
 
 
@@ -281,9 +280,7 @@ class RetrievalWarningCode(StrEnum):
     QUERY_TOO_LONG = "QUERY_TOO_LONG"
     RERANK_DISABLED = "RERANK_DISABLED"
     RERANK_FAILED = "RERANK_FAILED"
-    QUERY_REWRITE_FAILED = "QUERY_REWRITE_FAILED"
-    QUERY_REWRITE_EMPTY = "QUERY_REWRITE_EMPTY"
-    INTENT_LLM_FAILED = "INTENT_LLM_FAILED"
+    REWRITTEN_QUERY_FAILED = "REWRITTEN_QUERY_FAILED"
     GRAPH_SKIPPED = "GRAPH_SKIPPED"
     GRAPH_FAILED = "GRAPH_FAILED"
     GRAPH_LOW_EVIDENCE = "GRAPH_LOW_EVIDENCE"
@@ -313,10 +310,3 @@ class RetrievalErrorCode(StrEnum):
     DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
     TIMEOUT = "TIMEOUT"
     INTERNAL = "INTERNAL"
-
-
-class QueryIntent(StrEnum):
-    LOOKUP = "lookup"
-    COMPARE = "compare"
-    SUMMARIZE = "summarize"
-    HOWTO = "howto"

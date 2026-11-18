@@ -16,12 +16,13 @@ class PromptId(StrEnum):
 
     # Agent：主循环基础 system prompt
     AGENT_SYSTEM = "agent.system"
+    # Agent：查询规划（规则未命中时的意图识别/query 改写/RAG 决策）
+    AGENT_QUERY_PLAN_SYSTEM = "agent.query_plan.system"
+    # Agent：主循环反思（检查方向/止损）
+    AGENT_REFLECTION_SYSTEM = "agent.reflection.system"
     # RAG：文档描述精炼
     RAG_DESCRIPTION_SYSTEM = "rag.description.system"
     RAG_DESCRIPTION_USER = "rag.description.user"
-    # RAG：查询改写与意图分类
-    RAG_QUERY_REWRITE_SYSTEM = "rag.query_rewrite.system"
-    RAG_INTENT_SYSTEM = "rag.intent.system"
     # RAG：垂直领域图抽取
     RAG_GRAPH_SYSTEM = "rag.graph.system"
     RAG_GRAPH_USER = "rag.graph.user"

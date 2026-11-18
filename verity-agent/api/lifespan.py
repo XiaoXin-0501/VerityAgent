@@ -39,7 +39,7 @@ from agent.workers import (
 from prompt import PromptId, build_prompt_registry
 from provider.factory import build_registry
 from rag.bootstrap import build_default_indexer, build_default_retriever
-from rag.indexer.enrichment.domain import load_domain_profile
+from config.domain import load_domain_profile, load_master_profile
 from store.minio import close_minio, init_minio
 from store.neo4j import (
     check_schema as check_graph_schema,
@@ -122,11 +122,17 @@ def _default_chat_model_id() -> str | None:
 def _load_domain_profile_by_name(name: str):
     """按 KB 绑定的画像名加载画像；全局 path 仅匹配同名画像。"""
     configured_path = settings.rag.indexer.domain_profile_path
-    if configured_path and Path(configured_path).stem == name:
-        return load_domain_profile(name, path=configured_path)
+    directory = settings.rag.indexer.domain_profile_dir
+    if configured_path:
+        path_obj = Path(configured_path).expanduser()
+        if path_obj.is_file():
+            if path_obj.stem == name:
+                return load_domain_profile(name, path=path_obj)
+            # 自定义目录里的其它子画像仍应与该文件同目录查找。
+            directory = directory or str(path_obj.parent)
     return load_domain_profile(
         name,
-        directory=settings.rag.indexer.domain_profile_dir,
+        directory=directory,
     )
 
 
@@ -154,39 +160,15 @@ async def _build_rag_retriever(
     except ConfigurationError as exc:
         logger.warning("RAG embedding 模型不可用: %s", exc)
         return None
-    default_chat = _default_chat_model_id()
     rerank_model = (
         _resolve_model(registry, cfg.retriever.rerank_model_id, kind="rerank")
         if cfg.retriever.rerank_enabled
-        else None
-    )
-    query_rewrite_model = (
-        _resolve_model(
-            registry,
-            cfg.retriever.query_rewrite_model_id,
-            fallback=default_chat,
-            kind="chat",
-        )
-        if cfg.retriever.query_rewrite_enabled
-        else None
-    )
-    intent_model = (
-        _resolve_model(
-            registry,
-            cfg.retriever.intent_model_id,
-            fallback=default_chat,
-            kind="chat",
-        )
-        if cfg.retriever.intent_llm_enabled
         else None
     )
     retriever = await build_default_retriever(
         cfg.retriever,
         embedding_model=embedding_model,
         rerank_model=rerank_model,
-        query_rewrite_model=query_rewrite_model,
-        intent_model=intent_model,
-        prompt_registry=prompt_registry,
         domain_profile_name=cfg.indexer.domain_profile,
         embedding_dimensions=cfg.indexer.embedding_dimensions,
         embedding_version=cfg.indexer.embedding_version,
@@ -195,11 +177,9 @@ async def _build_rag_retriever(
         event_sink=event_sink,
     )
     logger.info(
-        "RAG Retriever 就绪: embedding=%s rerank=%s rewrite=%s intent=%s",
+        "RAG Retriever 就绪: embedding=%s rerank=%s",
         embedding_id,
         cfg.retriever.rerank_model_id,
-        cfg.retriever.query_rewrite_enabled,
-        cfg.retriever.intent_llm_enabled,
     )
     return retriever
 
@@ -409,20 +389,26 @@ def _build_penalty_worker(config, queue):
 
 
 def _build_agent_system_prompt(prompt_registry) -> str:
-    """渲染 Agent 基础 system prompt；领域画像不可用时退回通用描述。"""
+    """渲染 Agent 基础 system prompt；使用主画像奠定垂直领域主题。"""
     domain_name = "通用"
     domain_description = ""
     try:
-        profile = load_domain_profile(
-            settings.rag.indexer.domain_profile,
-            path=settings.rag.indexer.domain_profile_path,
+        profile = load_master_profile(
+            settings.rag.indexer.master_profile,
+            path=(
+                settings.rag.indexer.domain_profile_path
+                if settings.rag.indexer.domain_profile_path
+                and Path(settings.rag.indexer.domain_profile_path).stem
+                == settings.rag.indexer.master_profile
+                else None
+            ),
             directory=settings.rag.indexer.domain_profile_dir,
         )
         domain_name = profile.display_name or profile.name
         domain_description = profile.description or ""
     except Exception:  # noqa: BLE001 - 画像缺失不应阻断普通对话
         logger.warning(
-            "加载领域画像失败，Agent system prompt 使用通用领域描述",
+            "加载主领域画像失败，Agent system prompt 使用通用领域描述",
             exc_info=True,
         )
     return prompt_registry.render_text(
@@ -446,11 +432,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if app.state.log_file is not None:
         log_dir = app.state.log_file.parent
         logger.info(
-            "日志文件: app=%s access=%s error=%s rag=%s",
+            "日志文件: app=%s access=%s error=%s rag=%s flow=%s",
             app.state.log_file,
             log_dir / settings.app.log.access_file_name,
             log_dir / settings.app.log.error_file_name,
             log_dir / settings.app.log.rag_file_name,
+            log_dir / settings.app.log.flow_file_name,
         )
     registry = None
     hook_dispatcher = None

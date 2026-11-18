@@ -17,7 +17,6 @@ from .hybrid import HybridRecallResult, HybridRecaller
 from .metadata import PgRetrievalMetadataStore, RetrievalMetadataStore
 from .neighbor import NeighborExpander
 from .pipeline import RetrievalPipeline
-from .query_llm import ChatIntentClassifier, ChatQueryRewriter
 from .rerank import Reranker
 from .rerank_provider import ProviderReranker
 from .weaviate import WeaviateHybridRecaller, WeaviateNeighborExpander
@@ -37,8 +36,6 @@ __all__ = [
     "WeaviateNeighborExpander",
     "Neo4jGraphExpander",
     "ProviderReranker",
-    "ChatQueryRewriter",
-    "ChatIntentClassifier",
     "rrf_fuse",
     "retrieval_cache_key",
     "query_digest",

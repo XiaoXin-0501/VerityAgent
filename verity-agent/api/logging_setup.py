@@ -5,7 +5,9 @@
 - ``verity-agent.log``：主应用日志（不含 access / RAG）；
 - ``access.log``：uvicorn HTTP access 日志；
 - ``error.log``：所有 WARNING/ERROR，集中排障；
-- ``rag.log``：``rag.*`` 入库/检索组件日志。
+- ``rag.log``：``rag.*`` 入库/检索组件日志；
+- ``flow.jsonl``：单次请求的结构化流程详情日志（JSONL），由
+  ``agent/runtime/flow.py`` 独立写入；本模块只负责创建日志目录。
 
 设计约束：
 

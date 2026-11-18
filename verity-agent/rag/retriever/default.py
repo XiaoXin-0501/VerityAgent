@@ -29,9 +29,9 @@ from collections.abc import Callable, Iterable
 from typing import Any
 from uuid import UUID, uuid4
 
+from config.domain import DomainProfile
 from config.rag import RetrieverConfig
 from exception import RagError, RagErrorCode
-from rag.indexer.enrichment import DomainProfile
 from rag.retriever.cache import (
     RetrievalCache,
     document_meta_cache_key,
@@ -45,7 +45,7 @@ from rag.retriever.graph import GraphExpander
 from rag.retriever.hybrid import HybridRecallResult, HybridRecaller
 from rag.retriever.metadata import RetrievalMetadataStore
 from rag.retriever.neighbor import NeighborExpander
-from rag.retriever.query import classify_intent_rule, estimate_language, normalize_query
+from rag.retriever.query import estimate_language, normalize_query
 from rag.retriever.rerank import Reranker
 from rag.shared.enums import (
     RAGMode,
@@ -237,8 +237,6 @@ class DefaultRetrievalPipeline:
         cache: RetrievalCache | None = None,
         domain_profile: DomainProfile | None = None,
         domain_profile_resolver: Callable[[str], DomainProfile] | None = None,
-        query_rewriter: Any | None = None,
-        intent_classifier: Any | None = None,
         max_query_chars: int = 2000,
         event_sink: RagEventSink | None = None,
     ) -> None:
@@ -257,8 +255,6 @@ class DefaultRetrievalPipeline:
             if domain_profile is not None
             else {}
         )
-        self.query_rewriter = query_rewriter
-        self.intent_classifier = intent_classifier
         self.max_query_chars = max(1, int(max_query_chars))
         self.event_sink = event_sink
         self.embedding_model_id = str(
@@ -291,6 +287,14 @@ class DefaultRetrievalPipeline:
                 name=RagEventName.RETRIEVAL_START,
                 payload={
                     "query_preview": " ".join(request.query.split())[:80],
+                    "original_query_preview": " ".join(
+                        (request.original_query or request.query).split()
+                    )[:80],
+                    "rewritten_query_preview": " ".join(
+                        (request.rewritten_query or "").split()
+                    )[:80]
+                    or None,
+                    "rag_intent": request.rag_intent,
                     "kb_count": len(request.kb_ids),
                     "top_k": request.top_k or self.config.top_k,
                     "mode": request.mode.value,
@@ -408,28 +412,9 @@ class DefaultRetrievalPipeline:
                 }
             )
 
-        # 4) 缓存 miss 后才做 LLM 意图/改写，避免命中缓存时仍消耗 token。
-        refine_started = time.perf_counter()
-        analysis = await self._refine_analysis(analysis, warnings)
-        if analysis.intent is not None or analysis.variants:
-            _stage(
-                stages,
-                RetrievalStage.ANALYZE,
-                refine_started,
-                input_count=1,
-                output_count=len(analysis.variants) + 1,
-                metadata={
-                    "intent": (
-                        analysis.intent.value
-                        if analysis.intent is not None
-                        else None
-                    ),
-                    "variants": analysis.variants,
-                    "query_rewrite_enabled": self.config.query_rewrite_enabled,
-                },
-            )
-
-        # 5) 主召回：原 query + 改写变体；单变体失败只告警，主 query 失败仍抛错。
+        # 4) 主召回：原 query + Agent 改写 query；单变体失败只告警，
+        #    主 query 失败仍抛错。意图/改写已由 Agent 查询规划完成，
+        #    RAG 不再调用 LLM。
         recall_started = time.perf_counter()
         recalled = await self._recall_variants(
             [normalized, *analysis.variants],
@@ -585,6 +570,7 @@ class DefaultRetrievalPipeline:
             policy=rerank_policy,
             graph_policy=graph_policy,
             warnings=warnings,
+            intent=analysis.intent,
         )
         stages.append(rerank_stage)
 
@@ -701,6 +687,9 @@ class DefaultRetrievalPipeline:
         )
         result = RetrievalResult(
             query=request.query,
+            original_query=request.original_query,
+            rewritten_query=request.rewritten_query,
+            rag_intent=request.rag_intent,
             normalized_query=normalized,
             kb_ids=authorized_kbs,
             mode=request.mode,
@@ -859,80 +848,16 @@ class DefaultRetrievalPipeline:
             value = match.strip()
             if value and value.lower() not in {item.lower() for item in keywords}:
                 keywords.append(value)
+        variants: list[str] = []
+        rewritten = (request.rewritten_query or "").strip()
+        if rewritten and rewritten != normalized:
+            variants.append(rewritten)
         return QueryAnalysis(
             normalized_query=normalized,
             language=estimate_language(normalized),
             keywords=keywords[:20],
             entities=entities[:20],
-            intent=(
-                classify_intent_rule(normalized)
-                if self.config.intent_rule_enabled
-                else None
-            ),
-        )
-
-    async def _refine_analysis(
-        self,
-        analysis: QueryAnalysis,
-        warnings: list[RetrievalWarning],
-    ) -> QueryAnalysis:
-        """缓存 miss 后执行 LLM 意图兜底与 query 改写；失败只降级不阻断。"""
-        intent = analysis.intent
-        if (
-            intent is None
-            and self.config.intent_llm_enabled
-            and self.intent_classifier is not None
-        ):
-            try:
-                intent = await self.intent_classifier.classify(
-                    analysis.normalized_query
-                )
-            except Exception as exc:  # noqa: BLE001 - 分类兜底可降级
-                warnings.append(
-                    _warning(
-                        RetrievalWarningCode.INTENT_LLM_FAILED,
-                        "意图 LLM 兜底失败，继续无意图检索",
-                        stage=RetrievalStage.ANALYZE,
-                        details={"cause": str(exc)},
-                    )
-                )
-        elif self.config.intent_llm_enabled and self.intent_classifier is None:
-            logger.debug("intent_llm_enabled=true 但未注入 intent classifier")
-
-        variants = list(analysis.variants)
-        if (
-            self.config.query_rewrite_enabled
-            and self.query_rewriter is not None
-            and estimate_tokens(analysis.normalized_query)
-            >= self.config.query_rewrite_min_query_tokens
-        ):
-            try:
-                variants = await self.query_rewriter.rewrite(
-                    analysis.normalized_query
-                )
-            except Exception as exc:  # noqa: BLE001 - 改写可降级
-                warnings.append(
-                    _warning(
-                        RetrievalWarningCode.QUERY_REWRITE_FAILED,
-                        "query 改写失败，使用原 query 检索",
-                        stage=RetrievalStage.ANALYZE,
-                        details={"cause": str(exc)},
-                    )
-                )
-        elif self.config.query_rewrite_enabled and self.query_rewriter is None:
-            warnings.append(
-                _warning(
-                    RetrievalWarningCode.QUERY_REWRITE_FAILED,
-                    "query_rewrite_enabled=true 但未注入改写模型",
-                    stage=RetrievalStage.ANALYZE,
-                )
-            )
-
-        return analysis.model_copy(
-            update={
-                "intent": intent,
-                "variants": variants[: self.config.query_rewrite_max_variants],
-            }
+            intent=request.rag_intent,
         )
 
     # ——————————————————— 召回 / 图 ———————————————————
@@ -977,7 +902,7 @@ class DefaultRetrievalPipeline:
             if isinstance(result, BaseException):
                 warnings.append(
                     _warning(
-                        RetrievalWarningCode.QUERY_REWRITE_FAILED,
+                        RetrievalWarningCode.REWRITTEN_QUERY_FAILED,
                         "改写查询召回失败，已跳过该变体",
                         stage=RetrievalStage.BM25,
                         details={"query": query, "cause": str(result)},
@@ -1378,6 +1303,7 @@ class DefaultRetrievalPipeline:
         policy: RerankPolicy,
         graph_policy: GraphExpansionPolicy,
         warnings: list[RetrievalWarning],
+        intent: str | None = None,
     ) -> tuple[list[RetrievedChunk], RetrievalStageTrace]:
         """执行 rerank；未启用/未注入/失败都降级为融合排序。"""
         started = time.perf_counter()
@@ -1430,7 +1356,9 @@ class DefaultRetrievalPipeline:
 
         candidates = chunks[: max(1, min(policy.top_n, len(chunks)))]
         try:
-            reranked = await self.reranker.rerank(query, candidates, policy)
+            reranked = await self.reranker.rerank(
+                query, candidates, policy, intent=intent
+            )
         except Exception as exc:  # noqa: BLE001 - rerank 可降级
             warnings.append(
                 _warning(
@@ -1503,6 +1431,7 @@ class DefaultRetrievalPipeline:
                 "enabled": True,
                 "model": self.rerank_model_id,
                 "graph_min_rerank_score": graph_policy.min_rerank_score,
+                "intent": intent,
             },
         )
 
@@ -2060,14 +1989,8 @@ class DefaultRetrievalPipeline:
                     "rerank_enabled": bool(rerank_policy.enabled and self.reranker),
                     "min_score": self._effective_min_score(request),
                     "min_quality_score": self._effective_min_quality(request),
-                    "query_rewrite": {
-                        "enabled": self.config.query_rewrite_enabled,
-                        "max_variants": self.config.query_rewrite_max_variants,
-                    },
-                    "intent": {
-                        "rule": self.config.intent_rule_enabled,
-                        "llm": self.config.intent_llm_enabled,
-                    },
+                    "rewritten_query": request.rewritten_query,
+                    "rag_intent": request.rag_intent,
                 }
             ),
             32,

@@ -36,6 +36,7 @@ from agent.llm import (
     ModelPurpose,
     TextPart,
     ThinkingPart,
+    ToolChoice,
 )
 from agent.message.enum import MessageStatus
 from agent.message.models import (
@@ -49,6 +50,13 @@ from agent.message.models import (
     user_payload_matches,
 )
 from agent.prompting import PromptBuilder
+from agent.query_plan import (
+    QueryPlan,
+    QueryPlanResult,
+    QueryPlanSource,
+    build_rule_plan,
+    normalize_query,
+)
 from agent.runtime.enums import (
     AgentErrorCode,
     AgentEventType,
@@ -57,8 +65,14 @@ from agent.runtime.enums import (
 )
 from agent.runtime.errors import AgentRuntimeError, agent_error
 from agent.runtime.events import AgentEventPublisher
+from agent.runtime.flow import (
+    RunFlowLog,
+    serialize_llm_request,
+    serialize_llm_response,
+)
 from agent.runtime.models import AgentLimits, AgentWarningData
 from agent.runtime.ports import AgentDependencies
+from agent.runtime.reflection import ReflectionAction, ReflectionEngine
 from agent.tools.enums import ToolResultStatus
 from agent.tools.models import ToolContext, ToolResult
 from config.agent import AgentConfig
@@ -84,6 +98,17 @@ class AgentLoop:
         self.config = config
         self.deps = dependencies
         self.prompt_builder = PromptBuilder(default_model_id=dependencies.model_id)
+        # 反思与主对话共用 LLM 端口/模型路由，但使用独立提示词与 purpose。
+        reflection_cfg = config.reflection
+        self.reflection = (
+            ReflectionEngine(
+                dependencies.llm,
+                model_id=reflection_cfg.model_id or dependencies.model_id,
+                config=reflection_cfg,
+            )
+            if reflection_cfg.enabled
+            else None
+        )
 
     async def run(
         self,
@@ -111,6 +136,33 @@ class AgentLoop:
             run_id=run_id,
             conversation_id=str(conversation_id),
         )
+        flow = (
+            self.deps.flow_log.bind_run(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                user_id=request.user_id,
+            )
+            if self.deps.flow_log is not None
+            else None
+        )
+        if flow is not None:
+            flow.event(
+                "run.start",
+                model_id=self.deps.model_id,
+                content=_flow_truncate(
+                    request.content,
+                    flow,
+                    attr="max_prompt_chars",
+                    default=20000,
+                ),
+                content_chars=len(request.content or ""),
+                images=len(request.images),
+                files=len(request.files),
+                client_message_id=str(request.client_message_id),
+                rag_mode=getattr(request.rag_mode, "value", request.rag_mode),
+                max_tool_rounds=request.max_tool_rounds,
+            )
         logger.info(
             "Agent run 开始: content_chars=%d images=%d files=%d "
             "client_message_id=%s",
@@ -292,16 +344,95 @@ class AgentLoop:
                 else None
             )
             tools = self._tool_descriptors(tool_selection)
-            llm_messages = await self._assemble_context(
+            llm_messages, query_plan, plan_result = await self._assemble_context(
                 history,
                 request,
                 tools,
                 run_id=run_id,
                 turn_id=turn_id,
+                flow=flow,
             )
+            # 规划阶段如果调用了 LLM，计一次调用与 token；规则结果不计。
+            if plan_result is not None and plan_result.model_id is not None:
+                llm_calls += 1
+                usage = _add_usage(usage, plan_result.usage)
+            # 工具调用历史只用于反思输入与流程日志；不进入 LLM 上下文。
+            tool_history: list[dict[str, Any]] = []
+            # 反思判定止损后，下一轮主 LLM 不再暴露工具并强制最终回答。
+            force_final = False
+            loop_step = 0
 
             while True:
+                loop_step += 1
                 self._check_runtime(limits, cancel_event, lease_lost)
+                # 每 N 次主循环迭代插入一次反思；保留至少一次主 LLM 预算。
+                if self._should_reflect(loop_step, limits, llm_calls):
+                    llm_calls += 1
+                    reflection = await self._reflect(
+                        request,
+                        query_plan=query_plan,
+                        tool_history=tool_history,
+                        step_no=loop_step,
+                        limits=limits,
+                        started=started,
+                        run_id=run_id,
+                        turn_id=turn_id,
+                        flow=flow,
+                    )
+                    if reflection is not None:
+                        usage = _add_usage(usage, reflection.usage)
+                        decision = reflection.decision
+                        if decision.action is ReflectionAction.ADJUST:
+                            guidance = decision.guidance or decision.reason
+                            if guidance:
+                                llm_messages.append(
+                                    LLMMessage(
+                                        role=LLMRole.SYSTEM,
+                                        content=[
+                                            TextPart(
+                                                text=f"[反思指导] {guidance}"
+                                            )
+                                        ],
+                                    )
+                                )
+                        elif decision.action is ReflectionAction.STOP:
+                            force_final = bool(
+                                self.config.reflection.force_final_on_stop
+                            )
+                            stop_text = (
+                                decision.guidance
+                                or decision.reason
+                                or "现有信息已足够，停止调用工具并直接回答。"
+                            )
+                            llm_messages.append(
+                                LLMMessage(
+                                    role=LLMRole.SYSTEM,
+                                    content=[
+                                        TextPart(
+                                            text=(
+                                                "[反思止损] 停止继续调用工具，"
+                                                "基于已经获得的信息给出最终回答；"
+                                                f"不要编造缺失信息。{stop_text}"
+                                            )
+                                        )
+                                    ],
+                                )
+                            )
+                        await self._emit_hook(
+                            "agent.reflection",
+                            {
+                                "action": decision.action.value,
+                                "direction_ok": decision.direction_ok,
+                                "reason": decision.reason,
+                                "guidance": decision.guidance,
+                                "step_no": loop_step,
+                                "force_final": force_final,
+                            },
+                            request=request,
+                            run_id=run_id,
+                            turn_id=turn_id,
+                            duration_ms=reflection.latency_ms,
+                        )
                 if llm_calls >= limits.max_llm_calls:
                     raise AgentRuntimeError(
                         agent_error(
@@ -324,14 +455,36 @@ class AgentLoop:
                     run_id=run_id,
                     turn_id=turn_id,
                     messages=llm_messages,
-                    tools=tools,
+                    tools=[] if force_final else tools,
                     deadline=limits.deadline,
+                    tool_choice=(
+                        ToolChoice(mode="none") if force_final else None
+                    ),
                 )
                 use_stream = bool(getattr(request, "stream", False)) and hasattr(
                     self.deps.llm, "stream"
                 )
                 if use_stream:
                     llm_request = llm_request.model_copy(update={"stream": True})
+                if flow is not None:
+                    flow.event(
+                        "llm.request",
+                        step_no=loop_step,
+                        force_final=force_final,
+                        **serialize_llm_request(
+                            llm_request,
+                            include_prompts=getattr(
+                                getattr(flow, "sink", None),
+                                "include_prompts",
+                                True,
+                            ),
+                            max_chars=getattr(
+                                getattr(flow, "sink", None),
+                                "max_prompt_chars",
+                                20000,
+                            ),
+                        ),
+                    )
                 await self._emit_hook(
                     "llm.request.start",
                     {
@@ -467,6 +620,13 @@ class AgentLoop:
                 if assistant_llm is not None:
                     llm_messages.append(assistant_llm)
                 usage = _add_usage(usage, response.usage)
+                if flow is not None:
+                    flow.event(
+                        "llm.response",
+                        step_no=loop_step,
+                        force_final=force_final,
+                        **serialize_llm_response(response),
+                    )
                 final_assistant = assistant
                 await emit(
                     AgentEventType.ASSISTANT_COMPLETED,
@@ -576,6 +736,9 @@ class AgentLoop:
                         deadline=limits.deadline,
                         publisher=publisher,
                         cancel_event=cancel_event,
+                        query_plan=query_plan,
+                        tool_history=tool_history,
+                        flow=flow,
                     )
                     for tool_message in tool_messages:
                         stored = await self.deps.messages.append_tool(
@@ -701,6 +864,22 @@ class AgentLoop:
                 result.model_dump(mode="json"),
             )
             await emit(AgentEventType.DONE, {"run_id": run_id, "status": "completed"})
+            if flow is not None:
+                flow.event(
+                    "run.end",
+                    status="completed",
+                    duration_ms=duration,
+                    llm_calls=llm_calls,
+                    tool_rounds=tool_rounds,
+                    message_count=len(message_ids),
+                    usage=usage.model_dump(mode="json"),
+                    warning_count=len(warnings),
+                    assistant_message_id=(
+                        str(final_assistant.id)
+                        if final_assistant is not None
+                        else None
+                    ),
+                )
             logger.info(
                 "%s",
                 summary_block(
@@ -792,6 +971,18 @@ class AgentLoop:
             )
             await emit(event, exc.error.model_dump(mode="json"))
             await emit(AgentEventType.DONE, {"run_id": run_id, "status": status.value})
+            if flow is not None:
+                flow.event(
+                    "run.end",
+                    status=status.value,
+                    duration_ms=duration,
+                    llm_calls=llm_calls,
+                    tool_rounds=tool_rounds,
+                    message_count=len(message_ids),
+                    usage=usage.model_dump(mode="json"),
+                    warning_count=len(warnings),
+                    error=exc.error.model_dump(mode="json"),
+                )
             return result
         except asyncio.CancelledError:
             raise
@@ -859,6 +1050,18 @@ class AgentLoop:
             )
             await emit(AgentEventType.RUN_FAILED, error.model_dump(mode="json"))
             await emit(AgentEventType.DONE, {"run_id": run_id, "status": "failed"})
+            if flow is not None:
+                flow.event(
+                    "run.end",
+                    status="failed",
+                    duration_ms=duration,
+                    llm_calls=llm_calls,
+                    tool_rounds=tool_rounds,
+                    message_count=len(message_ids),
+                    usage=usage.model_dump(mode="json"),
+                    warning_count=len(warnings),
+                    error=error.model_dump(mode="json"),
+                )
             return result
         finally:
             if heartbeat_task is not None:
@@ -1101,6 +1304,7 @@ class AgentLoop:
         messages: list[LLMMessage],
         tools: list[LLMToolDescriptor],
         deadline,
+        tool_choice: ToolChoice | None = None,
     ) -> LLMRequest:
         """通过 PromptBuilder 构造 LLM 应用层请求。"""
         return self.prompt_builder.build(
@@ -1111,7 +1315,7 @@ class AgentLoop:
             messages=messages,
             tools=tools,
             model_id=request.model_id or self.deps.model_id,
-            tool_choice=request.tool_choice,
+            tool_choice=tool_choice or request.tool_choice,
             purpose=ModelPurpose.CHAT,
             deadline=deadline,
             metadata={**self.deps.metadata, **request.metadata},
@@ -1121,10 +1325,25 @@ class AgentLoop:
     async def _injected_rag_section(
         self,
         request: AgentRequest,
+        query_plan: QueryPlan,
+        *,
+        flow: RunFlowLog | None = None,
     ) -> ContextSection | None:
-        """INJECTED 模式：检索 KB 并渲染成 RAG section；失败降级不阻断。"""
+        """INJECTED 模式：按查询规划检索 KB 并渲染成 RAG section。
+
+        规划 ``needs_rag=false`` 时直接跳过；检索失败降级为无 RAG，不阻断。
+        交给 RAG 的参数包含用户原话、改写 query 与召回意图。
+        """
         mode = getattr(request.rag_mode, "value", request.rag_mode)
         if mode != "injected" or self.deps.rag is None:
+            return None
+        if not query_plan.needs_rag:
+            if flow is not None:
+                flow.event(
+                    "rag.injected.skip",
+                    reason="query_plan.needs_rag=false",
+                    original_query=query_plan.original_query,
+                )
             return None
         raw_ids = request.metadata.get("kb_ids") or []
         if isinstance(raw_ids, (str, bytes)):
@@ -1139,10 +1358,14 @@ class AgentLoop:
             logger.debug("INJECTED RAG 缺少 kb_ids 或 query，跳过注入")
             return None
         top_k = request.metadata.get("top_k")
+        started = perf_counter()
         try:
             # 检索事件由 Retriever 的 RagEventSink 统一发出；Agent 只消费结果。
             result = await self.deps.rag.retrieve(
                 query=request.content,
+                original_query=request.content,
+                rewritten_query=query_plan.rewritten_query,
+                rag_intent=query_plan.rag_intent_label,
                 kb_ids=kb_ids,
                 user_id=request.user_id,
                 permissions=request.permissions,
@@ -1151,8 +1374,31 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001 - 注入式 RAG 可降级
             logger.warning("INJECTED RAG 检索失败，按无 RAG 继续", exc_info=True)
+            if flow is not None:
+                flow.event(
+                    "rag.injected.error",
+                    duration_ms=int((perf_counter() - started) * 1000),
+                    original_query=request.content,
+                    rewritten_query=query_plan.rewritten_query,
+                    rag_intent=query_plan.rag_intent_label,
+                )
             return None
         chunks = list(getattr(result, "chunks", []) or [])
+        if flow is not None:
+            flow.event(
+                "rag.injected.result",
+                duration_ms=int((perf_counter() - started) * 1000),
+                original_query=request.content,
+                rewritten_query=query_plan.rewritten_query,
+                rag_intent=query_plan.rag_intent_label,
+                kb_ids=[str(item) for item in kb_ids],
+                chunk_count=len(chunks),
+                retrieved_ms=getattr(result, "duration_ms", None),
+                warnings=[
+                    str(getattr(item, "code", item))
+                    for item in (getattr(result, "warnings", []) or [])
+                ],
+            )
         if not chunks:
             return None
         lines: list[str] = []
@@ -1169,6 +1415,60 @@ class AgentLoop:
             token_estimate=0,
         )
 
+    async def _plan_query(
+        self,
+        request: AgentRequest,
+        history: Sequence[StoredMessage],
+        *,
+        profile_text: str | None,
+        session_text: str | None,
+        turn_id: str,
+    ) -> tuple[QueryPlan, QueryPlanResult | None]:
+        """运行查询规划；未配置规划器时返回不检索的默认计划。"""
+        cfg = self.config.query_plan
+        normalized = normalize_query(request.content)
+        history_text = _history_text(
+            history,
+            cfg.history_messages,
+            current_content=request.content,
+        )
+        if self.deps.query_planner is None:
+            return (
+                QueryPlan(
+                    original_query=request.content,
+                    normalized_query=normalized,
+                    needs_rag=False,
+                    user_intent=normalized,
+                    source=QueryPlanSource.DISABLED,
+                    confidence=0.0,
+                    reason="未配置查询规划器，默认不注入 RAG",
+                ),
+                None,
+            )
+        try:
+            result = await self.deps.query_planner.plan(
+                request.content,
+                profile_text=profile_text,
+                session_summary=session_text,
+                history_text=history_text,
+                domain_catalog=self.deps.domain_catalog,
+                trace_id=request.request_id,
+                conversation_id=request.conversation_id,
+                turn_id=turn_id,
+                user_id=request.user_id,
+            )
+        except Exception:  # noqa: BLE001 - 规划失败不阻断对话
+            logger.warning("查询规划失败，使用规则兜底", exc_info=True)
+            return (
+                build_rule_plan(
+                    request.content,
+                    source=QueryPlanSource.FALLBACK,
+                    confidence=0.3,
+                ),
+                None,
+            )
+        return result.plan, result
+
     async def _assemble_context(
         self,
         history: Sequence[StoredMessage],
@@ -1177,21 +1477,20 @@ class AgentLoop:
         *,
         run_id: str,
         turn_id: str,
-    ) -> list[LLMMessage]:
-        """加载 memory/预算并组装 Prompt；未注入 assembler 时走旧窗口逻辑。"""
-        if self.deps.context is None:
-            return await self._llm_messages(history, request)
-        base_messages = await self._llm_messages(
-            history,
-            request,
-            include_system=False,
-        )
-        memory_text: str | None = None
+        flow: RunFlowLog | None = None,
+    ) -> tuple[list[LLMMessage], QueryPlan, QueryPlanResult | None]:
+        """加载 memory/预算并组装 Prompt。
+
+        先做查询规划，再用规划结果召回长期事实、决定是否注入 RAG；
+        未注入 assembler 时仍执行规划，只跳过 section 组装。
+        """
         # 画像最多占上下文的 1/4，避免长期记忆挤占当前对话与工具结果。
         memory_budget = max(
             256,
             int(getattr(self.deps.context, "max_context_tokens", 8192)) // 4,
         )
+        memory_text: str | None = None
+        session_text: str | None = None
         if self.deps.memory is not None:
             try:
                 memory_text = await self.deps.memory.load_profile(
@@ -1200,8 +1499,101 @@ class AgentLoop:
                 )
             except Exception:  # noqa: BLE001 - 画像读取失败不阻断对话
                 logger.warning("加载用户画像失败", exc_info=True)
+            try:
+                session_text = await self.deps.memory.load_session_summary(
+                    request.conversation_id,
+                    token_budget=memory_budget,
+                )
+            except Exception:  # noqa: BLE001 - 摘要读取失败不阻断对话
+                logger.warning("加载会话摘要失败", exc_info=True)
+
+        query_plan, plan_result = await self._plan_query(
+            request,
+            history,
+            profile_text=memory_text,
+            session_text=session_text,
+            turn_id=turn_id,
+        )
+        await self._emit_hook(
+            "query.plan",
+            {
+                "original_query": query_plan.original_query,
+                "needs_rag": query_plan.needs_rag,
+                "rewritten_query": query_plan.rewritten_query,
+                "rag_intent": query_plan.rag_intent_label,
+                "user_intent": query_plan.user_intent,
+                "source": query_plan.source.value,
+                "confidence": query_plan.confidence,
+                "reason": query_plan.reason,
+                "model_id": plan_result.model_id if plan_result else None,
+                "latency_ms": plan_result.latency_ms if plan_result else None,
+            },
+            request=request,
+            run_id=run_id,
+            turn_id=turn_id,
+            duration_ms=plan_result.latency_ms if plan_result else None,
+        )
+        if flow is not None:
+            flow.event(
+                "query.plan",
+                original_query=query_plan.original_query,
+                normalized_query=query_plan.normalized_query,
+                needs_rag=query_plan.needs_rag,
+                rewritten_query=query_plan.rewritten_query,
+                rag_intent=query_plan.rag_intent_label,
+                user_intent=query_plan.user_intent,
+                source=query_plan.source.value,
+                confidence=query_plan.confidence,
+                reason=query_plan.reason,
+                profile_chars=len(memory_text or ""),
+                session_chars=len(session_text or ""),
+                model_id=plan_result.model_id if plan_result else None,
+                latency_ms=plan_result.latency_ms if plan_result else None,
+                usage=(
+                    plan_result.usage.model_dump(mode="json")
+                    if plan_result
+                    else None
+                ),
+                prompt=(
+                    _flow_truncate(
+                        plan_result.prompt_text,
+                        flow,
+                        attr="max_prompt_chars",
+                        default=20000,
+                    )
+                    if plan_result
+                    else None
+                ),
+                raw_output=(
+                    _flow_truncate(
+                        plan_result.raw_output,
+                        flow,
+                        attr="max_prompt_chars",
+                        default=20000,
+                    )
+                    if plan_result
+                    else None
+                ),
+            )
+
+        if self.deps.context is None:
+            return (
+                await self._llm_messages(history, request),
+                query_plan,
+                plan_result,
+            )
+
+        base_messages = await self._llm_messages(
+            history,
+            request,
+            include_system=False,
+        )
         sections: list[ContextSection] = []
-        rag_section = await self._injected_rag_section(request)
+        rag_section = await self._injected_rag_section(
+            request,
+            query_plan,
+            flow=flow,
+        )
         if rag_section is not None:
             sections.append(rag_section)
         if memory_text:
@@ -1214,15 +1606,6 @@ class AgentLoop:
                     token_estimate=0,
                 )
             )
-        session_text: str | None = None
-        if self.deps.memory is not None:
-            try:
-                session_text = await self.deps.memory.load_session_summary(
-                    request.conversation_id,
-                    token_budget=memory_budget,
-                )
-            except Exception:  # noqa: BLE001 - 摘要读取失败不阻断对话
-                logger.warning("加载会话摘要失败", exc_info=True)
         if session_text:
             sections.append(
                 ContextSection(
@@ -1233,11 +1616,12 @@ class AgentLoop:
                     token_estimate=0,
                 )
             )
-        if self.deps.facts is not None and request.content.strip():
+        if self.deps.facts is not None and query_plan.fact_query.strip():
             try:
+                # 用户意图用于事实召回，而不是原话；规划已把指代补全。
                 hits = await self.deps.facts.recall(
                     user_id=request.user_id,
-                    query=request.content,
+                    query=query_plan.fact_query,
                     top_k=self.deps.fact_top_k,
                     min_confidence=self.deps.fact_min_confidence,
                 )
@@ -1249,6 +1633,12 @@ class AgentLoop:
                 for item in hits
                 if str(item.get("content") or "").strip()
             ]
+            if flow is not None:
+                flow.event(
+                    "memory.facts.recall",
+                    query=query_plan.fact_query,
+                    hit_count=len(fact_lines),
+                )
             if fact_lines:
                 sections.append(
                     ContextSection(
@@ -1270,26 +1660,108 @@ class AgentLoop:
             run_id=run_id,
             turn_id=turn_id,
         )
-        plan = self.deps.context.assemble(
+        context_plan = self.deps.context.assemble(
             system_prompt=self.deps.system_prompt,
             sections=sections,
             messages=base_messages,
             tool_tokens=sum(len(item.name) + len(item.description) for item in tools)
             // 4,
         )
+        if flow is not None:
+            flow.event(
+                "context.assemble",
+                token_estimate=context_plan.token_estimate,
+                sections=[item.name for item in context_plan.sections],
+                dropped=context_plan.dropped_sections,
+                truncated=context_plan.truncated,
+                history_count=len(base_messages),
+                tool_count=len(tools),
+            )
         await self._emit_hook(
             "context.assemble.end",
             {
-                "token_estimate": plan.token_estimate,
-                "sections": [item.name for item in plan.sections],
-                "dropped": plan.dropped_sections,
-                "truncated": plan.truncated,
+                "token_estimate": context_plan.token_estimate,
+                "sections": [item.name for item in context_plan.sections],
+                "dropped": context_plan.dropped_sections,
+                "truncated": context_plan.truncated,
             },
             request=request,
             run_id=run_id,
             turn_id=turn_id,
         )
-        return plan.messages
+        return context_plan.messages, query_plan, plan_result
+
+    def _should_reflect(
+        self,
+        loop_step: int,
+        limits: AgentLimits,
+        llm_calls: int,
+    ) -> bool:
+        """是否在本轮迭代前插入反思；至少为最终回答保留一次 LLM 预算。"""
+        cfg = self.config.reflection
+        if not cfg.enabled or self.reflection is None:
+            return False
+        if loop_step <= 1 or loop_step % cfg.interval_steps != 0:
+            return False
+        return llm_calls + 1 < limits.max_llm_calls
+
+    async def _reflect(
+        self,
+        request: AgentRequest,
+        *,
+        query_plan: QueryPlan,
+        tool_history: list[dict[str, Any]],
+        step_no: int,
+        limits: AgentLimits,
+        started,
+        run_id: str,
+        turn_id: str,
+        flow: RunFlowLog | None,
+    ):
+        """执行一次反思并写流程日志；失败返回 None。"""
+        if self.reflection is None:
+            return None
+        elapsed_ms = int((utcnow() - started).total_seconds() * 1000)
+        result = await self.reflection.reflect(
+            original_query=request.content,
+            query_plan=query_plan,
+            tool_history=tool_history,
+            step_no=step_no,
+            limits=limits,
+            elapsed_ms=elapsed_ms,
+            deadline_remaining_s=(
+                limits.deadline - utcnow()
+            ).total_seconds(),
+            trace_id=request.request_id,
+            conversation_id=request.conversation_id,
+            turn_id=turn_id,
+            user_id=request.user_id,
+        )
+        if flow is not None and result is not None:
+            flow.event(
+                "reflection",
+                step_no=step_no,
+                action=result.decision.action.value,
+                direction_ok=result.decision.direction_ok,
+                reason=result.decision.reason,
+                guidance=result.decision.guidance,
+                model_id=result.model_id,
+                latency_ms=result.latency_ms,
+                usage=result.usage.model_dump(mode="json"),
+                prompt=_flow_truncate(
+                    result.prompt_text,
+                    flow,
+                    attr="max_prompt_chars",
+                    default=20000,
+                ),
+                raw_output=_flow_truncate(
+                    result.raw_output,
+                    flow,
+                    attr="max_prompt_chars",
+                    default=20000,
+                ),
+            )
+        return result
 
     async def _llm_messages(
         self,
@@ -1609,6 +2081,9 @@ class AgentLoop:
         deadline,
         publisher: AgentEventPublisher,
         cancel_event: asyncio.Event,
+        query_plan: QueryPlan,
+        tool_history: list[dict[str, Any]],
+        flow: RunFlowLog | None,
     ) -> list[ToolMessage]:
         """执行一轮工具并转换成 ToolMessage；失败也返回占位消息。"""
         if self.deps.tools is None:
@@ -1630,12 +2105,24 @@ class AgentLoop:
             )
             await self._emit_hook(
                 "tool.call.start",
-                {"call_id": call.call_id, "tool_name": call.name},
+                {
+                    "call_id": call.call_id,
+                    "tool_name": call.name,
+                    "arguments": call.arguments,
+                },
                 request=request,
                 run_id=run_id,
                 turn_id=turn_id,
                 call_id=call.call_id,
             )
+            if flow is not None:
+                flow.event(
+                    "tool.call",
+                    call_id=call.call_id,
+                    tool_name=call.name,
+                    arguments=call.arguments,
+                    raw_arguments=call.raw_arguments,
+                )
         context = ToolContext(
             user_id=request.user_id,
             permissions=permissions,
@@ -1648,6 +2135,9 @@ class AgentLoop:
             deadline=deadline,
             cancel_token=cancel_event,
             services=self.deps.services,
+            # 工具执行器通过 metadata 读取本次查询规划；search_kb 用它补充
+            # 用户原话/改写 query/召回意图，不改变工具自身选择的 query。
+            metadata={"query_plan": query_plan},
         )
         try:
             results = await self.deps.tools.execute_batch(
@@ -1679,7 +2169,50 @@ class AgentLoop:
             for call in assistant.tool_calls
         ]
         messages: list[ToolMessage] = []
+        arguments_by_call = {
+            call.call_id: dict(call.arguments or {})
+            for call in assistant.tool_calls
+        }
         for result in results:
+            arguments = arguments_by_call.get(result.call_id, {})
+            duration_ms = result.metrics.duration_ms
+            error_code = result.error.code.value if result.error else None
+            if flow is not None:
+                result_chars = len(result.content or "")
+                max_chars = getattr(
+                    getattr(flow, "sink", None), "max_result_chars", 4000
+                )
+                flow.event(
+                    "tool.result",
+                    call_id=result.call_id,
+                    tool_name=result.tool_name,
+                    arguments=arguments,
+                    status=result.status.value,
+                    error_code=error_code,
+                    error_message=(
+                        result.error.message if result.error else None
+                    ),
+                    retryable=(result.error.retryable if result.error else None),
+                    duration_ms=duration_ms,
+                    content=(result.content or "")[:max_chars],
+                    content_chars=result_chars,
+                    content_truncated=result_chars > max_chars,
+                    truncated=result.truncated,
+                    cache_hit=result.cache_hit,
+                    idempotent_replay=result.idempotent_replay,
+                    metrics=result.metrics.model_dump(mode="json"),
+                )
+            tool_history.append(
+                {
+                    "call_id": result.call_id,
+                    "tool_name": result.tool_name,
+                    "arguments": arguments,
+                    "status": result.status.value,
+                    "error_code": error_code,
+                    "duration_ms": duration_ms,
+                    "content": (result.content or "")[:4000],
+                }
+            )
             await publisher.emit(
                 AgentEventType.TOOL_RESULT,
                 {
@@ -1697,16 +2230,74 @@ class AgentLoop:
                     "call_id": result.call_id,
                     "tool_name": result.tool_name,
                     "status": result.status.value,
-                    "error_code": (result.error.code.value if result.error else None),
+                    "error_code": error_code,
                     "truncated": result.truncated,
+                    "duration_ms": duration_ms,
+                    "cache_hit": result.cache_hit,
                 },
                 request=request,
                 run_id=run_id,
                 turn_id=turn_id,
                 call_id=result.call_id,
+                duration_ms=duration_ms,
             )
             messages.append(_tool_message(result, conversation_id=conversation_id))
         return messages
+
+
+def _flow_truncate(
+    value: str | None,
+    flow: RunFlowLog | None,
+    *,
+    attr: str,
+    default: int,
+) -> str | None:
+    """按流程日志配置截断字符串；flow 为空时原样返回。"""
+    if value is None:
+        return None
+    limit = getattr(getattr(flow, "sink", None), attr, default)
+    if not isinstance(limit, int) or limit <= 0 or len(value) <= limit:
+        return value
+    return value[:limit] + f"…[truncated {len(value) - limit} chars]"
+
+
+def _history_text(
+    history: Sequence[StoredMessage],
+    limit: int,
+    *,
+    current_content: str | None = None,
+) -> str | None:
+    """把最近 N 条消息压成查询规划用的单行历史；不含系统提示。
+
+    当前用户消息会作为“用户原话”单独注入，历史里去掉末尾重复项。
+    """
+    if limit <= 0:
+        return None
+    items = list(history)[-limit:]
+    if (
+        items
+        and current_content is not None
+        and isinstance(items[-1].message, UserMessage)
+        and items[-1].message.content.strip() == current_content.strip()
+    ):
+        items = items[:-1]
+    lines: list[str] = []
+    for stored in items:
+        message = stored.message
+        if isinstance(message, RawMessage):
+            continue
+        role = getattr(message, "role", "unknown")
+        content = str(getattr(message, "content", "") or "").strip()
+        if isinstance(message, ToolMessage):
+            tool_name = getattr(message, "tool_name", "") or "tool"
+            content = f"{tool_name}: {content}"
+        if not content:
+            continue
+        content = " ".join(content.split())
+        if len(content) > 400:
+            content = f"{content[:400]}…"
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines) or None
 
 
 def _to_llm_image(image) -> ImagePart:

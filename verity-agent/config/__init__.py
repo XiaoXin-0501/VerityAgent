@@ -23,7 +23,13 @@ from pathlib import Path
 
 from pydantic import Field, model_validator
 
-from .agent import AgentConfig, AgentPolicy, AgentStreamConfig
+from .agent import (
+    AgentConfig,
+    AgentPolicy,
+    AgentStreamConfig,
+    QueryPlanConfig,
+    ReflectionConfig,
+)
 from .app import AppConfig, AuthConfig, LoggingConfig, ServerConfig
 from .base import SOURCE_ROOT, EnvSettings
 from .hooks import (
@@ -103,6 +109,8 @@ __all__ = [
     "AgentConfig",
     "AgentPolicy",
     "AgentStreamConfig",
+    "QueryPlanConfig",
+    "ReflectionConfig",
     # rag
     "RagConfig",
     "OcrConfig",
@@ -224,10 +232,10 @@ class Settings(EnvSettings):
                 refs.append(model_id)
         if self.rag.retriever.rerank_model_id:
             refs.append(self.rag.retriever.rerank_model_id)
-        if self.rag.retriever.query_rewrite_model_id:
-            refs.append(self.rag.retriever.query_rewrite_model_id)
-        if self.rag.retriever.intent_model_id:
-            refs.append(self.rag.retriever.intent_model_id)
+        if self.agent.query_plan.model_id:
+            refs.append(self.agent.query_plan.model_id)
+        if self.agent.reflection.model_id:
+            refs.append(self.agent.reflection.model_id)
         if self.memory.extraction_model_id:
             refs.append(self.memory.extraction_model_id)
         if self.memory.compression_model_id:

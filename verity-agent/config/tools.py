@@ -42,8 +42,6 @@ class SearchKbToolConfig(ConfigModel):
     # 单次调用允许的最大召回数；执行器会把超过的值收紧到该上限
     # 工具 schema 约定 top_k <= 50，配置上限不能突破该契约。
     max_top_k: int = Field(default=50, ge=1, le=50)
-    # 检索结果缓存 TTL（秒）
-    cache_ttl_s: int = Field(default=60, gt=0)
     # 限流窗口内最大调用次数
     rate_limit_calls: int = Field(default=60, ge=1)
     # 限流窗口长度（秒）

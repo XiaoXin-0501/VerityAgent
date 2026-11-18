@@ -69,6 +69,10 @@ class ModelPurpose(StrEnum):
     TITLE = "title"
     # 文档级描述提取/精炼（RAG Indexer 使用）
     DOCUMENT_DESCRIPTION = "document_description"
+    # Agent 查询规划：规则未命中时的意图识别/query 改写/RAG 决策
+    QUERY_PLAN = "query_plan"
+    # Agent 主循环反思：检查方向、决定继续/调整/止损
+    REFLECTION = "reflection"
 
 
 class LLMRole(StrEnum):

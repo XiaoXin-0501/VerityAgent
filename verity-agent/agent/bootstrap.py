@@ -7,10 +7,17 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any
 
 from config import settings
 from config.agent import AgentConfig
+from config.domain import (
+    domain_catalog_text,
+    list_domain_profile_names,
+    load_domain_profile,
+)
 from prompt import PromptId, get_default_prompt_registry
 from utils.time import utcnow
 
@@ -24,11 +31,15 @@ from .context import ContextAssembler
 from .facade import Agent, create_agent
 from .llm_service import ChatService, ModelRegistry
 from .runtime.background import BackgroundTaskRunner
+from .query_plan import QueryPlanner
 from .runtime.event_store import RedisEventStore
+from .runtime.flow import build_flow_log
 from .runtime.ports import AgentDependencies
 from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 
 __all__ = ["build_default_agent_dependencies", "build_default_agent"]
+
+logger = logging.getLogger(__name__)
 
 
 def build_default_agent_dependencies(
@@ -49,6 +60,9 @@ def build_default_agent_dependencies(
     compressor: Any | None = None,
     facts: Any | None = None,
     event_store: Any | None = None,
+    query_planner: Any | None = None,
+    flow_log: Any | None = None,
+    domain_catalog: str | None = None,
 ) -> AgentDependencies:
     """用当前 Settings/ProviderRegistry 构造 Agent 依赖。
 
@@ -102,15 +116,28 @@ def build_default_agent_dependencies(
             assistant_name=settings.app.name,
             current_date=utcnow().date().isoformat(),
         )
-    return AgentDependencies(
-        llm=ChatService(
-            RoutingChatAdapter(
-                model_registry,
-                default_model_id=target_model_id,
-            ),
-            fallback_model_ids=settings.llm.fallback_model_ids,
-            enable_fallback=settings.llm.enable_model_fallback,
+    llm_service = ChatService(
+        RoutingChatAdapter(
+            model_registry,
+            default_model_id=target_model_id,
         ),
+        fallback_model_ids=settings.llm.fallback_model_ids,
+        enable_fallback=settings.llm.enable_model_fallback,
+    )
+    # 垂直领域目录：主画像主题 + 子画像细分方向；同时提取领域词用于规则初筛。
+    if domain_catalog is None:
+        catalog, terms = _load_domain_catalog()
+    else:
+        catalog, terms = domain_catalog, ()
+    planner = query_planner or QueryPlanner(
+        settings.agent.query_plan,
+        llm=llm_service,
+        llm_model_id=target_model_id,
+        domain_terms=terms,
+    )
+    flow = flow_log if flow_log is not None else build_flow_log(settings.app.log)
+    return AgentDependencies(
+        llm=llm_service,
         model_id=target_model_id,
         messages=PgMessageAdapter(),
         leases=PgLeaseAdapter(),
@@ -127,6 +154,9 @@ def build_default_agent_dependencies(
             if rag_retriever is not None
             else None
         ),
+        query_planner=planner,
+        domain_catalog=catalog,
+        flow_log=flow,
         facts=(
             facts
             if facts is not None
@@ -179,3 +209,56 @@ async def build_default_agent(
         **kwargs,
     )
     return await create_agent(resolved_config, dependencies=dependencies)
+
+
+def _load_domain_catalog() -> tuple[str | None, tuple[str, ...]]:
+    """加载主/子画像，生成 Agent 领域目录与规则词表。
+
+    目录文件损坏时只记录 warning，不阻断 Agent 装配；缺失画像时返回空目录，
+    查询规划退化为不依赖领域描述的规则/LLM 判断。
+    """
+    cfg = settings.rag.indexer
+    directory = cfg.domain_profile_dir
+    if cfg.domain_profile_path:
+        path_obj = Path(cfg.domain_profile_path).expanduser()
+        if path_obj.is_file() and not directory:
+            # path 指向单个文件时，同目录的兄弟画像也按该目录解析。
+            directory = str(path_obj.parent)
+    names = list_domain_profile_names(
+        path=cfg.domain_profile_path,
+        directory=directory,
+    )
+    profiles = []
+    terms: list[str] = []
+    for name in names:
+        try:
+            profile = load_domain_profile(
+                name,
+                path=(
+                    cfg.domain_profile_path
+                    if cfg.domain_profile_path and Path(cfg.domain_profile_path).stem == name
+                    else None
+                ),
+                directory=directory,
+            )
+        except Exception:  # noqa: BLE001 - 单个画像失败不影响其它画像
+            logger.warning("加载领域画像失败，跳过: %s", name, exc_info=True)
+            continue
+        profiles.append(profile)
+        terms.extend(item.name for item in profile.whitelist)
+        for entity in profile.whitelist:
+            terms.extend(entity.aliases)
+        for entity_type in profile.entity_types:
+            if entity_type.label:
+                terms.append(entity_type.label)
+            terms.extend(entity_type.examples[:4])
+    catalog = domain_catalog_text(profiles) or None
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in terms:
+        value = str(item).strip()
+        if len(value) < 2 or value.casefold() in seen:
+            continue
+        seen.add(value.casefold())
+        deduped.append(value)
+    return catalog, tuple(deduped)

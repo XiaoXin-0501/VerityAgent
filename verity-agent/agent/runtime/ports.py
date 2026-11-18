@@ -32,6 +32,8 @@ __all__ = [
     "MemoryPort",
     "RagPort",
     "FactPort",
+    "QueryPlannerPort",
+    "FlowLogPort",
     "AgentDependencies",
 ]
 
@@ -235,8 +237,50 @@ class RagPort(Protocol):
         permissions: frozenset[str],
         top_k: int | None = None,
         trace_id: str | None = None,
+        original_query: str | None = None,
+        rewritten_query: str | None = None,
+        rag_intent: str | None = None,
     ) -> Any:
-        """执行检索；权限过滤由 RAG 流水线负责。"""
+        """执行检索；权限过滤由 RAG 流水线负责。
+
+        ``query`` 是主召回 query；``original_query``/``rewritten_query``/
+        ``rag_intent`` 由 Agent 查询规划提供，RAG 只消费不识别。
+        """
+        ...
+
+
+class QueryPlannerPort(Protocol):
+    """查询规划端口：规则初筛 + LLM 兜底。"""
+
+    async def plan(
+        self,
+        original_query: str,
+        *,
+        profile_text: str | None = None,
+        session_summary: str | None = None,
+        history_text: str | None = None,
+        domain_catalog: str | None = None,
+        trace_id: str,
+        conversation_id: UUID,
+        turn_id: str,
+        user_id: UUID,
+    ) -> Any:
+        """返回带 ``plan``/``usage`` 的规划结果。"""
+        ...
+
+
+class FlowLogPort(Protocol):
+    """结构化流程详情日志端口；按 run 绑定写入器。"""
+
+    def bind_run(
+        self,
+        *,
+        run_id: str,
+        conversation_id: UUID | None,
+        turn_id: str | None,
+        user_id: UUID | None,
+    ) -> Any:
+        """返回带 ``event(name, **fields)`` 的 run 写入器。"""
         ...
 
 
@@ -281,6 +325,12 @@ class AgentDependencies:
     context: Any = None
     # INJECTED RAG；为空表示只走工具模式
     rag: RagPort | None = None
+    # 查询规划（规则 + LLM）：意图识别/query 改写/RAG 决策/事实召回意图
+    query_planner: QueryPlannerPort | None = None
+    # 垂直领域目录文本（主画像 + 子画像），注入查询规划提示词
+    domain_catalog: str | None = None
+    # 结构化流程详情日志；为空表示不记录
+    flow_log: FlowLogPort | None = None
     # 长期事实 BM25 召回；为空表示不注入 facts section
     facts: FactPort | None = None
     # 事实召回数量/最低置信度

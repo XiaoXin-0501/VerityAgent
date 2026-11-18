@@ -199,10 +199,14 @@ class IndexerConfig(ConfigModel):
     # 入库是否建图；v1 默认 true（D-56）。开启后必须注入图抽取 LLM。
     graph_build_enabled: bool = True
     # 全局默认领域画像名：知识库未绑定 ``knowledge_bases.domain_profile``
-    # 时回退到这里。一个知识库最多绑定一个画像，同一部署可同时接入多个领域。
+    # 时回退到这里。通常写主画像（如 pet_medical）或某个子画像。
+    # 一个知识库最多绑定一个画像，同一部署可同时接入多个领域。
     # 画像只提供类型、补充词白名单/黑名单和关系白名单，不直接产出图节点。
     domain_profile: str = "pet_medical"
-    # 自定义领域画像目录；为空时使用内置 domains/ 目录
+    # 主画像名：奠定垂直领域主题，用于 Agent system prompt 与查询规划；
+    # 子画像通过 JSON 的 ``master`` 字段继承主画像的公共定义。
+    master_profile: str = "pet_medical"
+    # 自定义领域画像目录；为空时使用内置 ``config/domains/`` 目录
     domain_profile_dir: str | None = None
     # 自定义领域画像文件；设置后优先于 domain_profile/domain_profile_dir
     domain_profile_path: str | None = None
@@ -312,26 +316,6 @@ class RetrieverConfig(ConfigModel):
     rerank_batch_size: int = Field(default=16, ge=1)
     # rerank 最低分
     rerank_min_score: float | None = None
-
-    # 是否启用 query 改写（D-81）；开启后由 query_rewrite_model_id 或默认 chat 模型执行
-    query_rewrite_enabled: bool = False
-    # query 改写应用模型 id；为空使用 LLM 默认模型
-    query_rewrite_model_id: str | None = None
-    # 最多生成几个变体
-    query_rewrite_max_variants: int = Field(default=2, ge=1)
-    # query 改写超时（秒）
-    query_rewrite_timeout_s: float = Field(default=20.0, gt=0)
-    # 过短 query 不改写
-    query_rewrite_min_query_tokens: int = Field(default=3, ge=1)
-
-    # 是否启用规则意图识别（lookup/compare/summarize/howto）
-    intent_rule_enabled: bool = True
-    # 规则无法判断时是否调用 LLM 兜底分类
-    intent_llm_enabled: bool = True
-    # 意图分类应用模型 id；为空使用默认 chat 模型
-    intent_model_id: str | None = None
-    # 意图分类 LLM 超时（秒）；超时保留规则结果
-    intent_timeout_s: float = Field(default=5.0, gt=0)
 
     # 是否启用图检索扩展；默认关闭（D-55）
     graph_expansion_enabled: bool = False

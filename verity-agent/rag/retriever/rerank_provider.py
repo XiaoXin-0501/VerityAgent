@@ -46,10 +46,18 @@ class ProviderReranker:
         query: str,
         chunks: list[RetrievedChunk],
         policy: RerankPolicy,
+        *,
+        intent: str | None = None,
     ) -> list[RetrievedChunk]:
-        """返回带 ``rerank_score`` 的候选，按分数降序；未返回项排在末尾。"""
+        """返回带 ``rerank_score`` 的候选，按分数降序；未返回项排在末尾。
+
+        ``intent`` 由 Agent 查询规划提供；provider 只接受 query+documents，
+        因此把意图作为 query 前缀一起送入，让模型知道“这次是按事实查询、
+        比较还是步骤方法排序”。
+        """
         if not chunks:
             return []
+        rerank_query = _with_intent(query, intent)
         batch_size = max(1, min(int(policy.batch_size), self.max_batch_size))
         scores: dict[str, float] = {}
         for start in range(0, len(chunks), batch_size):
@@ -57,7 +65,7 @@ class ProviderReranker:
             response = await self.model.rerank(
                 RerankRequest(
                     model=self.model_id,
-                    query=query,
+                    query=rerank_query,
                     documents=[
                         RerankDocument(id=chunk.chunk_id, text=chunk.content)
                         for chunk in batch
@@ -93,3 +101,21 @@ class ProviderReranker:
             reverse=True,
         )
         return ranked
+
+
+# 意图 → 中文提示；未知值直接原样使用，保留上游扩展空间。
+_INTENT_HINTS = {
+    "LOOKUP": "查询事实",
+    "COMPARE": "比较对象",
+    "SUMMARIZE": "总结内容",
+    "HOWTO": "步骤方法",
+}
+
+
+def _with_intent(query: str, intent: str | None) -> str:
+    """把召回意图作为轻量前缀注入 rerank query。"""
+    value = (intent or "").strip()
+    if not value:
+        return query
+    hint = _INTENT_HINTS.get(value.upper(), value)
+    return f"[查询意图：{hint}] {query}"

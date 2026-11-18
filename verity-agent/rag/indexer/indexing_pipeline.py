@@ -49,6 +49,7 @@ from rag.shared.models import (
     IndexingJobView,
     IndexingWarning,
 )
+from config.domain import load_domain_profile
 from store.pg.models.knowledge import Document
 from utils.hashing import sha256_bytes
 from utils.log_context import bind_index_context, reset_index_context
@@ -57,11 +58,7 @@ from utils.time import utcnow
 
 from .conversion import build_parse_manifest, drafts_to_chunks
 from .embedding import EmbeddingResult, EmbeddingService
-from .enrichment import (
-    GraphExtractor,
-    build_graph_extractor,
-    load_domain_profile,
-)
+from .enrichment import GraphExtractor, build_graph_extractor
 from .job import InMemoryJobStore, JobStore, TERMINAL_STATUSES, to_job_view
 from .repository import IndexingRepository
 from .stores import (

@@ -29,7 +29,7 @@ from exception import (
     UnavailableError,
     ValidationError,
 )
-from rag.indexer.enrichment.domain import BUILTIN_DOMAIN_DIR, load_domain_profile
+from config.domain import list_domain_profile_names, load_domain_profile
 from rag.public import DocumentSource, IndexDocumentRequest
 from store.minio import MinioStorage
 from store.minio.paths import kb_source_key, sanitize_extension
@@ -159,16 +159,52 @@ async def _list_all_documents(kb_id: UUID) -> list[Document]:
     return rows
 
 
+def _domain_profile_directory() -> str | None:
+    """解析画像目录；``path`` 指向单个文件时使用其父目录。"""
+    directory = settings.rag.indexer.domain_profile_dir
+    configured_path = settings.rag.indexer.domain_profile_path
+    if configured_path:
+        path_obj = Path(configured_path).expanduser()
+        if path_obj.is_file() and not directory:
+            return str(path_obj.parent)
+    return directory
+
+
 def _available_domain_profiles() -> list[str]:
     """列出内置/自定义目录中的领域画像名，供管理端选择。"""
-    names = {item.stem for item in BUILTIN_DOMAIN_DIR.glob("*.json")}
-    custom_dir = settings.rag.indexer.domain_profile_dir
-    if custom_dir:
-        names.update(item.stem for item in Path(custom_dir).expanduser().glob("*.json"))
-    custom_path = settings.rag.indexer.domain_profile_path
-    if custom_path:
-        names.add(Path(custom_path).stem)
-    return sorted(names)
+    return list_domain_profile_names(
+        path=settings.rag.indexer.domain_profile_path,
+        directory=_domain_profile_directory(),
+    )
+
+
+def _domain_profile_details() -> list[dict[str, Any]]:
+    """返回画像的展示信息；主画像标注 ``is_master``，便于前端分组。"""
+    details: list[dict[str, Any]] = []
+    for name in _available_domain_profiles():
+        try:
+            profile = load_domain_profile(
+                name,
+                path=(
+                    settings.rag.indexer.domain_profile_path
+                    if settings.rag.indexer.domain_profile_path
+                    and Path(settings.rag.indexer.domain_profile_path).stem == name
+                    else None
+                ),
+                directory=_domain_profile_directory(),
+            )
+        except Exception:  # noqa: BLE001 - 单个坏画像不影响选项列表
+            continue
+        details.append(
+            {
+                "name": profile.name,
+                "display_name": profile.display_name or profile.name,
+                "description": profile.description,
+                "master": profile.master or None,
+                "is_master": profile.is_master,
+            }
+        )
+    return details
 
 
 def _validate_domain_profile(name: str | None) -> str | None:
@@ -178,7 +214,7 @@ def _validate_domain_profile(name: str | None) -> str | None:
         return None
     load_domain_profile(
         value,
-        directory=settings.rag.indexer.domain_profile_dir,
+        directory=_domain_profile_directory(),
     )
     return value
 
@@ -212,7 +248,9 @@ async def get_knowledge_options(
         "max_file_bytes": settings.rag.indexer.max_source_bytes,
         "default_permission_code": settings.rag.default_kb_permission_code,
         "domain_profiles": _available_domain_profiles(),
+        "domain_profile_details": _domain_profile_details(),
         "default_domain_profile": cfg.domain_profile,
+        "master_domain_profile": cfg.master_profile,
         "embedding_model_id": cfg.embedding_model_id,
         "embedding_dimensions": cfg.embedding_dimensions,
         "embedding_version": cfg.embedding_version,

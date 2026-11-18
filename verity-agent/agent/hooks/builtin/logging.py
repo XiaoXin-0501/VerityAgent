@@ -19,6 +19,8 @@ __all__ = ["LoggingHook", "DEFAULT_EVENTS"]
 # 由这里统一格式化，RAG 内部不再拼日志。
 DEFAULT_EVENTS = frozenset(
     {
+        HookEvent.AGENT_QUERY_PLAN,
+        HookEvent.AGENT_REFLECTION,
         HookEvent.LLM_ERROR,
         HookEvent.LLM_USAGE,
         HookEvent.TOOL_RESULT,
@@ -106,6 +108,24 @@ def _format_event(context: HookContext, payload: dict[str, Any]) -> str:
         if context.call_id
         else ""
     )
+    if event is HookEvent.AGENT_QUERY_PLAN:
+        return (
+            f"查询规划 | needs_rag={payload.get('needs_rag', False)}"
+            f" | rewritten={payload.get('rewritten_query') or '-'}"
+            f" | rag_intent={payload.get('rag_intent') or '-'}"
+            f" | user_intent={payload.get('user_intent') or '-'}"
+            f" | source={payload.get('source') or '-'}"
+            f" | 耗时={duration or 0}ms"
+        )
+    if event is HookEvent.AGENT_REFLECTION:
+        return (
+            f"循环反思 | action={payload.get('action') or '-'}"
+            f" | direction_ok={payload.get('direction_ok')}"
+            f" | 第 {payload.get('step_no', 0)} 次迭代"
+            f" | force_final={payload.get('force_final', False)}"
+            f" | 耗时={duration or 0}ms"
+            f" | reason={payload.get('reason') or '-'}"
+        )
     if event is HookEvent.LLM_USAGE:
         usage = payload.get("usage") or {}
         latency = payload.get("latency_ms") or duration

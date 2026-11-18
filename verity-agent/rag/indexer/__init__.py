@@ -10,13 +10,12 @@ from .caching import (
 )
 from .chunkers import ChatCodeDescriber, ChatTableDescriber
 from .description import ChatDescriptionRefiner
+from config.domain import DomainProfile, load_domain_profile
 from .embedding import EmbeddingResult, EmbeddingService
 from .enrichment import (
-    DomainProfile,
     GraphExtractor,
     LLMGraphExtractor,
     build_graph_extractor,
-    load_domain_profile,
 )
 from .indexing_pipeline import DefaultIndexingPipeline
 from .job import InMemoryJobStore, JobStore, to_job_view

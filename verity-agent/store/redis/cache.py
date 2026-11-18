@@ -45,9 +45,6 @@ class CacheScope(StrEnum):
     GRAPH_EXTRACTION = "rag:graph_extraction"
     RERANK = "rag:rerank"
     GRAPH_NEXT_HOP = "graph"
-    # query 改写 / 意图分类的 LLM 结果；key 带 query 摘要 + 模型 + Prompt 版本
-    QUERY_REWRITE = "rag:query_rewrite"
-    QUERY_INTENT = "rag:query_intent"
     MEMORY_PROFILE = "memory:profile"
     MEMORY_SUMMARY = "memory:summary"
     MEMORY_FACTS = "memory:facts"
@@ -68,8 +65,6 @@ DEFAULT_TTLS: dict[CacheScope, int] = {
     CacheScope.GRAPH_EXTRACTION: 2_592_000,
     CacheScope.RERANK: 3_600,
     CacheScope.GRAPH_NEXT_HOP: 3_600,
-    CacheScope.QUERY_REWRITE: 86_400,
-    CacheScope.QUERY_INTENT: 86_400,
     CacheScope.MEMORY_PROFILE: 600,
     CacheScope.MEMORY_SUMMARY: 600,
     CacheScope.MEMORY_FACTS: 300,

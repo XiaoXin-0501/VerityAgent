@@ -25,7 +25,6 @@ from .enums import (
     IndexingWarningCode,
     IndexMode,
     QualityFlag,
-    QueryIntent,
     RAGMode,
     RetrievalMode,
     RetrievalStage,
@@ -564,7 +563,14 @@ class NeighborPolicy(_Model):
 
 
 class RetrievalRequest(_Model):
+    # 主召回 query；INJECTED 模式是用户原话，工具模式是 Agent 选择的检索 query
     query: str = Field(min_length=1)
+    # 用户原话；Agent 查询规划产出的展示/审计字段，不参与召回
+    original_query: str | None = None
+    # Agent 查询规划的改写 query；非空时与 query 一起召回
+    rewritten_query: str | None = None
+    # Agent 查询规划的 RAG 召回意图；rerank 使用，不参与 BM25/向量召回
+    rag_intent: str | None = None
     kb_ids: list[UUID]
     user_id: UUID
     permissions: frozenset[str] = frozenset()
@@ -672,6 +678,10 @@ class RetrievalWarning(_Model):
 
 class RetrievalResult(_Model):
     query: str
+    # 用户原话 / Agent 改写 / 召回意图；未提供时为空
+    original_query: str | None = None
+    rewritten_query: str | None = None
+    rag_intent: str | None = None
     normalized_query: str
     kb_ids: list[UUID]
     mode: RetrievalMode
@@ -689,7 +699,8 @@ class QueryAnalysis(_Model):
     language: str | None = None
     keywords: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
-    intent: QueryIntent | None = None
+    # 召回意图标签（如 LOOKUP/COMPARE）；由 Agent 查询规划注入
+    intent: str | None = None
     suggested_filters: RetrievalFilter | None = None
-    # query rewrite 开启后生成的变体；关闭时为空
+    # Agent 查询规划产出的改写 query；未启用/不需要 RAG 时为空
     variants: list[str] = Field(default_factory=list)

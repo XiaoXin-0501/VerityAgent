@@ -117,8 +117,19 @@ async def search_kb_executor(
     # 未显式指定时使用运维配置的默认值，并统一收紧到允许上限。
     top_k = arguments.top_k if arguments.top_k is not None else policy.default_top_k
     top_k = min(top_k, policy.max_top_k)
+    # 查询规划由 Agent 主循环注入：用户原话、改写 query、召回意图。
+    # 工具自身选择的 query 仍是主召回 query；规划字段只补充召回/rerank。
+    plan = context.metadata.get("query_plan")
+    original_query = getattr(plan, "original_query", None) or arguments.query
+    rewritten_query = getattr(plan, "rewritten_query", None)
+    rag_intent = (
+        getattr(plan, "rag_intent_label", None) if plan is not None else None
+    )
     request = RetrievalRequest(
         query=arguments.query,
+        original_query=original_query,
+        rewritten_query=rewritten_query,
+        rag_intent=rag_intent,
         kb_ids=list(arguments.kb_ids),
         user_id=context.user_id,
         permissions=context.permissions,
@@ -186,11 +197,10 @@ def register_search_kb(
             kind=ToolKind.EXECUTABLE,
             side_effect=ToolSideEffect.READ,
             policy=ToolPolicy(
-                cache=CachePolicy(
-                    enabled=True,
-                    ttl_s=policy.cache_ttl_s,
-                    key_fields=["query", "kb_ids", "top_k"],
-                ),
+                # 检索结果由 RAG 的 RetrievalCache 负责（key 已包含改写 query/
+                # 召回意图/索引版本/权限）；工具层再缓存会掩盖规划字段变化，
+                # 因此这里只保留熔断与限流。
+                cache=CachePolicy(enabled=False),
                 circuit_breaker=CircuitBreakerPolicy(enabled=True),
                 rate_limit=RateLimitPolicy(
                     enabled=True,
@@ -199,8 +209,8 @@ def register_search_kb(
                 ),
             ),
             tags=["rag", "knowledge"],
-            # 检索结果依赖当前用户权限；缓存 key 必须带权限摘要，避免跨用户泄露。
-            metadata={"cache_permission_scoped": True},
+            # 不声明权限范围缓存：工具层缓存已关闭，检索缓存由 RAG 负责。
+            metadata={},
         ),
         _executor,
         argument_model=SearchKbArgs,

@@ -1,0 +1,38 @@
+{
+  "name": "pet_category",
+  "display_name": "宠物类别",
+  "master": "pet_medical",
+  "version": "1",
+  "description": "宠物类别细分画像：物种、品种、类别归属；公共疾病/症状/药物类型沿用主画像“宠物医疗”。",
+  "entity_types": [
+    {
+      "name": "species",
+      "label": "物种",
+      "description": "宠物物种或更细的分类单元",
+      "examples": ["犬", "猫", "兔", "鸟", "爬行动物"]
+    },
+    {
+      "name": "breed",
+      "label": "品种",
+      "description": "宠物品种或品系",
+      "examples": ["金毛寻回犬", "拉布拉多犬", "英国短毛猫", "暹罗猫", "布偶猫"]
+    },
+    {
+      "name": "category",
+      "label": "类别",
+      "description": "宠物分类维度，如体型、年龄阶段、用途",
+      "examples": ["小型犬", "大型猫科", "幼年动物", "老年动物", "工作犬"]
+    }
+  ],
+  "whitelist": [],
+  "relations": [
+    {"name": "subcategory_of", "label": "子类→父类", "description": "品种/类别归属于更高层类别"},
+    {"name": "breed_of", "label": "品种→物种", "description": "品种所属的物种"},
+    {"name": "predisposed_to", "label": "品种→疾病", "description": "品种易感的疾病或风险因素"}
+  ],
+  "prompt": {
+    "role": "你是宠物类别知识图谱的实体与关系抽取器。",
+    "entity_guidance": "优先抽取物种、品种和分类维度；疾病/症状/药物等公共概念沿用主画像类型。",
+    "relation_guidance": "只抽取正文明确表达的品种-物种、类别归属和易感关系。"
+  }
+}

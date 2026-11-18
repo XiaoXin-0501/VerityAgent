@@ -1,0 +1,39 @@
+{
+  "name": "pet_case",
+  "display_name": "宠物医疗案例",
+  "master": "pet_medical",
+  "version": "1",
+  "description": "宠物医疗案例细分画像：病例、诊断、治疗方案与转归；公共疾病/症状/药物类型沿用主画像“宠物医疗”。",
+  "entity_types": [
+    {
+      "name": "case",
+      "label": "病例/案例",
+      "description": "具体的临床病例、病例报告或案例编号",
+      "examples": ["犬细小病毒病病例", "猫尿闭急诊病例", "术后感染案例"]
+    },
+    {
+      "name": "diagnosis",
+      "label": "诊断",
+      "description": "病例中形成的诊断结论或鉴别诊断",
+      "examples": ["确诊犬细小病毒病", "疑似猫传染性腹膜炎", "排除胰腺炎"]
+    },
+    {
+      "name": "outcome",
+      "label": "转归",
+      "description": "治疗后的结局、预后或随访结果",
+      "examples": ["痊愈", "好转", "死亡", "复发", "长期缓解"]
+    }
+  ],
+  "whitelist": [],
+  "relations": [
+    {"name": "case_of", "label": "病例→疾病", "description": "病例对应的疾病或病理状态"},
+    {"name": "diagnosed_with", "label": "病例→诊断", "description": "病例中形成的诊断"},
+    {"name": "treated_with", "label": "病例→治疗", "description": "病例采用的治疗方案或药物"},
+    {"name": "outcome_of", "label": "转归→病例", "description": "病例的治疗结局"}
+  ],
+  "prompt": {
+    "role": "你是宠物医疗案例知识图谱的实体与关系抽取器。",
+    "entity_guidance": "优先抽取具体病例、诊断结论、治疗方案和转归；疾病/症状/药物等公共概念沿用主画像类型。",
+    "relation_guidance": "只抽取正文明确表达的病例-疾病、诊断、治疗和转归关系。"
+  }
+}
