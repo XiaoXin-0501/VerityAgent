@@ -357,20 +357,8 @@ class DefaultRetrievalPipeline:
             if graph_policy.enabled
             else ([self.domain_profile] if self.domain_profile else [])
         )
-        if not graph_policy.allowed_relations:
-            # 关系白名单优先用请求/配置的显式覆盖；未配置时取参与检索的
-            # KB 画像关系并集，保证“入库写得进、检索也走得出”。
-            relations = list(self.config.graph_allowed_relations) or sorted(
-                {
-                    name
-                    for profile in domain_profiles
-                    for name in profile.relation_names
-                }
-            )
-            if relations:
-                graph_policy = graph_policy.model_copy(
-                    update={"allowed_relations": relations}
-                )
+        # 图扩展不按领域画像的“关系枚举”做硬限制：画像无法穷举，
+        # 入库时保留的合法关系都可以参与下一跳。
         analysis = self._analyze(request, normalized, domain_profiles)
         _stage(
             stages,
@@ -1333,7 +1321,6 @@ class DefaultRetrievalPipeline:
         return GraphExpansionPolicy(
             enabled=self.config.graph_expansion_enabled,
             max_hops=self.config.graph_max_hops,
-            allowed_relations=list(self.config.graph_allowed_relations),
             min_evidence=self.config.graph_min_evidence,
             max_next_hops=self.config.graph_max_next_hops,
             hub_as_intermediate=self.config.graph_hub_as_intermediate,

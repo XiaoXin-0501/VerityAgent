@@ -1,7 +1,8 @@
 """图抽取公共基础：协议、文本边界、实体名/关系过滤。
 
-图抽取只走 LLM：领域画像提供类型、补充词白名单、黑名单与关系白名单，
-但**不直接扫描词典产出节点**。本模块只保留与具体模型无关的校验逻辑。
+图抽取只走 LLM：领域画像提供默认类型/关系、类型/关系白黑名单、实体别名
+与提示词，但**不直接扫描词典产出节点**。本模块只保留与具体模型无关的
+校验逻辑。
 
 设计对应《RAG 模块数据结构设计》§7.3。
 """
@@ -34,8 +35,8 @@ __all__ = [
 GRAPH_TEXT_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.LIST})
 
 # 通用关键词黑名单（版式/文献信息/泛化词）；命中后不进入图节点。
-# 领域画像可追加 ``blacklist``，部署可追加
-# ``RAG__INDEXER__GRAPH_KEYWORD_BLACKLIST``。
+# 领域画像可追加 ``noise_terms``，部署可追加
+# ``RAG__INDEXER__GRAPH_NOISE_TERMS``。
 GENERIC_KEYWORD_BLACKLIST = frozenset(
     {
         "摘要",
@@ -200,14 +201,16 @@ def filter_relations(
     relations: Iterable[GraphRelation],
     config: IndexerConfig,
     *,
-    allowed_relations: Iterable[str],
+    declared_relations: Iterable[str],
+    allow_unknown: bool = False,
 ) -> list[GraphRelation]:
-    """按领域关系白名单、置信度、数量上限过滤；保持首次出现顺序。
+    """按声明关系、置信度、数量上限过滤；保持首次出现顺序。
 
-    ``allowed_relations`` 由调用方传入领域画像声明的关系集合；关系抽取
-    不再接受部署级通用白名单，避免把 ``implements`` 等软件关系写进领域图。
+    ``declared_relations`` 是画像默认关系 + 关系白名单 - 关系黑名单。
+    关系声明是辅助而非穷举：``allow_unknown=True`` 时保留格式合法的清单外
+    关系证据；下一跳遍历所有已入库合法关系，不再按声明集合限制。
     """
-    whitelist = {item.lower() for item in allowed_relations}
+    declared_set = {item.lower() for item in declared_relations}
     seen: set[tuple[str, str, str]] = set()
     result: list[GraphRelation] = []
     for relation in relations:
@@ -216,8 +219,11 @@ def filter_relations(
         name = (relation.relation or "").strip().lower()
         if not subject or not obj or not name:
             continue
-        if name not in whitelist:
-            continue
+        if name not in declared_set:
+            if not allow_unknown or not re.fullmatch(
+                r"[a-z][a-z0-9_-]{0,47}", name
+            ):
+                continue
         confidence = (
             relation.confidence
             if relation.confidence is not None

@@ -231,8 +231,10 @@ def _format_event(context: HookContext, payload: dict[str, Any]) -> str:
                 f"失败批次={payload.get('failed_batches', 0)} "
                 f"输入截断={payload.get('input_truncated_chunks', 0)}",
                 f"未声明类型={payload.get('unknown_types', 0)} "
+                f"(入库={payload.get('unknown_types_kept', 0)}) "
                 f"{payload.get('unknown_type_samples') or []} "
                 f"| 未声明关系={payload.get('unknown_relations', 0)} "
+                f"(入库={payload.get('unknown_relations_kept', 0)}) "
                 f"{payload.get('unknown_relation_samples') or []}",
             ],
         )

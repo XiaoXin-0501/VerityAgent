@@ -43,9 +43,7 @@ class QueryPlanConfig(ConfigModel):
     # 垂直领域目录注入上限（字符）
     domain_catalog_chars: int = Field(default=2000, ge=0)
     # 领域实体类型参考注入上限（字符）；0 表示不注入画像类型，使用通用兜底
-    domain_entity_types_chars: int = Field(default=1200, ge=0)
-    # 领域泛化/版式词（黑名单）注入上限（字符）；0 表示不注入，使用通用兜底
-    domain_noise_terms_chars: int = Field(default=400, ge=0)
+    domain_entity_types_chars: int = Field(default=1600, ge=0)
     # 低于该字符数的 query 不调用 LLM，直接用规则结果
     min_query_chars: int = Field(default=2, ge=1)
 

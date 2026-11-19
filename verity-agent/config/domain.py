@@ -5,14 +5,16 @@
 
 职责边界（重要）：
 
-- **画像只做辅助**：提供类型体系、补充词/别名、黑名单、关系白名单与提示词；
+- **画像只做辅助**：提供类型/关系的白/黑名单、实体别名与提示词；
   **不是实体枚举，也不负责生成检索 seed**；实体必须由 LLM 抽取或由
   BM25 explainScore 从实际召回中提取；
-- **主画像**（``master`` 为空）只给全局使用：Agent system prompt、
-  查询规划领域目录、未绑定 KB 的兜底；不要求绑定到具体知识库；
-- **子画像**（``master`` 非空）绑定知识库，用于具体知识库的图构建、
-  检索期关系白名单与实体归一；
-- 画像**不是**图构建专属资产：图抽取、检索 seed 归一、Agent 领域目录/
+- **主画像**（``master`` 为空）提供公共底座：公共实体类型、公共关系、
+  公共类型/关系白名单与黑名单、公共别名与提示词；
+- **子画像**（``master`` 非空）绑定知识库，只声明该库特有的类型/关系、
+  类型/关系白/黑名单与别名；加载时自动合并主画像，同名实体别名取并集；
+- **Prompt 消费边界**：图抽取 Prompt 只携带有效类型、有效关系和别名标准名；
+  类型/关系黑名单只做抽取后过滤，别名只做抽取后归一，二者都不进入 Prompt；
+- 画像**不是**图构建专属资产：图抽取、检索实体归一、Agent 领域目录/
   system prompt、管理端知识库绑定都会消费它；因此模型/加载保留在
   ``config``，各消费方只依赖配置资产，真正的图抽取实现仍在
   ``rag/indexer/enrichment/``。
@@ -41,7 +43,7 @@ from utils.text import normalize_whitespace
 
 __all__ = [
     "BUILTIN_DOMAIN_DIR",
-    "DomainEntity",
+    "DomainAlias",
     "DomainEntityType",
     "DomainMatch",
     "DomainProfile",
@@ -49,7 +51,6 @@ __all__ = [
     "DomainRelationType",
     "domain_catalog_text",
     "domain_entity_type_text",
-    "domain_noise_terms_text",
     "list_domain_profile_names",
     "load_domain_profile",
     "load_master_profile",
@@ -100,8 +101,11 @@ class DomainEntityType(_Model):
     examples: list[str] = Field(default_factory=list)
 
 
-class DomainEntity(_Model):
-    """一个领域补充词（whitelist）；只放新词/别名，用于归一与提示，不直接建节点。"""
+class DomainAlias(_Model):
+    """实体的标准名与别名映射；别名只在抽取后归一/匹配使用，不进入 Prompt。
+
+    标准名会以“已知标准名”形式进入图抽取 Prompt；``aliases`` 本身不会。
+    """
 
     name: str = Field(min_length=1)
     type: str = Field(min_length=1)
@@ -130,6 +134,57 @@ class DomainPrompt(_Model):
     noise_examples: list[str] = Field(default_factory=list)
 
 
+def _effective_entity_types(
+    declared: list[DomainEntityType],
+    additions: list[DomainEntityType],
+    blocked_keys: set[str],
+) -> list[DomainEntityType]:
+    """把类型白名单折叠进默认类型，并应用类型黑名单。"""
+    result: dict[str, DomainEntityType] = {item.name: item for item in declared}
+    for term in additions:
+        existing = result.get(term.name)
+        if existing is None:
+            result[term.name] = term
+            continue
+        result[term.name] = existing.model_copy(
+            update={
+                "label": existing.label or term.label,
+                "description": existing.description or term.description,
+                "examples": existing.examples or list(term.examples),
+            }
+        )
+    return [
+        item
+        for item in result.values()
+        if _key(item.name) not in blocked_keys
+    ]
+
+
+def _effective_relations(
+    declared: list[DomainRelationType],
+    additions: list[DomainRelationType],
+    blocked_keys: set[str],
+) -> list[DomainRelationType]:
+    """把关系白名单折叠进默认关系，并应用关系黑名单。"""
+    result: dict[str, DomainRelationType] = {item.name: item for item in declared}
+    for term in additions:
+        existing = result.get(term.name)
+        if existing is None:
+            result[term.name] = term
+            continue
+        result[term.name] = existing.model_copy(
+            update={
+                "label": existing.label or term.label,
+                "description": existing.description or term.description,
+            }
+        )
+    return [
+        item
+        for item in result.values()
+        if _key(item.name) not in blocked_keys
+    ]
+
+
 class DomainProfile(_Model):
     """一个垂直领域的完整画像；加载后只读。
 
@@ -143,24 +198,34 @@ class DomainProfile(_Model):
     language: str = "zh"
     description: str = ""
     # 主画像名；空字符串表示自身就是主画像。子画像加载时会把主画像的
-    # 公共类型/关系/黑名单/提示词合并进来，合并结果仍是完整画像。
+    # 公共类型/关系/白黑名单/别名/提示词合并进来，合并结果仍是完整画像。
     master: str = ""
     # 主画像展示名；由加载器在合并后写入，便于提示词与目录展示。
     master_display_name: str = ""
 
     entity_types: list[DomainEntityType] = Field(default_factory=list)
-    # 补充词白名单：只放新词/别名；文本命中时提示 + 别名归一 + 查询 seed 匹配
-    whitelist: list[DomainEntity] = Field(default_factory=list)
-    # 明确禁止进入图的关键词（泛化词、版式词、叙述词等）
-    blacklist: list[str] = Field(default_factory=list)
     relations: list[DomainRelationType] = Field(default_factory=list)
+    # 类型/关系白名单：在默认声明之外补充可抽取/可入库的类型/关系
+    type_whitelist: list[DomainEntityType] = Field(default_factory=list)
+    relation_whitelist: list[DomainRelationType] = Field(default_factory=list)
+    # 类型/关系黑名单：从有效集合移除，并在抽取结果中过滤
+    type_blacklist: list[str] = Field(default_factory=list)
+    relation_blacklist: list[str] = Field(default_factory=list)
+    # 实体标准名/别名；与白名单分离
+    aliases: list[DomainAlias] = Field(default_factory=list)
+    # 实体名噪声过滤（版式词/泛化词/叙述词）；不进入 Prompt
+    noise_terms: list[str] = Field(default_factory=list)
     prompt: DomainPrompt = Field(default_factory=DomainPrompt)
 
     # 运行期索引：别名键 → (标准名, 类型)
     _alias_index: dict[str, tuple[str, str]] = PrivateAttr(default_factory=dict)
     # 运行期索引：全部原始别名（用于构建最长优先匹配正则）
     _surfaces: list[str] = PrivateAttr(default_factory=list)
-    _blacklist_keys: frozenset[str] = PrivateAttr(default_factory=frozenset)
+    _noise_keys: frozenset[str] = PrivateAttr(default_factory=frozenset)
+    _type_blacklist_names: frozenset[str] = PrivateAttr(default_factory=frozenset)
+    _relation_blacklist_names: frozenset[str] = PrivateAttr(
+        default_factory=frozenset
+    )
     _entity_type_names: frozenset[str] = PrivateAttr(default_factory=frozenset)
     _type_lookup: dict[str, str] = PrivateAttr(default_factory=dict)
     _relation_names: frozenset[str] = PrivateAttr(default_factory=frozenset)
@@ -169,10 +234,30 @@ class DomainProfile(_Model):
 
     @model_validator(mode="after")
     def _validate_profile(self) -> "DomainProfile":
-        """加载期 fail-fast：重复类型、冲突别名、未声明类型直接报错。"""
+        """加载期 fail-fast，并计算有效类型/关系集合。"""
+        type_blocked_keys = {
+            _key(item) for item in self.type_blacklist if _key(item)
+        }
+        relation_blocked_keys = {
+            _key(item) for item in self.relation_blacklist if _key(item)
+        }
+        effective_types = _effective_entity_types(
+            self.entity_types,
+            self.type_whitelist,
+            type_blocked_keys,
+        )
+        effective_relations = _effective_relations(
+            self.relations,
+            self.relation_whitelist,
+            relation_blocked_keys,
+        )
+        # 运行期只消费有效集合；白名单已折叠进去，黑名单已移除。
+        object.__setattr__(self, "entity_types", effective_types)
+        object.__setattr__(self, "relations", effective_relations)
+
         type_names: set[str] = set()
         type_lookup: dict[str, str] = {}
-        for item in self.entity_types:
+        for item in effective_types:
             if item.name in type_names:
                 raise ValueError(f"实体类型重复: {item.name}")
             type_names.add(item.name)
@@ -194,36 +279,36 @@ class DomainProfile(_Model):
                     )
                 type_lookup[label_key] = item.name
         if not type_names:
-            raise ValueError("领域画像至少需要声明一个 entity_type")
+            raise ValueError("领域画像至少需要声明一个有效 entity_type")
         if self.master and self.master == self.name:
             raise ValueError("画像不能把自己声明为 master")
 
         relation_names: set[str] = set()
-        for item in self.relations:
+        for item in effective_relations:
             if item.name in relation_names:
                 raise ValueError(f"关系类型重复: {item.name}")
             relation_names.add(item.name)
 
-        entity_names: set[str] = set()
+        alias_names: set[str] = set()
         alias_owner: dict[str, str] = {}
         surfaces: list[str] = []
-        for entity in self.whitelist:
-            if entity.name in entity_names:
-                raise ValueError(f"补充词重复: {entity.name}")
-            entity_names.add(entity.name)
+        for entity in self.aliases:
+            if entity.name in alias_names:
+                raise ValueError(f"别名条目重复: {entity.name}")
+            alias_names.add(entity.name)
             if entity.type not in type_names:
                 raise ValueError(
-                    f"补充词 {entity.name} 的类型未声明: {entity.type}"
+                    f"别名条目 {entity.name} 的类型未声明: {entity.type}"
                 )
             for surface in [entity.name, *entity.aliases]:
                 key = _key(surface)
                 if not key:
-                    raise ValueError(f"补充词 {entity.name} 存在空别名")
+                    raise ValueError(f"别名条目 {entity.name} 存在空别名")
                 # 单字中文词在中文文本里几乎总是子串（“肝”命中“肝炎”），
                 # 作为匹配面噪声大于收益；与图关键词过滤口径保持一致。
                 if len(key) < 2:
                     raise ValueError(
-                        f"补充词 {entity.name} 的别名过短: {surface!r}"
+                        f"别名条目 {entity.name} 的别名过短: {surface!r}"
                     )
                 owner = alias_owner.get(key)
                 if owner is not None and owner != entity.name:
@@ -234,24 +319,32 @@ class DomainProfile(_Model):
                 alias_owner[key] = entity.name
                 surfaces.append(surface)
 
-        blacklist_keys = frozenset(
-            _key(item) for item in self.blacklist if _key(item)
+        noise_keys = frozenset(
+            _key(item) for item in self.noise_terms if _key(item)
         )
-        conflict = blacklist_keys & set(alias_owner)
+        conflict = noise_keys & set(alias_owner)
         if conflict:
             raise ValueError(
-                f"补充词别名不能同时出现在 blacklist: {sorted(conflict)}"
+                f"实体别名不能同时出现在 noise_terms: {sorted(conflict)}"
             )
 
         # 别名索引在这里构建：model_post_init 早于 after-validator，放在
         # 那里会在非法 type 上先抛 KeyError，掩盖真正的校验错误。
         index: dict[str, tuple[str, str]] = {}
-        for entity in self.whitelist:
+        for entity in self.aliases:
             for surface in [entity.name, *entity.aliases]:
                 index[_key(surface)] = (entity.name, entity.type)
 
         object.__setattr__(self, "_surfaces", surfaces)
-        object.__setattr__(self, "_blacklist_keys", blacklist_keys)
+        object.__setattr__(self, "_noise_keys", noise_keys)
+        object.__setattr__(
+            self, "_type_blacklist_names", frozenset(type_blocked_keys)
+        )
+        object.__setattr__(
+            self,
+            "_relation_blacklist_names",
+            frozenset(relation_blocked_keys),
+        )
         object.__setattr__(self, "_entity_type_names", frozenset(type_names))
         object.__setattr__(self, "_type_lookup", type_lookup)
         object.__setattr__(self, "_relation_names", frozenset(relation_names))
@@ -301,13 +394,23 @@ class DomainProfile(_Model):
         return self._entity_type_names
 
     @property
-    def blacklist_keys(self) -> frozenset[str]:
-        """归一化后的领域关键词黑名单。"""
-        return self._blacklist_keys
+    def noise_keys(self) -> frozenset[str]:
+        """归一化后的实体名噪声词集合（noise_terms）。"""
+        return self._noise_keys
 
-    def is_blacklisted(self, value: str) -> bool:
-        """是否命中领域关键词黑名单。"""
-        return _key(value) in self._blacklist_keys
+    @property
+    def type_blacklist_names(self) -> frozenset[str]:
+        """归一化后的实体类型黑名单。"""
+        return self._type_blacklist_names
+
+    @property
+    def relation_blacklist_names(self) -> frozenset[str]:
+        """归一化后的关系类型黑名单。"""
+        return self._relation_blacklist_names
+
+    def is_noise_term(self, value: str) -> bool:
+        """是否命中实体名噪声词。"""
+        return _key(value) in self._noise_keys
 
     # ——————————————————— 匹配与归一 ———————————————————
 
@@ -324,7 +427,7 @@ class DomainProfile(_Model):
                     re.IGNORECASE,
                 )
             else:
-                # 没有补充词时使用永不匹配的正则，避免空 alternation
+                # 没有别名时使用永不匹配的正则，避免空 alternation
                 # 编译成“匹配任意位置”。
                 compiled = re.compile(r"(?!x)x")
             object.__setattr__(self, "_pattern", compiled)
@@ -333,7 +436,7 @@ class DomainProfile(_Model):
         return pattern
 
     def match(self, text: str) -> list[DomainMatch]:
-        """按最长优先扫描文本，返回不重叠的领域补充词命中。"""
+        """按最长优先扫描文本，返回不重叠的领域别名命中。"""
         if not text or not self._alias_index:
             return []
         matches: list[DomainMatch] = []
@@ -368,7 +471,7 @@ class DomainProfile(_Model):
         return self._type_lookup.get(key) if key else None
 
     def entity_type_of(self, value: str) -> str | None:
-        """补充词的类型；词典外返回 None。"""
+        """别名条目的类型；词典外返回 None。"""
         info = self._alias_index.get(_key(value))
         return info[1] if info else None
 
@@ -392,31 +495,26 @@ class DomainProfile(_Model):
             lines.append(line)
         return lines
 
-    def reference_terms(
-        self,
-        text: str,
-        *,
-        limit: int = 20,
-    ) -> list[dict[str, str]]:
-        """返回文本中实际出现的补充词（标准名/类型）。
+    def alias_prompt_lines(self, *, limit: int = 100) -> list[str]:
+        """LLM 提示词中的“已知标准名”清单（来自 aliases，不含别名值）。
 
-        白名单不是抽取边界，也不要求穷举领域：这里只挑出当前 chunk 文本
-        里出现的参考词，用于提示 LLM 统一新词/别名的标准名。文本中没有
-        出现的词不会进入提示词。
+        标准名用于告诉模型哪些领域标准名可以优先输出；它不是抽取边界，
+        也不要求穷举。别名值只在抽取后的归一阶段使用，不放进 Prompt，
+        避免提示词膨胀和把别名误当实体。
         """
         if limit <= 0:
             return []
-        terms: list[dict[str, str]] = []
+        lines: list[str] = []
         seen: set[str] = set()
-        for match in self.match(text):
-            key = match.name.casefold()
+        for item in self.aliases:
+            key = item.name.casefold()
             if key in seen:
                 continue
             seen.add(key)
-            terms.append({"name": match.name, "type": match.entity_type})
-            if len(terms) >= limit:
+            lines.append(f"- {item.name}（{item.type}）")
+            if len(lines) >= limit:
                 break
-        return terms
+        return lines
 
 
 # ——————————————————— 画像加载器 ———————————————————
@@ -434,7 +532,13 @@ _SCALAR_FIELDS = (
     "language",
     "description",
 )
-_NAMED_LIST_FIELDS = ("entity_types", "whitelist", "relations")
+_NAMED_LIST_FIELDS = (
+    "entity_types",
+    "relations",
+    "type_whitelist",
+    "relation_whitelist",
+)
+_STRING_LIST_FIELDS = ("type_blacklist", "relation_blacklist", "noise_terms")
 
 
 def resolve_domain_profile_path(
@@ -624,34 +728,6 @@ def domain_entity_type_text(
     return "\n".join(lines)
 
 
-def domain_noise_terms_text(
-    profiles: list[DomainProfile],
-    *,
-    limit: int = 40,
-) -> str:
-    """把画像黑名单渲染成“不要作为实体输出”的泛化/版式词清单。
-
-    黑名单原本用于图构建与 seed 过滤；查询规划同样需要它，否则 Prompt
-    只能靠硬编码“宠物/治疗/检查”等词来举例。这里按画像顺序去重，
-    最多 ``limit`` 个，避免提示词膨胀。
-    """
-    if limit <= 0:
-        return ""
-    terms: list[str] = []
-    seen: set[str] = set()
-    for profile in profiles:
-        for item in profile.blacklist:
-            value = str(item).strip()
-            key = _key(value)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            terms.append(value)
-            if len(terms) >= limit:
-                return "、".join(terms)
-    return "、".join(terms)
-
-
 def _resolve_base_dir(directory: str | Path | None) -> Path:
     """解析画像目录；相对路径按当前工作目录展开，未配置用内置目录。"""
     return Path(directory).expanduser() if directory else BUILTIN_DOMAIN_DIR
@@ -760,14 +836,15 @@ def _merge_payload(
 ) -> dict[str, Any]:
     """把主画像与子画像合并成完整 payload（子画像优先）。
 
-    列表字段按 ``name`` 去重合并，子画像同名项覆盖主画像；``blacklist``
-    按字符串合并；``prompt`` 字符串子画像非空覆盖，列表拼接。
+    列表字段按 ``name`` 去重合并，子画像同名项覆盖主画像；``type_blacklist`` /
+    ``relation_blacklist`` / ``noise_terms`` 做并集；``aliases`` 同名条目合并
+    别名；``prompt`` 字符串子画像非空覆盖，列表拼接。
     """
     merged: dict[str, Any] = dict(master)
     for key, value in child.items():
-        if key in _NAMED_LIST_FIELDS:
+        if key in _NAMED_LIST_FIELDS or key in _STRING_LIST_FIELDS:
             continue
-        if key == "blacklist":
+        if key == "aliases":
             continue
         if key == "prompt":
             continue
@@ -781,8 +858,10 @@ def _merge_payload(
 
     for key in _NAMED_LIST_FIELDS:
         merged[key] = _merge_named_list(master.get(key), child.get(key))
-    merged["blacklist"] = _merge_blacklist(
-        master.get("blacklist"), child.get("blacklist")
+    for key in _STRING_LIST_FIELDS:
+        merged[key] = _merge_strings(master.get(key), child.get(key))
+    merged["aliases"] = _merge_alias_list(
+        master.get("aliases"), child.get("aliases")
     )
     merged["prompt"] = _merge_prompt(master.get("prompt"), child.get("prompt"))
     # name/master 必须来自子画像，避免合并后仍叫主画像名。
@@ -814,8 +893,45 @@ def _merge_named_list(
     return result
 
 
-def _merge_blacklist(base: Any, extra: Any) -> list[str]:
-    """合并黑名单并保序去重。"""
+def _merge_alias_list(base: Any, extra: Any) -> list[dict[str, Any]]:
+    """按 ``name`` 合并别名条目；同名项继承主画像别名并允许子画像覆盖字段。
+
+    公共别名放在主画像，子画像只补自己特有的别名/说明；如果直接按
+    ``_merge_named_list`` 覆盖，子画像重新声明同名实体时会丢掉主画像的
+    公共别名。因此这里对同一 name 的 ``aliases`` 做保序并集，其余非空
+    字段由子画像覆盖。
+    """
+    result: list[dict[str, Any]] = []
+    index: dict[str, int] = {}
+    for source in (base, extra):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            if name not in index:
+                index[name] = len(result)
+                result.append(dict(item))
+                continue
+            old = result[index[name]]
+            merged = dict(old)
+            for field, value in item.items():
+                if field == "aliases":
+                    continue
+                if value not in (None, "", []):
+                    merged[field] = value
+            merged["aliases"] = _merge_strings(
+                old.get("aliases"), item.get("aliases")
+            )
+            result[index[name]] = merged
+    return result
+
+
+def _merge_strings(base: Any, extra: Any) -> list[str]:
+    """字符串列表保序去重合并（类型/关系黑名单、噪声词）。"""
     values: list[str] = []
     for source in (base, extra):
         if not isinstance(source, list):

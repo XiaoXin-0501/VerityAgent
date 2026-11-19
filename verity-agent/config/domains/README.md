@@ -1,48 +1,58 @@
 # 垂直领域画像目录
 
-领域画像**只做辅助**：提供实体类型、补充词白名单、黑名单、关系白名单和提示词；
-实体与关系必须由 LLM 从正文抽取，画像不会直接产出图节点。
+领域画像**只做辅助**：提供类型/关系白黑名单、实体别名与提示词，用来提高
+抽取质量、收缩明显噪声；它**不是实体/关系全集，也不做硬穷举**。
+实体与关系必须由 LLM 从正文抽取，画像不直接生成图节点，也不生成检索 seed。
 
-画像也**不负责生成检索实体归一**：白名单无法穷举领域，按词典扫描 query 会严重
-低召回。图 seed 优先来自 Agent 查询规划顺手提取的实体；规则路径由主 BM25 的
-`explainScore` 从实际召回中提取；画像只做别名→标准名归一与黑名单过滤。
+> 白名单/黑名单只约束**类型和关系**；实体标准名/别名单独放在 `aliases`。
+> 默认声明的 `entity_types` / `relations` 都可以抽取、入库和召回；白名单是
+> 补充，黑名单是限制/过滤。
 
-> `whitelist` 不是领域全集，也不要求穷举；它主要用于补充 LLM 可能不认识的
-> 新药物、新技术、专有名词和别名。内置列表可按需裁剪，不影响未登录实体的抽取。
+## 主画像与子画像
 
-本目录是 `config` 模块的一部分（`config/domain.py` 负责模型与加载），不再是 RAG
-内部实现。画像分两层：
+画像分两层，加载时自动合并：
 
-- **主画像**（`master` 为空）：只给全局使用，奠定垂直领域主题，如
-  `pet_medical.json`（宠物医疗）；Agent 的 system prompt 与查询规划使用
-  `IndexerConfig.master_profile`；不要求绑定具体知识库；
-- **子画像**（`master` 指向主画像名）：绑定到具体知识库，如
-  `pet_drug.json`（宠物药品）、`pet_case.json`（宠物医疗案例）、
-  `pet_category.json`（宠物类别）；用于该库的图构建、检索关系白名单与
-  实体归一；加载时自动合并主画像的公共类型/关系/黑名单/提示词，只声明差异。
+- **主画像**（`master` 为空）：一个领域主题的公共底座，例如
+  `pet_medical.json`（宠物医疗）。提供公共类型、公共关系、公共类型/关系
+  白黑名单、公共别名和提示词。
+- **子画像**（`master` 指向主画像）：绑定具体知识库，只声明该库特有的
+  类型/关系、类型/关系白黑名单与别名；公共部分继承主画像。
 
-切换领域不需要改代码：
+合并规则：
 
-1. 在本目录（或 `IndexerConfig.domain_profile_dir` 指向的目录）新增主画像/子画像 JSON；
-2. 修改 `IndexerConfig.master_profile` / `domain_profile`，或在知识库上设置
-   `domain_profile`（通常写子画像名）；
-3. 重建相关 KB 的索引（REINDEX）——实体是在入库时写入 Neo4j 的，换画像不会自动改旧数据。
+- `entity_types` / `relations`：按 `name` 合并，子画像同名项覆盖主画像；
+- `type_whitelist` / `relation_whitelist`：按 `name` 合并；
+- `type_blacklist` / `relation_blacklist` / `noise_terms`：保序并集；
+- `aliases`：按 `name` 合并；同名条目继承主画像别名并叠加子画像别名；
+- `prompt`：字符串子画像非空覆盖，列表拼接去重。
 
-也可以设置 `IndexerConfig.domain_profile_path` 直接指向一个 JSON 文件（优先级最高）。
+## Prompt 携带什么
+
+图抽取 system prompt 只携带：
+
+- 有效 `entity_types`（默认类型 + 类型白名单 - 类型黑名单）；
+- 有效 `relations`（默认关系 + 关系白名单 - 关系黑名单）；
+- `aliases` 的**标准名**（不含别名值）；
+- 角色、抽取规则、示例和数量上限。
+
+不携带：
+
+- `type_blacklist` / `relation_blacklist`：只做抽取后过滤；
+- `noise_terms`：只做实体名过滤；
+- `aliases` 的别名值：只做抽取后归一。
 
 ## JSON 结构
 
 ```jsonc
 {
-  "name": "pet_medical",            // 必填，唯一标识
+  "name": "pet_medical",
   "display_name": "宠物医疗",
-  "version": "1",
+  "version": "2",
   "language": "zh",
   "description": "……",
-  // 主画像留空；子画像填主画像名，加载时自动继承公共定义
   "master": "",
 
-  // 实体类型：name 是写入 LLM 输出的 type；examples 用来展示垂直领域粒度
+  // 默认实体类型：全部可抽取；白名单可补充，黑名单可移除
   "entity_types": [
     {
       "name": "disease",
@@ -52,28 +62,37 @@
     }
   ],
 
-  // 补充词白名单：只放新药物/新技术/专有名词/别名等；不要求穷举领域。
-  // 仅当当前 chunk 文本命中时才进入 reference_terms，用于统一标准名。
-  "whitelist": [
-    {"name": "犬细小病毒病", "type": "disease", "aliases": ["犬细小", "CPV"]}
+  // 类型白名单/黑名单：只影响类型集合
+  "type_whitelist": [
+    {"name": "lab_parameter", "label": "检验参数"}
   ],
+  "type_blacklist": [],
 
-  // 明确禁止进入图的关键词：泛化词、版式词、叙述词；提示词与结果后处理都会用
-  "blacklist": ["宠物", "主人", "诊断", "治疗", "检查结果", "表1", "图2"],
-
-  // 关系白名单：只有这里声明的关系会写入图；清单外关系只记录日志
+  // 默认关系：全部可抽取；白名单可补充，黑名单可移除
   "relations": [
     {"name": "has_symptom", "label": "疾病→症状", "description": "疾病表现出某症状/体征"}
   ],
+  "relation_whitelist": [
+    {"name": "monitored_by", "label": "疾病→监测手段"}
+  ],
+  "relation_blacklist": ["mentions", "related_to"],
 
-  // LLM 提示词片段；实体/关系类型清单与黑名单由程序自动追加，
-  // 补充词按当前 chunk 命中情况放入 reference_terms
+  // 实体标准名与别名；标准名进入 Prompt，别名值只用于抽取后归一
+  "aliases": [
+    {"name": "犬细小病毒病", "type": "disease", "aliases": ["犬细小", "CPV"]},
+    {"name": "血常规", "type": "exam", "aliases": ["CBC"]}
+  ],
+
+  // 实体名噪声过滤（版式词/泛化词/叙述词）；不进入 Prompt
+  "noise_terms": ["宠物", "主人", "诊断", "治疗", "检查结果", "表1", "图2"],
+
+  // Prompt 片段；类型/关系/别名标准名清单由程序自动追加
   "prompt": {
     "role": "你是宠物医疗知识图谱的实体与关系抽取器。",
     "entity_guidance": "只抽取文本中明确出现的宠物医疗概念……",
     "relation_guidance": "只抽取正文明确表达的关系……",
     "extra_instructions": ["……"],
-    "entity_examples": ["- 犬细小病毒病（disease）……"],
+    "entity_examples": ["- 犬细小病毒病（disease）"],
     "noise_examples": ["- 病例报告、患犬、检查结果……"]
   }
 }
@@ -81,30 +100,33 @@
 
 ## 校验规则（加载期 fail-fast）
 
-- `entity_types[].name` 不可重复，且至少声明一个类型；
-- `entity_types[].label` 不能与另一个类型的 `name/label` 冲突；
-- `whitelist` 可以为空；非空时 `name` 不可重复，`type` 必须是已声明类型；
-- `whitelist` 不是抽取边界：LLM 可以输出未登录实体；只有类型已声明的实体才入图；
-- 同一别名（大小写不敏感、空白归一）不能属于两个补充词；
-- 别名不能为空，且长度至少 2（单字中文会高频命中子串，噪声大于收益）；
-- 补充词的标准名/别名不能同时出现在 `blacklist`（白名单优先，避免自相矛盾）；
-- `relations[].name` 不可重复；只有这里声明的关系会入图，清单外关系仅记录日志；
-- `version` 可选；缓存 key 使用画像**内容签名**，内容变化后旧缓存会自动失效。
+- `entity_types` + `type_whitelist` - `type_blacklist` 后至少保留一个有效类型；
+- 类型/关系名称不可重复；类型 label 不能与另一个类型 name/label 冲突；
+- `aliases[].type` 必须是有效类型；
+- 同一别名（大小写不敏感、空白归一）不能属于两个实体；
+- 别名不能为空，且长度至少 2；
+- 实体标准名/别名不能同时出现在 `noise_terms`；
+- `relations` + `relation_whitelist` - `relation_blacklist` 为有效关系集合；
+- `version` 可选；缓存 key 使用画像内容签名，内容变化后旧缓存自动失效。
 
 ## 使用边界
 
-- **抽取**：LLM 看 `entity_types`、`blacklist` 与关系规则；`whitelist` 只把
-  当前 chunk 文本中实际命中的补充词作为 `reference_terms` 注入，文本中没有
-  出现的参考词不会被输出。
-- **归一**：LLM 输出的缩写/俗称按 `whitelist` 映射为标准名；词典外实体保留原词。
-- **检索**：不通过扫描 `whitelist` 生成图 seed；规划器/BM25 explainScore
-  提取的实体只在这里归一为标准名；图扩展仍只走画像声明的关系。
-- **类型**：LLM 给出的 type 先匹配类型名/标签；未声明类型暂不写入图，只记录
-  聚合日志，便于后续扩展 `entity_types`。
-- **关系**：未声明关系同样暂不写入图，只记录日志。
+- **抽取**：LLM 看有效类型、有效关系、别名标准名和抽取规则；清单外概念仍可抽取，
+  由 `graph_allow_unknown_types` / `graph_allow_unknown_relations` 控制是否入库。
+- **过滤**：实体名命中 `noise_terms`，或实体类型/关系命中类型/关系黑名单后丢弃。
+- **归一**：LLM 输出的别名/俗称按 `aliases` 归一为标准名；词典外实体保留原词。
+- **类型**：优先解析为有效类型；未知类型按开关保留为合法标识或 `other`。
+- **关系**：默认声明与白名单关系可抽取；黑名单关系过滤；未知关系按开关保留证据。
+- **检索**：图下一跳不按画像关系枚举限制，所有入库合法关系都可参与扩展。
+- **seed**：不扫描 `aliases` 生成图 seed；规划器/BM25 explainScore 提取的实体
+  只做别名归一与噪声词过滤。
 
-## 更换领域时
+## 更换领域
 
-- 旧画像可以保留在目录里，`domain_profile` 只指向当前使用的画像；
-- 不同领域的关系名可以完全不同，无需复用 `is_a/part_of` 等通用名；
-- 已建图数据不会自动清理；如需彻底切换，请对 KB 执行全量 REINDEX。
+1. 在 `config/domains/`（或 `IndexerConfig.domain_profile_dir`）新增主/子画像；
+2. 设置 `IndexerConfig.master_profile` / `domain_profile`，或在知识库上绑定
+   `domain_profile`（通常写子画像名）；
+3. 对相关 KB 执行 REINDEX——图是在入库时写入 Neo4j 的，换画像不会自动改旧数据。
+
+`medical.json` 是通用人类医疗参考主画像，不参与宠物医疗默认链路；只有知识库
+显式绑定 `medical` 时才会使用。

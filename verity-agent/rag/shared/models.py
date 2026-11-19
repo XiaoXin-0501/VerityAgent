@@ -546,7 +546,6 @@ class RerankPolicy(_Model):
 class GraphExpansionPolicy(_Model):
     enabled: bool = False
     max_hops: int = 1
-    allowed_relations: list[str] = Field(default_factory=list)
     min_evidence: int = 2
     max_next_hops: int = 5
     hub_as_intermediate: bool = False

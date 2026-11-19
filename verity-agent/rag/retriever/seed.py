@@ -230,7 +230,7 @@ def _candidate_ok(
         return False
     if value.casefold() in type_terms:
         return False
-    if any(profile.is_blacklisted(value) for profile in profiles):
+    if any(profile.is_noise_term(value) for profile in profiles):
         return False
     if value.casefold() in query_fold:
         return True

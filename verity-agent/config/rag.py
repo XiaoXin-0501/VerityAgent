@@ -195,7 +195,7 @@ class IndexerConfig(ConfigModel):
     # 全局默认领域画像名：知识库未绑定 ``knowledge_bases.domain_profile``
     # 时回退到这里。通常写某个子画像；没有子画像时才回退主画像。
     # 一个知识库最多绑定一个画像，同一部署可同时接入多个领域。
-    # 画像只做辅助（类型/补充词/黑名单/关系/提示词），不枚举实体，
+    # 画像只做辅助（默认类型/关系、白黑名单、别名、噪声词、提示词），不枚举实体，
     # 也不生成检索 seed；实体由 LLM 或 BM25 explainScore 提供。
     domain_profile: str = "pet_medical"
     # 主画像名：只给全局使用（Agent system prompt / 查询规划领域目录 /
@@ -205,13 +205,15 @@ class IndexerConfig(ConfigModel):
     domain_profile_dir: str | None = None
     # 自定义领域画像文件；设置后优先于 domain_profile/domain_profile_dir
     domain_profile_path: str | None = None
-    # 运维侧追加的关键词黑名单；与内置黑名单、领域画像黑名单取并集
-    graph_keyword_blacklist: list[str] = Field(default_factory=list)
-    # 每个 chunk 最多注入多少个“文本中实际出现的”补充词参考（仅用于统一标准名）
-    graph_llm_reference_terms_per_chunk: int = Field(default=20, ge=0, le=100)
+    # 运维侧追加的实体名噪声词；与内置黑名单、画像 noise_terms 取并集
+    graph_noise_terms: list[str] = Field(default_factory=list)
+    # Prompt 中最多展示多少个别名标准名；0 表示不展示（别名值本身
+    # 仍然只用于抽取后归一，不进入 Prompt）
+    graph_llm_alias_prompt_limit: int = Field(default=100, ge=0, le=500)
     # 单次 LLM 图抽取的 chunk 正文 token 预算；chunk 是最小单位，
-    # 按 token 预算装入最多 chunk，不再限制单批 chunk 数
-    graph_llm_batch_max_input_tokens: int = Field(default=6000, ge=500)
+    # 按 token 预算装入最多 chunk。默认 3000（约 8~10 个 300-token chunk），
+    # 给 8192 输出预算留出实体/关系 JSON 余量，减少截断后拆分重试。
+    graph_llm_batch_max_input_tokens: int = Field(default=3000, ge=500)
     # 同一文档并发进行的图抽取请求数
     graph_llm_concurrency: int = Field(default=4, ge=1, le=32)
     # 是否缓存 chunk 级图抽取结果（重试/重灌直接复用）
@@ -219,11 +221,19 @@ class IndexerConfig(ConfigModel):
     # 图抽取缓存 TTL（秒）；默认 30 天
     graph_llm_cache_ttl_s: int = Field(default=2_592_000, ge=0)
     # 每个 chunk 最多写入多少实体（Neo4j Keyword 节点）
-    graph_max_keywords_per_chunk: int = Field(default=10, ge=1)
+    graph_max_keywords_per_chunk: int = Field(default=16, ge=1)
     # 关系抽取最低置信度
     graph_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     # 每个 chunk 最多写入多少关系
     graph_max_relations_per_chunk: int = Field(default=20, ge=1)
+    # 模型给出未声明实体类型时是否允许入库；关闭则丢弃并记录指标
+    graph_allow_unknown_types: bool = True
+    # 未声明类型的兜底类型（类型名不是合法标识时）
+    graph_unknown_entity_type: str = Field(
+        default="other", min_length=1, max_length=32
+    )
+    # 是否保留格式合法但未在画像声明的关系；检索图扩展仍只用声明关系
+    graph_allow_unknown_relations: bool = True
     # LLM 图抽取：过短 chunk 不调用模型
     graph_llm_min_chunk_chars: int = Field(default=40, ge=0)
     # LLM 图抽取：单 chunk 最多送入模型的字符数
@@ -231,7 +241,7 @@ class IndexerConfig(ConfigModel):
     # LLM 图抽取温度；抽取任务建议低温
     graph_llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     # LLM 图抽取最大输出 token；推理模型会把 reasoning 计入该上限，
-    # 800 会在 JSON 尚未输出完时被截断，默认留足 4096。
+    # JSON 尚未输出完时会被截断，默认留足 8192。
     graph_llm_max_output_tokens: int = Field(default=8192, ge=64)
     # LLM 未返回 confidence 时的兜底置信度
     graph_llm_default_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
@@ -300,7 +310,6 @@ class RetrieverConfig(ConfigModel):
     include_doc_meta: bool = True
     # 是否注册/暴露 resolve_chunk_conflict 工具（D-88）
     chunk_conflict_tool_enabled: bool = False
-
     # 是否启用 rerank
     rerank_enabled: bool = True
     # rerank 应用模型 id
@@ -316,8 +325,6 @@ class RetrieverConfig(ConfigModel):
     graph_expansion_enabled: bool = False
     # 图扩展最大跳数；v1 只允许 1
     graph_max_hops: int = Field(default=1, ge=1)
-    # 允许扩展的关系白名单；为空时取参与检索的 KB 领域画像关系并集
-    graph_allowed_relations: list[str] = Field(default_factory=list)
     # 关系最小证据数
     graph_min_evidence: int = Field(default=2, ge=1)
     # 最多下一跳实体数

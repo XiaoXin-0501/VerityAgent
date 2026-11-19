@@ -84,7 +84,83 @@
       ]
     }
   ],
-  "whitelist": [
+  "relations": [
+    {
+      "name": "has_symptom",
+      "label": "疾病→症状",
+      "description": "疾病表现出某症状/体征"
+    },
+    {
+      "name": "treated_by",
+      "label": "疾病→药物/治疗",
+      "description": "疾病使用某药物或治疗手段"
+    },
+    {
+      "name": "diagnosed_by",
+      "label": "疾病→检查",
+      "description": "疾病通过某检查/检验诊断"
+    },
+    {
+      "name": "complication_of",
+      "label": "并发症→原发病",
+      "description": "某疾病是另一疾病的并发症"
+    },
+    {
+      "name": "causes",
+      "label": "病因→结果",
+      "description": "某因素/疾病导致另一疾病或症状"
+    },
+    {
+      "name": "affects",
+      "label": "疾病→部位",
+      "description": "疾病影响某解剖部位"
+    },
+    {
+      "name": "contraindicated_with",
+      "label": "药物→禁忌对象",
+      "description": "药物与疾病/药物的禁忌关系"
+    },
+    {
+      "name": "interacts_with",
+      "label": "药物→药物",
+      "description": "药物相互作用"
+    },
+    {
+      "name": "risk_factor_for",
+      "label": "危险因素→疾病",
+      "description": "某因素增加疾病风险"
+    },
+    {
+      "name": "part_of",
+      "label": "部分→整体",
+      "description": "解剖结构或疾病的从属关系"
+    },
+    {
+      "name": "is_a",
+      "label": "子类→父类",
+      "description": "实体之间的分类关系"
+    }
+  ],
+  "prompt": {
+    "role": "你是医疗知识图谱的实体与关系抽取器，熟悉疾病、药物、症状、检查、治疗与解剖结构。",
+    "entity_guidance": "只抽取文本中明确出现的医学概念；使用标准全称或临床上通用的完整名称；缩略语只有在上下文能唯一确定时才抽取；不要把患者、治疗、检查等通用词当作实体；不要把数值、单位、剂量当作实体；每个实体必须给出 type，优先取实体类型清单中的值；清单无法覆盖时可以给出最贴切的类型名称，系统会保留并记录日志。",
+    "relation_guidance": "只抽取正文明确表达的关系，不要根据常识推断；subject 和 object 必须是本次 entities 中的 name；relation 优先取关系类型清单中的值；清单无法覆盖时可以给出最贴切的关系名称，系统会记录日志；不确定时省略。",
+    "extra_instructions": [
+      "同义实体会被归一为标准名，可以放心输出文本中出现的缩写。",
+      "表格/列表中的实体同样可以抽取，但不要把表头字段名当作实体。"
+    ],
+    "entity_examples": [
+      "- 2型糖尿病（disease）：完整疾病标准名",
+      "- 二甲双胍（drug）：具体药物名",
+      "- 肾小球滤过率（exam）：具体检查/指标",
+      "- 高血压（disease）"
+    ],
+    "noise_examples": [
+      "- 患者、该患者、本病例、检查结果等叙述性词",
+      "- 表1、图2、参考文献、结果显示等版式/文献词"
+    ]
+  },
+  "aliases": [
     {
       "name": "高血压",
       "type": "disease",
@@ -162,7 +238,11 @@
       ]
     }
   ],
-  "blacklist": [
+  "type_whitelist": [],
+  "relation_whitelist": [],
+  "type_blacklist": [],
+  "relation_blacklist": [],
+  "noise_terms": [
     "患者",
     "病人",
     "病史",
@@ -226,81 +306,5 @@
     "病例报告",
     "临床检查结果",
     "本文"
-  ],
-  "relations": [
-    {
-      "name": "has_symptom",
-      "label": "疾病→症状",
-      "description": "疾病表现出某症状/体征"
-    },
-    {
-      "name": "treated_by",
-      "label": "疾病→药物/治疗",
-      "description": "疾病使用某药物或治疗手段"
-    },
-    {
-      "name": "diagnosed_by",
-      "label": "疾病→检查",
-      "description": "疾病通过某检查/检验诊断"
-    },
-    {
-      "name": "complication_of",
-      "label": "并发症→原发病",
-      "description": "某疾病是另一疾病的并发症"
-    },
-    {
-      "name": "causes",
-      "label": "病因→结果",
-      "description": "某因素/疾病导致另一疾病或症状"
-    },
-    {
-      "name": "affects",
-      "label": "疾病→部位",
-      "description": "疾病影响某解剖部位"
-    },
-    {
-      "name": "contraindicated_with",
-      "label": "药物→禁忌对象",
-      "description": "药物与疾病/药物的禁忌关系"
-    },
-    {
-      "name": "interacts_with",
-      "label": "药物→药物",
-      "description": "药物相互作用"
-    },
-    {
-      "name": "risk_factor_for",
-      "label": "危险因素→疾病",
-      "description": "某因素增加疾病风险"
-    },
-    {
-      "name": "part_of",
-      "label": "部分→整体",
-      "description": "解剖结构或疾病的从属关系"
-    },
-    {
-      "name": "is_a",
-      "label": "子类→父类",
-      "description": "实体之间的分类关系"
-    }
-  ],
-  "prompt": {
-    "role": "你是医疗知识图谱的实体与关系抽取器，熟悉疾病、药物、症状、检查、治疗与解剖结构。",
-    "entity_guidance": "只抽取文本中明确出现的医学概念；使用标准全称或临床上通用的完整名称；缩略语只有在上下文能唯一确定时才抽取；不要把患者、治疗、检查等通用词当作实体；不要把数值、单位、剂量当作实体；每个实体必须给出 type，优先取实体类型清单中的值；清单无法覆盖时可以给出最贴切的类型名称，未声明的类型不会写入图，系统会记录日志；reference_terms 只用于统一标准名，文本中没有出现的参考词不要输出。",
-    "relation_guidance": "只抽取正文明确表达的关系，不要根据常识推断；subject 和 object 必须是本次 entities 中的 name；relation 优先取关系类型清单中的值；清单无法覆盖时可以给出最贴切的关系名称，未声明的关系不会写入图，系统会记录日志；不确定时省略。",
-    "extra_instructions": [
-      "同义实体会被归一为标准名，可以放心输出文本中出现的缩写。",
-      "表格/列表中的实体同样可以抽取，但不要把表头字段名当作实体。"
-    ],
-    "entity_examples": [
-      "- 2型糖尿病（disease）：完整疾病标准名",
-      "- 二甲双胍（drug）：具体药物名",
-      "- 肾小球滤过率（exam）：具体检查/指标",
-      "- 高血压（disease）"
-    ],
-    "noise_examples": [
-      "- 患者、该患者、本病例、检查结果等叙述性词",
-      "- 表1、图2、参考文献、结果显示等版式/文献词"
-    ]
-  }
+  ]
 }

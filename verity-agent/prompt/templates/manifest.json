@@ -43,7 +43,7 @@
     },
     "rag.graph.system": {
       "file": "rag/graph.system.md",
-      "version": 5,
+      "version": 6,
       "description": "垂直领域图抽取的 system prompt（领域内容通过变量注入）",
       "purpose": "rag.graph_extraction",
       "static": false,
@@ -107,8 +107,8 @@
           "default": "- 病例报告、患犬、检查结果、表1、图2、参考文献、如下、上述"
         },
         {
-          "name": "blacklist",
-          "description": "禁止输出的关键词黑名单（每行一个）",
+          "name": "alias_names",
+          "description": "aliases 条目的标准名清单（每行一个，不含别名值）",
           "required": false,
           "default": "（无）"
         }
@@ -124,7 +124,7 @@
       "variables": [
         {
           "name": "chunks_json",
-          "description": "待抽取 chunks 的 JSON 数组（chunk_id/heading/block_type/text/reference_terms）",
+          "description": "待抽取 chunks 的 JSON 数组（chunk_id/heading/block_type/text）",
           "required": true
         }
       ]
@@ -152,14 +152,46 @@
       "static": false,
       "cacheable": false,
       "variables": [
-        {"name": "doc_type", "required": false, "default": ""},
-        {"name": "heading", "required": false, "default": "（无）"},
-        {"name": "filename", "required": false, "default": ""},
-        {"name": "sheet", "required": false, "default": ""},
-        {"name": "caption", "required": false, "default": ""},
-        {"name": "context", "required": false, "default": ""},
-        {"name": "headers", "required": false, "default": ""},
-        {"name": "rows", "required": false, "default": ""}
+        {
+          "name": "doc_type",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "heading",
+          "required": false,
+          "default": "（无）"
+        },
+        {
+          "name": "filename",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "sheet",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "caption",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "context",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "headers",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "rows",
+          "required": false,
+          "default": ""
+        }
       ]
     },
     "rag.code.description.system": {
@@ -185,13 +217,41 @@
       "static": false,
       "cacheable": false,
       "variables": [
-        {"name": "heading", "required": false, "default": "（无）"},
-        {"name": "file_path", "required": false, "default": ""},
-        {"name": "symbol_path", "required": false, "default": ""},
-        {"name": "signature", "required": false, "default": ""},
-        {"name": "docstring", "required": false, "default": ""},
-        {"name": "context", "required": false, "default": ""},
-        {"name": "code", "required": false, "default": ""}
+        {
+          "name": "heading",
+          "required": false,
+          "default": "（无）"
+        },
+        {
+          "name": "file_path",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "symbol_path",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "signature",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "docstring",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "context",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "code",
+          "required": false,
+          "default": ""
+        }
       ]
     },
     "agent.system": {
@@ -241,12 +301,6 @@
           "description": "领域实体类型参考清单（每行一个）；由 DomainProfile.entity_types 注入",
           "required": false,
           "default": "（未配置领域画像：只提取问题中明确出现、可独立指代的具体对象；不要输出类型词、泛化词或整句）"
-        },
-        {
-          "name": "domain_noise_terms",
-          "description": "领域黑名单中的泛化/版式词；由 DomainProfile.blacklist 注入",
-          "required": false,
-          "default": "（未配置领域画像：不要输出类型词、泛化词、整句、代词、数值/单位或章节编号）"
         }
       ]
     },

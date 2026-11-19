@@ -16,7 +16,6 @@ from config.agent import AgentConfig
 from config.domain import (
     domain_catalog_text,
     domain_entity_type_text,
-    domain_noise_terms_text,
     list_domain_profile_names,
     load_domain_profile,
 )
@@ -68,7 +67,7 @@ def build_default_agent_dependencies(
     flow_log: Any | None = None,
     domain_catalog: str | None = None,
     domain_entity_types: str | None = None,
-    domain_noise_terms: str | None = None,
+    domain_noise_terms: tuple[str, ...] | None = None,
 ) -> AgentDependencies:
     """用当前 Settings/ProviderRegistry 构造 Agent 依赖。
 
@@ -144,7 +143,7 @@ def build_default_agent_dependencies(
     # 垂直领域目录：主画像主题 + 子画像细分方向；同时提取领域词用于规则初筛。
     # 实体类型清单单独传给查询规划 Prompt，避免模板写死某个领域（疾病/药物…）。
     entity_types = ""
-    noise_terms = ""
+    noise_terms: tuple[str, ...] = ()
     if domain_catalog is None:
         catalog, terms, entity_types, noise_terms = _load_domain_catalog()
     else:
@@ -236,11 +235,11 @@ async def build_default_agent(
     return await create_agent(resolved_config, dependencies=dependencies)
 
 
-def _load_domain_catalog() -> tuple[str | None, tuple[str, ...], str, str]:
+def _load_domain_catalog() -> tuple[str | None, tuple[str, ...], str, tuple[str, ...]]:
     """加载主/子画像，生成 Agent 领域目录、规则词表、类型参考与噪声词。
 
-    目录文件损坏时只记录 warning，不阻断 Agent 装配；缺失画像时返回空目录，
-    查询规划退化为不依赖领域描述的规则/LLM 判断。
+    noise_terms 只用于规划实体后过滤；别名与类型/关系黑名单同样不进入
+    查询规划 Prompt。目录文件损坏时只记录 warning，不阻断 Agent 装配。
     """
     cfg = settings.rag.indexer
     directory = cfg.domain_profile_dir
@@ -270,16 +269,27 @@ def _load_domain_catalog() -> tuple[str | None, tuple[str, ...], str, str]:
             logger.warning("加载领域画像失败，跳过: %s", name, exc_info=True)
             continue
         profiles.append(profile)
-        terms.extend(item.name for item in profile.whitelist)
-        for entity in profile.whitelist:
+        terms.extend(item.name for item in profile.aliases)
+        for entity in profile.aliases:
             terms.extend(entity.aliases)
         for entity_type in profile.entity_types:
             if entity_type.label:
                 terms.append(entity_type.label)
             terms.extend(entity_type.examples[:4])
+    # 配置的 master_profile 排在最前：同一部署可能保留多个参考主画像，
+    # 目录/类型参考应优先展示当前领域，避免人类医疗示例挤占宠物医疗示例。
+    profiles.sort(
+        key=lambda item: (
+            item.name != cfg.master_profile,
+            not item.is_master,
+            item.name,
+        )
+    )
     catalog = domain_catalog_text(profiles) or None
     entity_types = domain_entity_type_text(profiles)
-    noise_terms = domain_noise_terms_text(profiles)
+    noise_terms: set[str] = set()
+    for profile in profiles:
+        noise_terms.update(profile.noise_keys)
     deduped: list[str] = []
     seen: set[str] = set()
     for item in terms:
@@ -288,4 +298,4 @@ def _load_domain_catalog() -> tuple[str | None, tuple[str, ...], str, str]:
             continue
         seen.add(value.casefold())
         deduped.append(value)
-    return catalog, tuple(deduped), entity_types, noise_terms
+    return catalog, tuple(deduped), entity_types, tuple(sorted(noise_terms))

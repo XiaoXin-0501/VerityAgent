@@ -113,7 +113,7 @@ def evaluate_rules(
 ) -> RuleResult:
     """规则初筛；返回是否需要 RAG、召回意图与用户意图。
 
-    ``domain_terms`` 是垂直领域画像中的补充词/标准名，用于识别领域内提问；
+    ``domain_terms`` 是垂直领域画像中的别名标准名/领域词，用于识别领域内提问；
     规则只检查 query 是否包含这些词，不做实体抽取。
     """
     value = f" {query.strip()} "

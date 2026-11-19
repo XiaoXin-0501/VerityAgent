@@ -80,7 +80,6 @@ class LLMQueryPlanner:
         timeout_s: float = 8.0,
         max_output_tokens: int = 512,
         entity_types: str | None = None,
-        noise_terms: str | None = None,
         prompts: PromptRegistry | None = None,
     ) -> None:
         """保存 LLM 端口、模型与超时；领域类型只注入 Prompt，不写死模板。"""
@@ -93,8 +92,6 @@ class LLMQueryPlanner:
         if entity_types and entity_types.strip():
             # 未配置画像时留空，由 manifest 默认值给出通用抽取口径。
             values["domain_entity_types"] = entity_types.strip()
-        if noise_terms and noise_terms.strip():
-            values["domain_noise_terms"] = noise_terms.strip()
         self.system_prompt = self.prompts.render_text(
             PromptId.AGENT_QUERY_PLAN_SYSTEM,
             **values,

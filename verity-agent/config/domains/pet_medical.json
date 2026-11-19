@@ -1,9 +1,9 @@
 {
   "name": "pet_medical",
   "display_name": "宠物医疗",
-  "version": "1",
+  "version": "2",
   "language": "zh",
-  "description": "宠物医疗垂直领域画像：犬猫疾病、症状、药物、疫苗、检查、治疗、解剖、品种、寄生虫、食物毒物与风险因素。",
+  "description": "宠物医疗垂直领域公共画像：疾病、症状、药物/药物类别/剂型、疫苗、检查、治疗、解剖、品种、病原体、寄生虫、食物毒物与风险因素；子画像只补各自特有类型/别名/关系。",
   "entity_types": [
     {
       "name": "disease",
@@ -32,6 +32,31 @@
       ]
     },
     {
+      "name": "drug_class",
+      "label": "药物类别",
+      "description": "按药理作用划分的药物类别",
+      "examples": [
+        "β-内酰胺类抗生素",
+        "大环内酯类",
+        "糖皮质激素",
+        "非甾体抗炎药",
+        "驱虫药"
+      ]
+    },
+    {
+      "name": "dosage_form",
+      "label": "剂型/规格",
+      "description": "药品的剂型、浓度、规格或给药形式",
+      "examples": [
+        "片剂",
+        "注射液",
+        "口服混悬液",
+        "滴耳液",
+        "缓释片",
+        "粉针剂"
+      ]
+    },
+    {
       "name": "vaccine",
       "label": "疫苗",
       "description": "具体疫苗产品、疫苗类型或免疫制剂",
@@ -55,6 +80,19 @@
         "钩虫",
         "绦虫",
         "心丝虫"
+      ]
+    },
+    {
+      "name": "pathogen",
+      "label": "病原体",
+      "description": "病毒、细菌、真菌等致病微生物；与寄生虫分开",
+      "examples": [
+        "犬瘟热病毒",
+        "犬细小病毒",
+        "猫杯状病毒",
+        "猫疱疹病毒",
+        "大肠杆菌",
+        "沙门氏菌"
       ]
     },
     {
@@ -162,7 +200,120 @@
       ]
     }
   ],
-  "whitelist": [
+  "relations": [
+    {
+      "name": "has_symptom",
+      "label": "疾病→症状",
+      "description": "疾病表现出某症状/体征"
+    },
+    {
+      "name": "treated_by",
+      "label": "疾病→药物/治疗",
+      "description": "疾病使用某药物或治疗手段"
+    },
+    {
+      "name": "used_for",
+      "label": "药物/疫苗→适应证",
+      "description": "药物或疫苗用于预防/治疗的疾病或症状"
+    },
+    {
+      "name": "adverse_reaction",
+      "label": "药物→不良反应",
+      "description": "药物引起的不良反应或副作用"
+    },
+    {
+      "name": "drug_class_of",
+      "label": "药物类别→药物",
+      "description": "药物所属的药物类别"
+    },
+    {
+      "name": "dosage_form_of",
+      "label": "剂型→药物",
+      "description": "剂型/规格所属的药物"
+    },
+    {
+      "name": "diagnosed_by",
+      "label": "疾病→检查",
+      "description": "疾病通过某检查/检验诊断"
+    },
+    {
+      "name": "complication_of",
+      "label": "并发症→原发病",
+      "description": "某疾病是另一疾病的并发症"
+    },
+    {
+      "name": "causes",
+      "label": "病因→结果",
+      "description": "某因素/疾病/寄生虫导致另一疾病或症状"
+    },
+    {
+      "name": "affects",
+      "label": "疾病→部位",
+      "description": "疾病影响某解剖部位"
+    },
+    {
+      "name": "contraindicated_with",
+      "label": "药物→禁忌对象",
+      "description": "药物与疾病/药物的禁忌关系"
+    },
+    {
+      "name": "interacts_with",
+      "label": "药物→药物",
+      "description": "药物相互作用"
+    },
+    {
+      "name": "risk_factor_for",
+      "label": "风险因素→疾病",
+      "description": "某因素增加疾病风险"
+    },
+    {
+      "name": "prevents",
+      "label": "疫苗/驱虫→疾病",
+      "description": "疫苗或驱虫措施预防某疾病"
+    },
+    {
+      "name": "predisposes",
+      "label": "品种/物种→疾病",
+      "description": "品种或年龄阶段易患某疾病"
+    },
+    {
+      "name": "toxic_to",
+      "label": "毒物→物种",
+      "description": "食物/物质对某物种有毒性"
+    },
+    {
+      "name": "part_of",
+      "label": "部分→整体",
+      "description": "解剖结构或疾病的从属关系"
+    },
+    {
+      "name": "is_a",
+      "label": "子类→父类",
+      "description": "实体之间的分类关系"
+    }
+  ],
+  "prompt": {
+    "role": "你是宠物医疗知识图谱的实体与关系抽取器，熟悉犬猫疾病、症状、药物/药物类别/剂型、疫苗、检查、治疗、解剖、品种、病原体、寄生虫与食物毒物。",
+    "entity_guidance": "只从标题和正文抽取明确出现的宠物医疗概念；使用兽医临床标准全称或完整通用名；缩略语只有在上下文能唯一确定时才抽取；不要把宠物、主人、兽医、诊断、治疗等通用词当作实体；不要把数值、单位、剂量当作实体；不要把人类疾病或人类用药当作宠物实体，除非文本明确用于犬猫；每个实体必须给出 type，优先取实体类型清单中的值；清单无法覆盖时可以给出最贴切的类型名称，系统会保留并记录日志。",
+    "relation_guidance": "只抽取正文明确表达的关系，不要根据常识推断；subject 和 object 必须是本次 entities 中的 name；relation 优先取关系类型清单中的值；清单无法覆盖时可以给出最贴切的关系名称，系统会记录日志；不确定时省略。",
+    "extra_instructions": [
+      "同义实体会被归一为标准名，可以放心输出文本中出现的缩写和俗称。",
+      "只从标题与正文抽取；表格、代码、图片等低语义内容不参与图构建。"
+    ],
+    "entity_examples": [
+      "- 犬细小病毒病（disease）",
+      "- 猫传染性腹膜炎（disease）",
+      "- 阿莫西林克拉维酸（drug）",
+      "- 犬瘟热病毒（pathogen）",
+      "- 犬四联疫苗（vaccine）",
+      "- 片剂（dosage_form）"
+    ],
+    "noise_examples": [
+      "- 病例报告、患犬、该猫、检查结果、治疗方案等叙述性词",
+      "- 表1、图2、参考文献、如下、上述等版式/文献词"
+    ]
+  },
+  "aliases": [
     {
       "name": "犬瘟热",
       "type": "disease",
@@ -202,6 +353,48 @@
       "aliases": []
     },
     {
+      "name": "恩诺沙星",
+      "type": "drug",
+      "aliases": [
+        "Enrofloxacin"
+      ]
+    },
+    {
+      "name": "多西环素",
+      "type": "drug",
+      "aliases": [
+        "Doxycycline"
+      ]
+    },
+    {
+      "name": "泼尼松",
+      "type": "drug",
+      "aliases": [
+        "Prednisone"
+      ]
+    },
+    {
+      "name": "犬瘟热病毒",
+      "type": "pathogen",
+      "aliases": [
+        "Canine distemper virus"
+      ]
+    },
+    {
+      "name": "犬细小病毒",
+      "type": "pathogen",
+      "aliases": [
+        "Canine parvovirus"
+      ]
+    },
+    {
+      "name": "猫杯状病毒",
+      "type": "pathogen",
+      "aliases": [
+        "FCV"
+      ]
+    },
+    {
       "name": "犬四联疫苗",
       "type": "vaccine",
       "aliases": [
@@ -235,10 +428,22 @@
       "aliases": []
     }
   ],
-  "blacklist": [
+  "type_whitelist": [],
+  "relation_whitelist": [],
+  "type_blacklist": [],
+  "relation_blacklist": [
+    "mentions",
+    "related_to",
+    "co_occurs"
+  ],
+  "noise_terms": [
     "宠物",
     "动物",
     "犬猫",
+    "病原体",
+    "药物类别",
+    "剂型",
+    "给药途径",
     "主人",
     "饲主",
     "宠主",
@@ -319,96 +524,5 @@
     "病例报告",
     "宠物医院",
     "临床检查结果"
-  ],
-  "relations": [
-    {
-      "name": "has_symptom",
-      "label": "疾病→症状",
-      "description": "疾病表现出某症状/体征"
-    },
-    {
-      "name": "treated_by",
-      "label": "疾病→药物/治疗",
-      "description": "疾病使用某药物或治疗手段"
-    },
-    {
-      "name": "diagnosed_by",
-      "label": "疾病→检查",
-      "description": "疾病通过某检查/检验诊断"
-    },
-    {
-      "name": "complication_of",
-      "label": "并发症→原发病",
-      "description": "某疾病是另一疾病的并发症"
-    },
-    {
-      "name": "causes",
-      "label": "病因→结果",
-      "description": "某因素/疾病/寄生虫导致另一疾病或症状"
-    },
-    {
-      "name": "affects",
-      "label": "疾病→部位",
-      "description": "疾病影响某解剖部位"
-    },
-    {
-      "name": "contraindicated_with",
-      "label": "药物→禁忌对象",
-      "description": "药物与疾病/药物的禁忌关系"
-    },
-    {
-      "name": "interacts_with",
-      "label": "药物→药物",
-      "description": "药物相互作用"
-    },
-    {
-      "name": "risk_factor_for",
-      "label": "风险因素→疾病",
-      "description": "某因素增加疾病风险"
-    },
-    {
-      "name": "prevents",
-      "label": "疫苗/驱虫→疾病",
-      "description": "疫苗或驱虫措施预防某疾病"
-    },
-    {
-      "name": "predisposes",
-      "label": "品种/物种→疾病",
-      "description": "品种或年龄阶段易患某疾病"
-    },
-    {
-      "name": "toxic_to",
-      "label": "毒物→物种",
-      "description": "食物/物质对某物种有毒性"
-    },
-    {
-      "name": "part_of",
-      "label": "部分→整体",
-      "description": "解剖结构或疾病的从属关系"
-    },
-    {
-      "name": "is_a",
-      "label": "子类→父类",
-      "description": "实体之间的分类关系"
-    }
-  ],
-  "prompt": {
-    "role": "你是宠物医疗知识图谱的实体与关系抽取器，熟悉犬猫疾病、症状、药物、疫苗、检查、治疗、解剖、品种、寄生虫与食物毒物。",
-    "entity_guidance": "只从标题和正文抽取明确出现的宠物医疗概念；使用兽医临床标准全称或完整通用名；缩略语只有在上下文能唯一确定时才抽取；不要把宠物、主人、兽医、诊断、治疗等通用词当作实体；不要把数值、单位、剂量当作实体；不要把人类疾病或人类用药当作宠物实体，除非文本明确用于犬猫；每个实体必须给出 type，优先取实体类型清单中的值；清单无法覆盖时可以给出最贴切的类型名称，未声明的类型不会写入图，系统会记录日志；reference_terms 只用于统一标准名，文本中没有出现的参考词不要输出。",
-    "relation_guidance": "只抽取正文明确表达的关系，不要根据常识推断；subject 和 object 必须是本次 entities 中的 name；relation 优先取关系类型清单中的值；清单无法覆盖时可以给出最贴切的关系名称，未声明的关系不会写入图，系统会记录日志；不确定时省略。",
-    "extra_instructions": [
-      "同义实体会被归一为标准名，可以放心输出文本中出现的缩写和俗称。",
-      "只从标题与正文抽取；表格、代码、图片等低语义内容不参与图构建。"
-    ],
-    "entity_examples": [
-      "- 犬细小病毒病（disease；别名 CPV、细小病毒病）",
-      "- 猫传染性腹膜炎（disease；别名 FIP）",
-      "- 阿司匹林（drug，具体药物名）",
-      "- 犬瘟热病毒（disease，具体病原/疾病名）"
-    ],
-    "noise_examples": [
-      "- 病例报告、患犬、该猫、检查结果、治疗方案等叙述性词",
-      "- 表1、图2、参考文献、如下、上述等版式/文献词"
-    ]
-  }
+  ]
 }

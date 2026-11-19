@@ -191,7 +191,6 @@ class GraphStore:
         *,
         seed: str,
         kb_ids: Iterable[str],
-        allowed_relations: Iterable[str],
         min_evidence: int = 2,
         limit: int = 20,
         hub_as_intermediate: bool = False,
@@ -200,7 +199,8 @@ class GraphStore:
 
         跨库语义：查询在授权 KB 集合内统一执行，seed 与下一跳都从集合中取；
         下一跳实体仍由 RetrievalPipeline 到全部授权 KB 召回 chunk。
-        ``hub_as_intermediate=False`` 时排除 ``is_hub=true``。
+        关系类型不做画像枚举限制；``hub_as_intermediate=False`` 时排除
+        ``is_hub=true``。
         """
         ids = list(dict.fromkeys(str(item) for item in kb_ids if item))
         if not ids:
@@ -211,7 +211,6 @@ class GraphStore:
             WHERE k.kb_id IN $kb_ids
             MATCH (k)-[:SUBJECT_OF|OBJECT_OF]-(rel:Relation)
             WHERE rel.kb_id IN $kb_ids
-              AND rel.relation IN $allowed_relations
               AND coalesce(rel.evidence_count, 0) >= $min_evidence
             MATCH (rel)-[:SUBJECT_OF|OBJECT_OF]-(n:Keyword)
             WHERE n.kb_id IN $kb_ids
@@ -229,7 +228,6 @@ class GraphStore:
             {
                 "seed": seed,
                 "kb_ids": ids,
-                "allowed_relations": list(allowed_relations),
                 "min_evidence": min_evidence,
                 "limit": limit,
                 "hub_as_intermediate": bool(hub_as_intermediate),

@@ -5,15 +5,19 @@
 - **LLM 是唯一抽取器**：不再保留规则/词典/混合模式，也不把词典命中直接
   写成图节点；词典只用于提示词参考、别名归一和查询期 seed 匹配；
 - **Prompt 由注册表管理**：system/user 模板在 ``prompt/templates/rag``，
-  本类只负责组装变量（类型、补充词 reference_terms、黑名单、关系白名单、上限）；
+  本类只负责组装变量（有效类型/关系、别名标准名、上限）；类型/关系黑名单
+  与别名值只在抽取后过滤/归一阶段使用，不进入 Prompt；
 - **按 chunk 批量抽取**：一次请求携带多个 chunk，按 ``chunk_id`` 返回结果，
   降低调用次数；解析类错误拆分重试，API 故障返回空结果不阻断入库；
 - **并发受控**：同一文档的多个批次通过信号量限制并发；
 - **chunk 级缓存**：key = 模型 + Prompt 版本/checksum + 画像内容签名 + 正文，
   重试/REINDEX/重复上传直接复用；
-- **类型必须落库**：每个实体都带已声明 ``type``，写入 Neo4j ``Keyword.type``；
-  模型给出未声明类型时该实体不写入图，只累计到事件指标；
-- **弱关系不写图**：关系类型只能取画像声明，再走置信度/数量上限过滤。
+- **类型尽量落库**：每个实体都带类型，写入 Neo4j ``Keyword.type``；
+  模型给出未声明类型时不直接丢弃，而是保留最贴近的合法类型并记录指标，
+  避免画像枚举不完整导致实体丢失；
+- **关系声明辅助**：默认关系 + 关系白名单 - 关系黑名单作为抽取提示；
+  未声明关系记录指标，按配置保留证据；图下一跳遍历所有入库合法关系，
+  不再按画像声明集合限制。
 
 提示词要求模型返回纯 JSON；OpenAI 系走 ``json_object``，Anthropic
 不接收 response_format，由提示词约束并由本地解析兜底。
@@ -24,15 +28,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from config.domain import DomainProfile
 from config.rag import IndexerConfig
-from provider.enums import ChatFinishReason
 from prompt import PromptId, PromptRegistry, get_default_prompt_registry
+from provider.enums import ChatFinishReason
 from provider.llm.helpers import response_text
 from rag.shared.events import (
     RagEvent,
@@ -50,9 +56,6 @@ from utils.hashing import short_digest
 from utils.serialization import parse_json_object
 from utils.text import truncate
 from utils.tokens import estimate_tokens
-
-from config.domain import DomainProfile
-from ..caching import ChunkCache, graph_extraction_cache_key
 from .base import (
     GENERIC_KEYWORD_BLACKLIST,
     filter_relations,
@@ -62,15 +65,14 @@ from .base import (
     normalize_blocked_terms,
     normalize_keyword,
 )
+from ..caching import ChunkCache, graph_extraction_cache_key
 
 __all__ = ["LLMGraphExtractor"]
 
 logger = logging.getLogger(__name__)
 
-# 文本中实际命中的补充词（标准名/类型）；随 chunk JSON 注入，仅辅助归一。
-_ReferenceTerms = list[dict[str, str]]
-# (chunk, 截断后的正文, 补充词, 缓存 key)
-_PendingChunk = tuple[Chunk, str, _ReferenceTerms, Any | None]
+# (chunk, 截断后的正文, 缓存 key)
+_PendingChunk = tuple[Chunk, str, Any | None]
 
 
 def _new_metrics(chunks_total: int) -> dict[str, Any]:
@@ -90,18 +92,20 @@ def _new_metrics(chunks_total: int) -> dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "unknown_types": 0,
+        "unknown_types_kept": 0,
         "unknown_relations": 0,
+        "unknown_relations_kept": 0,
         "unknown_type_samples": [],
         "unknown_relation_samples": [],
     }
 
 
 def _add_unknown(
-    metrics: dict[str, Any],
-    *,
-    count_key: str,
-    sample_key: str,
-    sample: str,
+        metrics: dict[str, Any],
+        *,
+        count_key: str,
+        sample_key: str,
+        sample: str,
 ) -> None:
     """累计未声明类型/关系；只保留前 5 个样例行。"""
     metrics[count_key] += 1
@@ -144,15 +148,15 @@ class LLMGraphExtractor:
     """用 ChatModel 抽取领域实体/关系；一个实例绑定一个领域画像。"""
 
     def __init__(
-        self,
-        config: IndexerConfig,
-        profile: DomainProfile,
-        chat_model: Any,
-        *,
-        model_id: str | None = None,
-        prompts: PromptRegistry | None = None,
-        cache: ChunkCache | None = None,
-        event_sink: RagEventSink | None = None,
+            self,
+            config: IndexerConfig,
+            profile: DomainProfile,
+            chat_model: Any,
+            *,
+            model_id: str | None = None,
+            prompts: PromptRegistry | None = None,
+            cache: ChunkCache | None = None,
+            event_sink: RagEventSink | None = None,
     ) -> None:
         """保存模型句柄、领域画像、Prompt 注册表、缓存与可选事件接收端。"""
         self.config = config
@@ -160,20 +164,20 @@ class LLMGraphExtractor:
         self.chat_model = chat_model
         self.event_sink = event_sink
         self.model_id = (
-            model_id
-            or config.graph_model_id
-            or getattr(getattr(chat_model, "spec", None), "id", None)
-            or "graph-extractor"
+                model_id
+                or config.graph_model_id
+                or getattr(getattr(chat_model, "spec", None), "id", None)
+                or "graph-extractor"
         )
         self.prompts = prompts or get_default_prompt_registry()
         self.cache = cache
-        # 通用黑名单 + 运维黑名单 + 领域画像黑名单；命中即丢弃。
-        self.prompt_blacklist = (
-            normalize_blocked_terms(config.graph_keyword_blacklist)
-            | profile.blacklist_keys
+        # 通用噪声词 + 运维噪声词 + 画像 noise_terms；命中即丢弃。
+        self.domain_noise_terms = (
+                normalize_blocked_terms(config.graph_noise_terms)
+                | profile.noise_keys
         )
-        self.blacklist = GENERIC_KEYWORD_BLACKLIST | self.prompt_blacklist
-        self.allowed_relations = frozenset(
+        self.blocked_terms = GENERIC_KEYWORD_BLACKLIST | self.domain_noise_terms
+        self.declared_relations = frozenset(
             item.lower() for item in profile.relation_names
         )
 
@@ -183,10 +187,10 @@ class LLMGraphExtractor:
         return result[chunk.chunk_id]
 
     async def extract_batch(
-        self,
-        chunks: list[Chunk],
-        *,
-        max_concurrency: int | None = None,
+            self,
+            chunks: list[Chunk],
+            *,
+            max_concurrency: int | None = None,
     ) -> dict[str, ChunkGraphExtraction]:
         """批量抽取：缓存命中优先，未命中按 batch 分组并发调用模型。"""
         if not chunks:
@@ -208,13 +212,7 @@ class LLMGraphExtractor:
             if len(text) > prompt_limit:
                 metrics["input_truncated_chunks"] += 1
             prompt_text = truncate(text, prompt_limit)
-            # 只把当前 chunk 文本里实际出现的补充词带给模型；白名单不是
-            # 抽取边界，也不要求穷举领域。
-            reference_terms = self.profile.reference_terms(
-                prompt_text,
-                limit=self.config.graph_llm_reference_terms_per_chunk,
-            )
-            key = self._cache_key(prompt_text, reference_terms)
+            key = self._cache_key(prompt_text)
             cached = await self._cache_get(key)
             if cached is not None:
                 metrics["cache_hits"] += 1
@@ -222,7 +220,7 @@ class LLMGraphExtractor:
                 metrics["relations"] += len(cached.relations)
                 results[chunk.chunk_id] = cached
                 continue
-            pending.append((chunk, prompt_text, reference_terms, key))
+            pending.append((chunk, prompt_text, key))
         if not pending:
             await self._emit_summary(metrics, started)
             return results
@@ -236,7 +234,7 @@ class LLMGraphExtractor:
         semaphore = asyncio.Semaphore(concurrency)
 
         async def run(
-            batch: list[_PendingChunk],
+                batch: list[_PendingChunk],
         ) -> dict[str, ChunkGraphExtraction]:
             """在并发信号量内执行一个批次。"""
             async with semaphore:
@@ -255,7 +253,7 @@ class LLMGraphExtractor:
                     outcome,
                 )
                 outcome = {}
-            for chunk, _text, _reference_terms, key in batch:
+            for chunk, _text, key in batch:
                 extraction = outcome.get(chunk.chunk_id)
                 if extraction is None:
                     # 图构建是入库增强项：模型故障时返回空结果，不阻断入库。
@@ -267,12 +265,25 @@ class LLMGraphExtractor:
         return results
 
     async def _emit_summary(
-        self,
-        metrics: dict[str, Any],
-        started: float,
+            self,
+            metrics: dict[str, Any],
+            started: float,
     ) -> None:
         """把运行指标作为结构化事件交给上层，不在 RAG 内拼日志。"""
         duration_ms = int((time.perf_counter() - started) * 1000)
+        # 未声明类型/关系必须可追溯：既写结构化事件，也写一条聚合 warning。
+        # 开关开启时这些条目会入库；关闭时只记录被丢弃的候选。
+        if metrics["unknown_types"] or metrics["unknown_relations"]:
+            logger.warning(
+                "图抽取发现未声明类型/关系: types=%d(kept=%d) "
+                "relations=%d(kept=%d) type_samples=%s relation_samples=%s",
+                metrics["unknown_types"],
+                metrics["unknown_types_kept"],
+                metrics["unknown_relations"],
+                metrics["unknown_relations_kept"],
+                metrics["unknown_type_samples"],
+                metrics["unknown_relation_samples"],
+            )
         payload = {
             **metrics,
             "model_id": self.model_id,
@@ -290,8 +301,8 @@ class LLMGraphExtractor:
     # ——————————————————— 批次与缓存 ———————————————————
 
     def _make_batches(
-        self,
-        pending: list[_PendingChunk],
+            self,
+            pending: list[_PendingChunk],
     ) -> Iterable[list[_PendingChunk]]:
         """按输入 token 预算装批；chunk 是最小单位，不拆 chunk 填缝。
 
@@ -312,38 +323,38 @@ class LLMGraphExtractor:
         if batch:
             yield batch
 
-    def _cache_key(self, text: str, reference_terms: _ReferenceTerms):
+    def _cache_key(self, text: str):
         """构造 chunk 级图抽取缓存 key；未启用/未注入缓存时返回 None。"""
         if (
-            not self.config.graph_llm_cache_enabled
-            or self.config.graph_llm_cache_ttl_s <= 0
-            or self.cache is None
+                not self.config.graph_llm_cache_enabled
+                or self.config.graph_llm_cache_ttl_s <= 0
+                or self.cache is None
         ):
             return None
         system = self.prompts.get(PromptId.RAG_GRAPH_SYSTEM)
         user = self.prompts.get(PromptId.RAG_GRAPH_USER)
         # 影响输出的运行配置也进入 key：改实体/关系上限、置信度阈值、
-        # 补充词数量或运维黑名单后，旧结果不再复用。
-        reference_digest = short_digest(
-            json.dumps(reference_terms, ensure_ascii=False, sort_keys=True)
-        )
+        # 别名提示上限或未知类型/关系策略后，旧结果不再复用。
         extraction_config = "|".join(
             [
-                f"reference_terms={reference_digest}",
+                f"alias_limit={self.config.graph_llm_alias_prompt_limit}",
                 f"max_entities={self.config.graph_max_keywords_per_chunk}",
                 f"max_relations={self.config.graph_max_relations_per_chunk}",
                 f"min_confidence={self.config.graph_min_confidence}",
                 f"default_confidence={self.config.graph_llm_default_confidence}",
                 f"temperature={self.config.graph_llm_temperature}",
                 f"max_output_tokens={self.config.graph_llm_max_output_tokens}",
-                f"blacklist={short_digest('|'.join(sorted(self.blacklist)))}",
+                f"unknown_type={self.config.graph_unknown_entity_type}",
+                f"allow_unknown_types={self.config.graph_allow_unknown_types}",
+                f"unknown_relations={self.config.graph_allow_unknown_relations}",
+                f"noise_terms={short_digest('|'.join(sorted(self.blocked_terms)))}",
             ]
         )
         return graph_extraction_cache_key(
             model_id=self.model_id,
             prompt_version=user.version,
             prompt_checksum=f"{system.checksum}:{user.checksum}",
-            # 画像签名覆盖类型/白名单/黑名单/关系/提示词；换文档或改词典
+            # 画像签名覆盖类型/关系/白名单/黑名单/别名/提示词；换文档或改画像
             # 后旧缓存自然失效，不依赖人工 bump version。
             domain_profile=(
                 f"{self.profile.name}:{self.profile.version}:"
@@ -387,18 +398,17 @@ class LLMGraphExtractor:
     # ——————————————————— 模型调用 ———————————————————
 
     async def _extract_batch_items(
-        self,
-        batch: list[_PendingChunk],
-        metrics: dict[str, Any],
+            self,
+            batch: list[_PendingChunk],
+            metrics: dict[str, Any],
     ) -> dict[str, ChunkGraphExtraction]:
         """执行一个批次；截断/解析类错误拆分重试，API 故障返回空结果。"""
         metrics["llm_calls"] += 1
         chunks = [item[0] for item in batch]
         texts = [item[1] for item in batch]
-        reference_terms = [item[2] for item in batch]
         try:
             response = await self.chat_model.complete(
-                self._build_request(chunks, texts, reference_terms)
+                self._build_request(chunks, texts)
             )
             metrics["input_tokens"] += int(
                 getattr(response.usage, "input_tokens", 0) or 0
@@ -468,9 +478,9 @@ class LLMGraphExtractor:
         return result
 
     async def _split_retry(
-        self,
-        batch: list[_PendingChunk],
-        metrics: dict[str, Any],
+            self,
+            batch: list[_PendingChunk],
+            metrics: dict[str, Any],
     ) -> dict[str, ChunkGraphExtraction]:
         """把一个失败批次对半拆分重试；递归深度受 batch_size 限制。"""
         metrics["retries"] += 1
@@ -482,10 +492,9 @@ class LLMGraphExtractor:
     # ——————————————————— Prompt 构建 ———————————————————
 
     def _build_request(
-        self,
-        chunks: list[Chunk],
-        texts: list[str],
-        reference_terms: list[_ReferenceTerms],
+            self,
+            chunks: list[Chunk],
+            texts: list[str],
     ):
         """组装批量 ChatModelRequest：模板来自 PromptRegistry。"""
         from provider.enums import ModelRole, ResponseFormatType
@@ -503,13 +512,8 @@ class LLMGraphExtractor:
                 "heading": graph_nearest_heading(chunk),
                 "block_type": chunk.block_type.value,
                 "text": text,
-                # 只包含该 chunk 文本中出现的补充词；空列表也保留字段，
-                # 让模型明确“没有补充词”而不是漏看协议。
-                "reference_terms": terms,
             }
-            for chunk, text, terms in zip(
-                chunks, texts, reference_terms, strict=True
-            )
+            for chunk, text in zip(chunks, texts, strict=True)
         ]
         user_text = self.prompts.render_text(
             PromptId.RAG_GRAPH_USER,
@@ -564,21 +568,25 @@ class LLMGraphExtractor:
             values["entity_examples"] = "\n".join(prompt.entity_examples)
         if prompt.noise_examples:
             values["noise_examples"] = "\n".join(prompt.noise_examples)
-        values["blacklist"] = (
-            # 通用黑名单仍参与结果过滤，但不全部塞进 Prompt，避免过度限制
-            # 模型对正文概念的抽取；Prompt 只展示领域/运维明确禁止的词。
-            "\n".join(f"- {item}" for item in sorted(self.prompt_blacklist))
-            or "（无）"
+        # aliases 只给标准名，不带别名值；它帮助模型优先输出领域标准名，
+        # 但不是抽取边界。类型/关系黑名单只在抽取后过滤，不进入 Prompt。
+        values["alias_names"] = (
+                "\n".join(
+                    self.profile.alias_prompt_lines(
+                        limit=self.config.graph_llm_alias_prompt_limit
+                    )
+                )
+                or "（无）"
         )
         return self.prompts.render_text(PromptId.RAG_GRAPH_SYSTEM, **values)
 
     # ——————————————————— 结果归一 ———————————————————
 
     def _to_extraction(
-        self,
-        chunk: Chunk,
-        parsed: _LLMResultItem,
-        metrics: dict[str, Any],
+            self,
+            chunk: Chunk,
+            parsed: _LLMResultItem,
+            metrics: dict[str, Any],
     ) -> ChunkGraphExtraction:
         """把单个 chunk 的 LLM 结果归一为标准名、补类型并过滤关系。"""
         max_entities = self.config.graph_max_keywords_per_chunk
@@ -591,15 +599,16 @@ class LLMGraphExtractor:
                 continue
             canonical = self.profile.canonicalize_entity(raw)
             name = canonical[0] if canonical else raw
-            if not _is_valid_entity_name(name, blacklist=self.blacklist):
+            if not _is_valid_entity_name(name, blacklist=self.blocked_terms):
                 continue
-            if self.profile.is_blacklisted(name):
+            if self.profile.is_noise_term(name):
                 continue
             if canonical is not None:
                 entity_type = canonical[1]
             else:
-                # type 不限制 LLM 自由给出，但只有画像已声明的类型才能入图；
-                # 未声明类型只累计到事件指标，便于后续补画像，不写入 Neo4j。
+                # 画像类型是辅助而不是硬类型集合：模型给出清单外类型时保留
+                # 最贴近的合法类型（或配置的兜底类型），只记录指标，避免
+                # 因画像枚举不完整而丢掉实体。
                 resolved = self.profile.resolve_entity_type(entity.type or "")
                 if resolved is None:
                     _add_unknown(
@@ -611,8 +620,19 @@ class LLMGraphExtractor:
                             f"{(entity.type or '').strip() or '<empty>'})"
                         ),
                     )
+                    if not self.config.graph_allow_unknown_types:
+                        # 配置关闭时保持旧行为：未知类型不入图，仅记指标。
+                        continue
+                    metrics["unknown_types_kept"] += 1
+                    entity_type = self._fallback_entity_type(entity.type)
+                else:
+                    entity_type = resolved
+                # type_blacklist 按类型限制：类型命中黑名单的实体不入图。
+                if (
+                    entity_type.casefold()
+                    in self.profile.type_blacklist_names
+                ):
                     continue
-                entity_type = resolved
             key = name.casefold()
             if key in seen:
                 continue
@@ -633,22 +653,27 @@ class LLMGraphExtractor:
             object_key = obj.casefold()
             if subject_key not in types or object_key not in types:
                 continue
-            if self.profile.is_blacklisted(subject) or self.profile.is_blacklisted(
-                obj
+            if self.profile.is_noise_term(subject) or self.profile.is_noise_term(
+                    obj
             ):
                 continue
-            relation = (item.relation or "").strip().lower()
+            relation = _normalize_relation(item.relation)
             if not relation or subject_key == object_key:
                 continue
-            if relation not in self.allowed_relations:
-                # 关系类型同理：未声明关系暂不入图，只累计到事件指标。
+            if relation in self.profile.relation_blacklist_names:
+                continue
+            if relation not in self.declared_relations:
+                # 未声明关系记录指标；是否保留由配置决定。检索期图扩展仍只
+                # 使用画像声明关系，未知关系只作为证据数据。
                 _add_unknown(
                     metrics,
                     count_key="unknown_relations",
                     sample_key="unknown_relation_samples",
                     sample=f"{subject}-{relation}->{obj}",
                 )
-                continue
+                if not self.config.graph_allow_unknown_relations:
+                    continue
+                metrics["unknown_relations_kept"] += 1
             confidence = (
                 item.confidence
                 if item.confidence is not None
@@ -665,7 +690,6 @@ class LLMGraphExtractor:
                     object_type=types[object_key],
                 )
             )
-
 
         # 关系端点优先，其余实体按 LLM 输出顺序补足到上限。
         entities = [
@@ -688,7 +712,8 @@ class LLMGraphExtractor:
         filtered = filter_relations(
             relations,
             self.config,
-            allowed_relations=self.allowed_relations,
+            declared_relations=self.declared_relations,
+            allow_unknown=self.config.graph_allow_unknown_relations,
         )
         return ChunkGraphExtraction(
             chunk_id=chunk.chunk_id,
@@ -698,6 +723,17 @@ class LLMGraphExtractor:
             confidence=0.9 if (entities or filtered) else None,
         )
 
+    def _fallback_entity_type(self, raw: str | None) -> str:
+        """把未声明类型归一为可落库的类型名。
+
+        优先保留模型给出的、像类型标识的 ASCII 名称（如 ``vaccine_type``）；
+        缺失或明显不是类型标识时使用配置的兜底类型（默认 ``other``）。
+        """
+        value = normalize_keyword(raw or "").lower()
+        if value and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value):
+            return value
+        return self.config.graph_unknown_entity_type
+
     def _canonical_name(self, value: str) -> str:
         """把 LLM 返回的实体名归一为标准名；无效名返回空串。"""
         raw = normalize_keyword(value)
@@ -705,14 +741,14 @@ class LLMGraphExtractor:
             return ""
         canonical = self.profile.canonicalize(raw)
         name = canonical or raw
-        if not _is_valid_entity_name(name, blacklist=self.blacklist):
+        if not _is_valid_entity_name(name, blacklist=self.blocked_terms):
             return ""
         return name
 
 
 def _parse_batch(
-    payload: dict[str, Any],
-    chunks: list[Chunk],
+        payload: dict[str, Any],
+        chunks: list[Chunk],
 ) -> dict[str, _LLMResultItem]:
     """解析批量响应；兼容模型返回单对象格式的旧行为。"""
     results = payload.get("results")
@@ -741,14 +777,20 @@ def _parse_batch(
     raise ValueError("模型输出缺少 results")
 
 
+def _normalize_relation(value: str | None) -> str:
+    """归一关系名：只接受小写 ASCII 标识（如 used_for）；其他返回空串。"""
+    text = normalize_keyword(value or "").lower()
+    return text if re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", text) else ""
+
+
 def _is_valid_entity_name(
-    value: str,
-    *,
-    blacklist: Iterable[str] = (),
+        value: str,
+        *,
+        blacklist: Iterable[str] = (),
 ) -> bool:
     """实体/关系端点的长度与内容校验；防止模型输出整句或超长噪声。"""
     return (
-        bool(value)
-        and len(value) <= 64
-        and is_valid_keyword(value, blacklist=blacklist)
+            bool(value)
+            and len(value) <= 64
+            and is_valid_keyword(value, blacklist=blacklist)
     )

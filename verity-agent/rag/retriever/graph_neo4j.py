@@ -80,7 +80,6 @@ class Neo4jGraphExpander:
                 rows = await self.store.expand_next_hops(
                     seed=seed,
                     kb_ids=ids,
-                    allowed_relations=policy.allowed_relations,
                     min_evidence=policy.min_evidence,
                     limit=max(1, policy.max_next_hops),
                     hub_as_intermediate=policy.hub_as_intermediate,

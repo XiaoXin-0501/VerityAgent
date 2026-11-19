@@ -112,7 +112,7 @@ def build_default_indexing_pipeline(
 
     图抽取由 ``graph_extractor`` 显式注入时优先使用；否则按知识库绑定的
     ``domain_profile`` 构建 LLM 抽取器。``graph_chat_model`` 是图抽取必需
-    依赖：领域画像只做类型/白名单/黑名单提示，不直接产出图节点。
+    依赖：领域画像只做类型/关系/白名单/黑名单/别名提示，不直接产出图节点。
     ``prompt_registry`` 用于外部覆盖 Prompt 模板；为空时使用内置模板。
 
     表格/代码语义描述：显式注入 ``table_describer`` / ``code_describer`` 优先；
@@ -245,7 +245,7 @@ def build_default_retrieval_pipeline(
     - ``embedding_version`` 应传入库时 ``IndexerConfig.embedding_version``，
       用于 query embedding 缓存失效；
     - ``domain_profile`` 为空且 ``domain_profile_name`` 非空时加载对应领域
-      画像，用于图 seed/实体的标准名归一与图关系白名单（画像不生成 seed）；
+      画像，用于实体的别名归一与噪声词过滤（画像不生成 seed）；
       ``domain_profile_resolver`` 用于按 KB 绑定的画像名按需加载；
       图扩展默认关闭，不额外查询图；
     - 意图识别/query 改写由 Agent 查询规划完成，RAG 不再注入相关模型。

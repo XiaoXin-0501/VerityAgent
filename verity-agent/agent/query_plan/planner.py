@@ -40,13 +40,19 @@ class QueryPlanner:
         llm_model_id: str | None = None,
         domain_terms: Iterable[str] = (),
         domain_entity_types: str | None = None,
-        domain_noise_terms: str | None = None,
+        domain_noise_terms: Iterable[str] = (),
         prompts: object | None = None,
     ) -> None:
-        """保存配置、可选 LLM、领域词与实体类型/噪声词参考；不发起网络请求。"""
+        """保存配置、可选 LLM、领域词、类型参考与噪声词；不发起网络请求。"""
         self.config = config or QueryPlanConfig()
         self.domain_terms = tuple(
             item for item in (str(term).strip() for term in domain_terms) if item
+        )
+        # 画像噪声词只用于规划结果的实体后过滤，不进入 Prompt。
+        self.domain_noise_terms = frozenset(
+            item.strip().casefold()
+            for item in (str(term) for term in domain_noise_terms)
+            if item.strip()
         )
         self.llm_planner: LLMQueryPlanner | None = None
         model_id = self.config.model_id or llm_model_id
@@ -59,10 +65,6 @@ class QueryPlanner:
                 entity_types=_clip(
                     domain_entity_types,
                     self.config.domain_entity_types_chars,
-                ),
-                noise_terms=_clip(
-                    domain_noise_terms,
-                    self.config.domain_noise_terms_chars,
                 ),
                 prompts=prompts,  # type: ignore[arg-type]
             )
@@ -140,7 +142,7 @@ class QueryPlanner:
             logger.warning("query 规划异常，回退规则结果", exc_info=True)
             result = None
         if result is not None:
-            return result
+            return self._filter_entities(result)
         # LLM 失败/超时：规则未决策时由 build_rule_plan 做低置信兜底。
         return QueryPlanResult(
             build_rule_plan(
@@ -150,6 +152,27 @@ class QueryPlanner:
                 source=QueryPlanSource.FALLBACK,
                 confidence=0.4,
             )
+        )
+
+    def _filter_entities(self, result: QueryPlanResult) -> QueryPlanResult:
+        """用画像噪声词过滤规划实体；噪声词不进入 Prompt，只做后过滤。"""
+        entities = result.plan.entities
+        if not entities or not self.domain_noise_terms:
+            return result
+        kept = [
+            item
+            for item in entities
+            if item.strip().casefold() not in self.domain_noise_terms
+        ]
+        if len(kept) == len(entities):
+            return result
+        return QueryPlanResult(
+            result.plan.model_copy(update={"entities": kept}),
+            usage=result.usage,
+            latency_ms=result.latency_ms,
+            model_id=result.model_id,
+            prompt_text=result.prompt_text,
+            raw_output=result.raw_output,
         )
 
 
