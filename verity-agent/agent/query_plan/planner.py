@@ -1,11 +1,11 @@
-"""查询规划器：规则初筛 + LLM 兜底。
+"""查询规划器：规则短路 + LLM 规划。
 
 调用顺序：
 
-1. 规则判断高置信场景（寒暄/闲聊/个人记忆/明确查资料/高置信检索意图/
-   命中垂直领域词）；
-2. 规则无法判断且开启 LLM 时，调用 ``LLMQueryPlanner``，输入用户画像、
-   会话历史、垂直领域目录和规则结论；
+1. 规则判断高置信“不需要 RAG”的场景（寒暄/闲聊/个人记忆/纯计算）；
+2. 其余请求在开启 LLM 时调用 ``LLMQueryPlanner``，输入用户画像、
+   会话历史、垂直领域目录/实体类型参考和规则结论；规则判定的需要 RAG
+   只作为先验，不跳过 LLM，以便补全指代、提取实体、扩写用户意图；
 3. LLM 失败/超时/输出非法时保留规则兜底结果，不阻断对话。
 
 规划结果由 Agent 主循环消费：改写 query 与 RAG 意图传给 RAG，
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class QueryPlanner:
-    """规则优先、LLM 兜底的查询规划器。"""
+    """规则短路“明确不需要 RAG”，其余交给 LLM 的查询规划器。"""
 
     def __init__(
         self,
@@ -39,9 +39,11 @@ class QueryPlanner:
         llm: object | None = None,
         llm_model_id: str | None = None,
         domain_terms: Iterable[str] = (),
+        domain_entity_types: str | None = None,
+        domain_noise_terms: str | None = None,
         prompts: object | None = None,
     ) -> None:
-        """保存配置、可选 LLM 与领域词；不发起网络请求。"""
+        """保存配置、可选 LLM、领域词与实体类型/噪声词参考；不发起网络请求。"""
         self.config = config or QueryPlanConfig()
         self.domain_terms = tuple(
             item for item in (str(term).strip() for term in domain_terms) if item
@@ -54,6 +56,14 @@ class QueryPlanner:
                 model_id=model_id,
                 timeout_s=self.config.timeout_s,
                 max_output_tokens=self.config.max_output_tokens,
+                entity_types=_clip(
+                    domain_entity_types,
+                    self.config.domain_entity_types_chars,
+                ),
+                noise_terms=_clip(
+                    domain_noise_terms,
+                    self.config.domain_noise_terms_chars,
+                ),
                 prompts=prompts,  # type: ignore[arg-type]
             )
 
@@ -92,9 +102,12 @@ class QueryPlanner:
                 )
             )
         rule = evaluate_rules(normalized, domain_terms=self.domain_terms)
-        # 规则已高置信、query 过短、或未启用 LLM：直接采用规则结果。
+        # 规则只对“明确不需要 RAG”做终态短路（寒暄/个人记忆/纯计算）。
+        # 明确需要 RAG 的规则命中仍交给 LLM：只有 LLM 能补全指代、提取
+        # 图 seed 实体，并结合画像/历史扩写 user_intent。LLM 不可用时再
+        # 回退到规则结果，保持原有降级能力。
         if (
-            rule.decided
+            (rule.decided and not rule.needs_rag)
             or not self.config.use_llm
             or self.llm_planner is None
             or len(normalized) < self.config.min_query_chars

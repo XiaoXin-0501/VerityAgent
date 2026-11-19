@@ -1,18 +1,12 @@
 <template>
   <div v-if="calls.length" class="tool-calls">
     <div v-for="call in calls" :key="call.call_id" class="tool-call">
-      <div class="tool-call__head">
-        <el-icon class="tool-call__icon"><Tools /></el-icon>
-        <span class="tool-call__name">{{ call.name }}</span>
-        <el-tag size="small" :type="tagType(call.status)" effect="plain">
-          {{ statusText(call.status) }}
-        </el-tag>
-        <span class="tool-call__id">{{ call.call_id }}</span>
-      </div>
-      <details v-if="argumentsText(call)" class="tool-call__details">
-        <summary>参数</summary>
-        <pre>{{ argumentsText(call) }}</pre>
-      </details>
+      <el-icon class="tool-call__icon"><Tools /></el-icon>
+      <span class="tool-call__name">{{ toolLabel(call) }}</span>
+      <el-tag size="small" :type="tagType(effectiveStatus(call))" effect="plain">
+        {{ statusText(effectiveStatus(call)) }}
+      </el-tag>
+      <span class="tool-call__summary">{{ resultSummary(call) }}</span>
     </div>
   </div>
 </template>
@@ -24,6 +18,43 @@ import type { ToolCall } from '@/api/types'
 
 defineProps<{ calls: ToolCall[] }>()
 
+/** 内部工具标识 → 面向用户的中性名称；绝不直接展示调用名/类名。 */
+const TOOL_LABELS: Record<string, string> = {
+  search_kb: '知识库检索',
+  recall_round: '历史对话回忆',
+  resolve_chunk_conflict: '内容冲突处理',
+}
+
+const SUCCESS_SUMMARIES: Record<string, string> = {
+  search_kb: '已获得相关知识片段',
+  recall_round: '已获得历史对话内容',
+  resolve_chunk_conflict: '已获得冲突处理结果',
+}
+
+function effectiveStatus(call: ToolCall): string | undefined {
+  return call.result_status || call.status
+}
+
+/** 内部工具标识一律映射为中性名称；未登记工具统一显示“工具”。 */
+function toolLabel(call: ToolCall): string {
+  const name = call.name?.trim()
+  return TOOL_LABELS[name] ?? '工具'
+}
+
+function resultSummary(call: ToolCall): string {
+  switch (normalized(effectiveStatus(call))) {
+    case 'PENDING':
+    case 'RUNNING':
+      return '执行中'
+    case 'FAILED':
+      return '未获得结果'
+    case 'CANCELLED':
+      return '已取消'
+    default:
+      return SUCCESS_SUMMARIES[call.name] ?? '已获得结果'
+  }
+}
+
 function normalized(status: string | undefined): string {
   return (status ?? '').toUpperCase()
 }
@@ -31,6 +62,7 @@ function normalized(status: string | undefined): string {
 function tagType(status: string | undefined): 'success' | 'warning' | 'danger' | 'info' {
   switch (normalized(status)) {
     case 'SUCCEEDED':
+    case 'COMPLETED':
       return 'success'
     case 'RUNNING':
     case 'PENDING':
@@ -47,21 +79,11 @@ function statusText(status: string | undefined): string {
     PENDING: '等待',
     RUNNING: '执行中',
     SUCCEEDED: '成功',
+    COMPLETED: '成功',
     FAILED: '失败',
     CANCELLED: '已取消',
   }
   return labels[normalized(status)] ?? (status || '未知')
-}
-
-function argumentsText(call: ToolCall): string {
-  if (call.arguments && Object.keys(call.arguments).length) {
-    try {
-      return JSON.stringify(call.arguments, null, 2)
-    } catch {
-      return ''
-    }
-  }
-  return call.raw_arguments ?? ''
 }
 </script>
 
@@ -69,22 +91,19 @@ function argumentsText(call: ToolCall): string {
 .tool-calls {
   display: flex;
   flex-direction: column;
-  gap: var(--app-space-sm);
-  margin-top: var(--app-space-sm);
+  gap: var(--app-space-xs);
+  margin-top: var(--app-space-xs);
 }
 
 .tool-call {
-  padding: var(--app-space-sm) var(--app-space-md);
-  background-color: var(--app-bg-tool);
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius-md);
-}
-
-.tool-call__head {
   display: flex;
   align-items: center;
   gap: var(--app-space-xs);
+  padding: var(--app-space-sm) var(--app-space-md);
   font-size: var(--app-font-size-sm);
+  background-color: var(--app-bg-card);
+  border: 1px solid var(--app-border-color-light);
+  border-radius: var(--app-radius-sm);
 }
 
 .tool-call__icon {
@@ -96,37 +115,9 @@ function argumentsText(call: ToolCall): string {
   color: var(--app-text-primary);
 }
 
-.tool-call__id {
+.tool-call__summary {
   margin-left: auto;
-  overflow: hidden;
-  font-family: var(--app-font-family-mono);
   font-size: var(--app-font-size-xs);
   color: var(--app-text-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-call__details {
-  margin-top: var(--app-space-sm);
-}
-
-.tool-call__details summary {
-  font-size: var(--app-font-size-xs);
-  color: var(--app-text-secondary);
-  cursor: pointer;
-}
-
-.tool-call__details pre {
-  max-height: 240px;
-  padding: var(--app-space-sm);
-  margin: var(--app-space-xs) 0 0;
-  overflow: auto;
-  font-family: var(--app-font-family-mono);
-  font-size: var(--app-font-size-xs);
-  line-height: var(--app-line-height-tight);
-  color: var(--app-text-regular);
-  background-color: var(--app-bg-card);
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius-sm);
 }
 </style>

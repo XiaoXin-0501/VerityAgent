@@ -16,7 +16,7 @@ class PromptId(StrEnum):
 
     # Agent：主循环基础 system prompt
     AGENT_SYSTEM = "agent.system"
-    # Agent：查询规划（规则未命中时的意图识别/query 改写/RAG 决策）
+    # Agent：查询规划（意图识别/query 改写/RAG 决策；规则只短路明确无需 RAG）
     AGENT_QUERY_PLAN_SYSTEM = "agent.query_plan.system"
     # Agent：主循环反思（检查方向/止损）
     AGENT_REFLECTION_SYSTEM = "agent.reflection.system"

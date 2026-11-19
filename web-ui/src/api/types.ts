@@ -94,6 +94,8 @@ export interface ToolCall {
   arguments?: Record<string, unknown>
   raw_arguments?: string | null
   status?: string
+  /** 工具执行状态；由前端把同轮 ToolMessage 的状态合并进调用记录显示。 */
+  result_status?: string
 }
 
 export interface ImageRef {
@@ -121,6 +123,8 @@ export interface Artifact {
 export interface ChatMessage {
   id: string
   seq_no: number | null
+  /** 同一轮提问到完整回答的所有消息共享；旧数据可能为空。 */
+  round_id?: string | null
   role: MessageRole
   status: MessageStatus
   content: string

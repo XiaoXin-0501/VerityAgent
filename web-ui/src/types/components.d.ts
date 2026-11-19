@@ -12,6 +12,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AppLogo: typeof import('./../components/layout/AppLogo.vue')['default']
+    AssistantTurnItem: typeof import('./../components/chat/AssistantTurnItem.vue')['default']
     BrandMark: typeof import('./../components/layout/BrandMark.vue')['default']
     ChatComposer: typeof import('./../components/chat/ChatComposer.vue')['default']
     ChatHeader: typeof import('./../components/chat/ChatHeader.vue')['default']
@@ -36,15 +37,13 @@ declare module 'vue' {
     ElTag: typeof import('element-plus/es')['ElTag']
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
     ElUpload: typeof import('element-plus/es')['ElUpload']
-    LiveToolPanel: typeof import('./../components/chat/LiveToolPanel.vue')['default']
-    MessageItem: typeof import('./../components/chat/MessageItem.vue')['default']
     MessageList: typeof import('./../components/chat/MessageList.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     ThemeToggle: typeof import('./../components/common/ThemeToggle.vue')['default']
-    ThinkingBlock: typeof import('./../components/chat/ThinkingBlock.vue')['default']
     ToolCallList: typeof import('./../components/chat/ToolCallList.vue')['default']
     UserMenu: typeof import('./../components/layout/UserMenu.vue')['default']
+    UserMessageItem: typeof import('./../components/chat/UserMessageItem.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

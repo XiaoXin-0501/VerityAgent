@@ -1,13 +1,15 @@
-"""查询规划的 LLM 兜底。
+"""查询规划的 LLM 规划器。
 
 规则无法高置信判断时才走到这里。LLM 输入包含：
 
 - 用户画像（长期偏好/背景）；
 - 当前会话历史（最近若干条）；
 - 垂直领域目录（主画像 + 知识库绑定子画像）；
+- 领域实体类型参考（由画像注入，模板不写死具体领域）；
 - 用户原话与规则初筛结论。
 
-LLM 输出短 JSON：是否需要 RAG、改写 query、RAG 召回意图、用户意图。
+LLM 输出短 JSON：是否需要 RAG、改写 query、RAG 召回意图、用户意图
+（结合画像/历史适度扩写真实需求）与检索实体。
 失败/超时/输出非法时返回 None，由 ``QueryPlanner`` 保留规则兜底结果，
 不阻断主对话。
 """
@@ -77,16 +79,25 @@ class LLMQueryPlanner:
         model_id: str,
         timeout_s: float = 8.0,
         max_output_tokens: int = 512,
+        entity_types: str | None = None,
+        noise_terms: str | None = None,
         prompts: PromptRegistry | None = None,
     ) -> None:
-        """保存 LLM 端口、模型与超时；不发起网络请求。"""
+        """保存 LLM 端口、模型与超时；领域类型只注入 Prompt，不写死模板。"""
         self.llm = llm
         self.model_id = model_id
         self.timeout_s = max(0.1, float(timeout_s))
         self.max_output_tokens = max(32, int(max_output_tokens))
         self.prompts = prompts or get_default_prompt_registry()
+        values: dict[str, str] = {}
+        if entity_types and entity_types.strip():
+            # 未配置画像时留空，由 manifest 默认值给出通用抽取口径。
+            values["domain_entity_types"] = entity_types.strip()
+        if noise_terms and noise_terms.strip():
+            values["domain_noise_terms"] = noise_terms.strip()
         self.system_prompt = self.prompts.render_text(
-            PromptId.AGENT_QUERY_PLAN_SYSTEM
+            PromptId.AGENT_QUERY_PLAN_SYSTEM,
+            **values,
         )
 
     async def plan(

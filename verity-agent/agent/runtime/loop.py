@@ -329,8 +329,10 @@ class AgentLoop:
                 limit=self.deps.history_limit,
             )
             # 某些适配器按最近 N 条读取；确保本轮用户消息在窗口里。
-            if not any(item.message.id == user_message.id for item in history):
-                history.append(user_stored)
+            # append_user 返回的是落库后的副本，id 以 user_stored 为准；
+            # 用追加前的 user_message 比较会永远不相等，导致本轮用户消息
+            # 被拼接两次（一次来自窗口，一次来自这里）。
+            history = _ensure_current_user_message(history, user_stored)
 
             limits = self._limits(request)
             # 轮次召回工具只在摘要压缩到阈值后暴露：工具已在注册表里，
@@ -916,20 +918,18 @@ class AgentLoop:
                 error=exc.error,
                 duration_ms=duration,
             )
-            logger.warning(
-                "%s",
-                summary_block(
-                    "Agent 失败",
-                    [
-                        f"status={status.value} | 耗时={duration}ms | "
-                        f"error={exc.error.code.value}",
-                        f"消息={len(message_ids)} | LLM={llm_calls} 次 | "
-                        f"工具轮={tool_rounds}",
-                        f"tokens: 输入={usage.input_tokens} "
-                        f"输出={usage.output_tokens}",
-                    ],
-                ),
-            )
+            failure_lines = [
+                f"status={status.value} | 耗时={duration}ms | "
+                f"error={exc.error.code.value}",
+                f"消息={len(message_ids)} | LLM={llm_calls} 次 | "
+                f"工具轮={tool_rounds}",
+                f"tokens: 输入={usage.input_tokens} "
+                f"输出={usage.output_tokens}",
+            ]
+            cause_line = _error_cause_line(exc.error)
+            if cause_line:
+                failure_lines.append(cause_line)
+            logger.warning("%s", summary_block("Agent 失败", failure_lines))
             turn_status = (
                 TurnStatus.CANCELLED
                 if status is RunStatus.CANCELLED
@@ -1010,20 +1010,18 @@ class AgentLoop:
                 error=error,
                 duration_ms=duration,
             )
-            logger.error(
-                "%s",
-                summary_block(
-                    "Agent 失败",
-                    [
-                        f"status=failed | 耗时={duration}ms | "
-                        f"error={error.code.value}",
-                        f"消息={len(message_ids)} | LLM={llm_calls} 次 | "
-                        f"工具轮={tool_rounds}",
-                        f"tokens: 输入={usage.input_tokens} "
-                        f"输出={usage.output_tokens}",
-                    ],
-                ),
-            )
+            failure_lines = [
+                f"status=failed | 耗时={duration}ms | "
+                f"error={error.code.value}",
+                f"消息={len(message_ids)} | LLM={llm_calls} 次 | "
+                f"工具轮={tool_rounds}",
+                f"tokens: 输入={usage.input_tokens} "
+                f"输出={usage.output_tokens}",
+            ]
+            cause_line = _error_cause_line(error)
+            if cause_line:
+                failure_lines.append(cause_line)
+            logger.error("%s", summary_block("Agent 失败", failure_lines))
             await emit_turn_terminal(
                 TurnStatus.FAILED,
                 error=error.model_dump(mode="json"),
@@ -2267,6 +2265,24 @@ def _flow_truncate(
     return value[:limit] + f"…[truncated {len(value) - limit} chars]"
 
 
+def _ensure_current_user_message(
+    history: Sequence[StoredMessage],
+    user_stored: StoredMessage,
+) -> list[StoredMessage]:
+    """保证本轮已落库的用户消息在历史窗口中，且只出现一次。
+
+    ``load_window`` 通常已经包含刚追加的消息；只有适配器按“最近 N 条”
+    读取较早窗口、恰好排除当前消息时才需要补到末尾。比较必须使用
+    ``append_user`` 返回的落库副本 id；请求里的 ``UserMessage`` 没有
+    经过存储层，id 与落库行不同。
+    """
+    items = list(history)
+    if any(item.message.id == user_stored.message.id for item in items):
+        return items
+    items.append(user_stored)
+    return items
+
+
 def _history_text(
     history: Sequence[StoredMessage],
     limit: int,
@@ -2434,6 +2450,23 @@ def _tool_error(call: ToolCall):
         message="工具执行失败",
         details={"tool": call.name},
     )
+
+
+def _error_cause_line(error: Any) -> str | None:
+    """把 AgentError 的 details/cause 压成一行，供失败摘要日志排障。
+
+    ``summary_block`` 只打印错误码时，Provider 真实异常（如流式协议解析
+    失败）只能去 flow.jsonl 里找；把摘要后的 cause 同步到主日志，减少
+    一次故障定位的跳转。长 cause 截断，避免日志膨胀。
+    """
+    parts: list[str] = []
+    details = getattr(error, "details", None)
+    if details:
+        parts.append(f"details={details}")
+    cause = " ".join(str(getattr(error, "cause", "") or "").split())
+    if cause:
+        parts.append(f"cause={cause[:500]}")
+    return " | ".join(parts) or None
 
 
 def _public_warning(item: AgentWarningData):

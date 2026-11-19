@@ -2,13 +2,13 @@
 
 规则只做低成本、可解释的高置信判断：
 
-- 寒暄/致谢/能力询问/纯计算/个人记忆 → 不需要 RAG；
+- 寒暄/致谢/能力询问/纯计算/个人记忆 → 明确不需要 RAG；
 - 明确的查资料/文档/知识库表达，或 compare/summarize/howto/lookup 意图，
-  或命中垂直领域词 → 需要 RAG；
-- 其余交给 LLM 兜底，避免规则误判。
+  或命中垂直领域词 → 提示“可能需要 RAG”，作为 LLM 规划的先验；
+- 其余交给 LLM。
 
 规则无法做出改写，因此命中 RAG 时只把规范化后的原话作为 ``rewritten_query``；
-真正的指代消解和改写交给 LLM。
+真正的指代消解、实体提取与意图扩写交给 LLM；LLM 不可用时才用规则结果兜底。
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ _NO_RAG_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 _RAG_CUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"(知识库|文档|资料|文献|手册|指南|说明书|病例库|资料库)",
+        r"(知识库|文档|资料|文献|手册|指南|说明书|案例库|资料库)",
         r"(查一下|查查|查找|检索|搜索|搜一下|帮我找|找一下|翻一下)",
         r"(根据|依据|按照).{0,12}(文档|资料|指南|说明书|知识库)",
         r"(文档里|资料里|书里|指南里|知识库里).{0,20}(说|写|提到|规定)",
@@ -74,8 +74,8 @@ _INTENT_RULES: tuple[tuple[RagRecallIntent, tuple[str, ...]], ...] = (
     (
         RagRecallIntent.HOWTO,
         (
-            "如何", "怎么", "怎样", "步骤", "流程", "治疗方法", "预防",
-            "how to", "how do", "steps", "procedure", "treatment",
+            "如何", "怎么", "怎样", "步骤", "流程",
+            "how to", "how do", "steps", "procedure",
         ),
     ),
     (

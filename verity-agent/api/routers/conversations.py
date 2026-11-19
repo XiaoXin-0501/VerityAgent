@@ -92,8 +92,16 @@ def _dump_items(value: Any) -> list[Any]:
     ]
 
 
-def _decision_payload(message: Any) -> dict[str, Any]:
-    """把领域消息投影为前端可读结构。"""
+def _decision_payload(
+    message: Any,
+    *,
+    round_id: Any | None = None,
+) -> dict[str, Any]:
+    """把领域消息投影为前端可读结构。
+
+    ``round_id`` 是“一次提问到完整回答”的轮次 id；前端用它把同一轮内的
+    多个 assistant/tool 步骤折叠成一个助手回复，而不是每步一个系统消息。
+    """
     role = getattr(message, "role", None)
     content = getattr(message, "content", "")
     thinking = [
@@ -111,6 +119,9 @@ def _decision_payload(message: Any) -> dict[str, Any]:
     return {
         "id": str(getattr(message, "id", "")),
         "seq_no": None,
+        # 同一轮的 user/assistant/tool 共享；旧数据可能为 None，前端按连续
+        # assistant/tool 序列兜底分组。
+        "round_id": str(round_id) if round_id is not None else None,
         "role": str(getattr(role, "value", role) or ""),
         "status": str(getattr(status, "value", status) or ""),
         "content": content,
@@ -224,7 +235,7 @@ async def list_messages(
         message = _decode_message(row)
         if message is None or getattr(message, "role", None) == "system":
             continue
-        payload = _decision_payload(message)
+        payload = _decision_payload(message, round_id=row.round_id)
         payload["seq_no"] = row.seq_no
         items.append(payload)
     next_cursor = (

@@ -200,8 +200,8 @@ def register_search_kb(
         ToolSpec(
             name="search_kb",
             description=(
-                "在指定知识库中检索相关片段。用户询问宠物疾病、疫苗、"
-                "诊疗、药品或文档内容时优先使用；返回片段和引用。"
+                "在当前已绑定的知识库中检索相关片段。用户询问领域知识、"
+                "事实、文档内容或需要引用依据时优先使用；返回片段和引用。"
             ),
             group="kb",
             kind=ToolKind.EXECUTABLE,

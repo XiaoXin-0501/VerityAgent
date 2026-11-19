@@ -15,6 +15,8 @@ from config import settings
 from config.agent import AgentConfig
 from config.domain import (
     domain_catalog_text,
+    domain_entity_type_text,
+    domain_noise_terms_text,
     list_domain_profile_names,
     load_domain_profile,
 )
@@ -65,6 +67,8 @@ def build_default_agent_dependencies(
     reflection_model_id: str | None = None,
     flow_log: Any | None = None,
     domain_catalog: str | None = None,
+    domain_entity_types: str | None = None,
+    domain_noise_terms: str | None = None,
 ) -> AgentDependencies:
     """用当前 Settings/ProviderRegistry 构造 Agent 依赖。
 
@@ -138,8 +142,11 @@ def build_default_agent_dependencies(
         enable_fallback=settings.llm.enable_model_fallback,
     )
     # 垂直领域目录：主画像主题 + 子画像细分方向；同时提取领域词用于规则初筛。
+    # 实体类型清单单独传给查询规划 Prompt，避免模板写死某个领域（疾病/药物…）。
+    entity_types = ""
+    noise_terms = ""
     if domain_catalog is None:
-        catalog, terms = _load_domain_catalog()
+        catalog, terms, entity_types, noise_terms = _load_domain_catalog()
     else:
         catalog, terms = domain_catalog, ()
     planner = query_planner or QueryPlanner(
@@ -147,6 +154,8 @@ def build_default_agent_dependencies(
         llm=llm_service,
         llm_model_id=target_model_id,
         domain_terms=terms,
+        domain_entity_types=domain_entity_types or entity_types,
+        domain_noise_terms=domain_noise_terms or noise_terms,
     )
     flow = flow_log if flow_log is not None else build_flow_log(settings.app.log)
     return AgentDependencies(
@@ -227,8 +236,8 @@ async def build_default_agent(
     return await create_agent(resolved_config, dependencies=dependencies)
 
 
-def _load_domain_catalog() -> tuple[str | None, tuple[str, ...]]:
-    """加载主/子画像，生成 Agent 领域目录与规则词表。
+def _load_domain_catalog() -> tuple[str | None, tuple[str, ...], str, str]:
+    """加载主/子画像，生成 Agent 领域目录、规则词表、类型参考与噪声词。
 
     目录文件损坏时只记录 warning，不阻断 Agent 装配；缺失画像时返回空目录，
     查询规划退化为不依赖领域描述的规则/LLM 判断。
@@ -269,6 +278,8 @@ def _load_domain_catalog() -> tuple[str | None, tuple[str, ...]]:
                 terms.append(entity_type.label)
             terms.extend(entity_type.examples[:4])
     catalog = domain_catalog_text(profiles) or None
+    entity_types = domain_entity_type_text(profiles)
+    noise_terms = domain_noise_terms_text(profiles)
     deduped: list[str] = []
     seen: set[str] = set()
     for item in terms:
@@ -277,4 +288,4 @@ def _load_domain_catalog() -> tuple[str | None, tuple[str, ...]]:
             continue
         seen.add(value.casefold())
         deduped.append(value)
-    return catalog, tuple(deduped)
+    return catalog, tuple(deduped), entity_types, noise_terms

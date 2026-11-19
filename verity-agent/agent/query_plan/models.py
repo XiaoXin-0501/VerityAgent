@@ -7,7 +7,7 @@
 - ``user_intent``：用户真正想完成的事，用于召回长期记忆事实；
 - ``needs_rag``：是否进行知识库召回。
 
-规则初筛与 LLM 兜底使用同一模型，``source`` 标明结果来源，便于日志与排障。
+规则先验与 LLM 规划使用同一模型，``source`` 标明结果来源，便于日志与排障。
 """
 
 from __future__ import annotations

@@ -26,7 +26,7 @@
         </div>
       </div>
 
-      <div v-else-if="!messages.length && !liveMessages.length && !streaming" class="message-list__empty">
+      <div v-else-if="!messages.length && !liveTurn && !streaming" class="message-list__empty">
         <div class="message-list__empty-icon">
           <AppLogo size="lg" />
         </div>
@@ -47,19 +47,12 @@
         </div>
       </div>
 
-      <MessageItem
-        v-for="message in messages"
-        :key="message.id"
-        :message="message"
-      />
+      <template v-for="item in displayItems" :key="item.key">
+        <UserMessageItem v-if="item.kind === 'user'" :message="item.message" />
+        <AssistantTurnItem v-else :turn="item.turn" />
+      </template>
 
-      <MessageItem
-        v-for="message in liveMessages"
-        :key="message.id"
-        :message="message"
-      />
-
-      <LiveToolPanel v-if="liveToolCount" :tools="liveTools" />
+      <AssistantTurnItem v-if="liveTurn" :turn="liveTurn" />
 
       <div v-if="streaming" class="message-list__live">
         <span class="message-list__live-dot"></span>
@@ -88,9 +81,10 @@ import { ArrowDown } from '@element-plus/icons-vue'
 import type { AgentError, AgentWarning, ChatMessage, RunStatus } from '@/api/types'
 import type { LiveAssistantMessage, LiveToolCall } from '@/stores/chat'
 import { statusLabel } from '@/utils/format'
+import { buildDisplayItems, buildLiveTurn } from '@/utils/chatGrouping'
 import AppLogo from '@/components/layout/AppLogo.vue'
-import LiveToolPanel from '@/components/chat/LiveToolPanel.vue'
-import MessageItem from '@/components/chat/MessageItem.vue'
+import AssistantTurnItem from '@/components/chat/AssistantTurnItem.vue'
+import UserMessageItem from '@/components/chat/UserMessageItem.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -115,20 +109,17 @@ const scrollRef = ref<HTMLElement | null>(null)
 const atBottom = ref(true)
 const showJump = ref(false)
 
-const liveMessages = computed<ChatMessage[]>(() =>
-  props.liveAssistants.map((item) => ({
-    id: item.id,
-    seq_no: null,
-    role: 'assistant',
-    status: item.status,
-    content: item.content,
-    thinking: item.thinking.map((text) => ({ text })),
-    tool_calls: item.toolCalls,
-    created_at: null,
-  })),
-)
+const displayItems = computed(() => buildDisplayItems(props.messages))
 
-const liveToolCount = computed(() => Object.keys(props.liveTools).length)
+/** 同一轮的所有流式步骤折叠成一个助手回复，工具状态合并进调用记录。 */
+const liveTurn = computed(() => {
+  if (!props.liveAssistants.length && !props.streaming) return null
+  return buildLiveTurn(
+    props.liveAssistants,
+    props.liveTools,
+    props.streaming ? 'streaming' : 'completed',
+  )
+})
 
 const scrollSignature = computed(
   () =>

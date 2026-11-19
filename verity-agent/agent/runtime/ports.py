@@ -251,7 +251,7 @@ class RagPort(Protocol):
 
 
 class QueryPlannerPort(Protocol):
-    """查询规划端口：规则初筛 + LLM 兜底。"""
+    """查询规划端口：规则短路 + LLM 规划。"""
 
     async def plan(
         self,

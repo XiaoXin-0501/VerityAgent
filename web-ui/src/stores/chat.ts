@@ -304,9 +304,15 @@ export const useChatStore = defineStore('chat', () => {
         const assistant = ensureLiveAssistant(messageId)
         const text = stringValue(data.text)
         if (data.channel === 'thinking') {
-          patchLiveAssistant(messageId, {
-            thinking: [...assistant.thinking, text],
-          })
+          // thinking_delta 是 token 级分片，必须拼接到同一个字符串；
+          // 逐片 push 会把一句话拆成多个块，流式时表现为错乱碎片。
+          const thinking = [...assistant.thinking]
+          if (thinking.length) {
+            thinking[thinking.length - 1] += text
+          } else {
+            thinking.push(text)
+          }
+          patchLiveAssistant(messageId, { thinking })
         } else {
           patchLiveAssistant(messageId, { content: assistant.content + text })
         }
@@ -325,14 +331,16 @@ export const useChatStore = defineStore('chat', () => {
         const messageId =
           event.message_id || liveAssistants.value[liveAssistants.value.length - 1]?.id
         if (!messageId) return false
-        ensureLiveAssistant(messageId)
+        const current = ensureLiveAssistant(messageId)
         const thinking = Array.isArray(data.thinking)
           ? (data.thinking as unknown[]).map((item) => stringValue(item)).filter(Boolean)
           : []
         const calls = Array.isArray(data.tool_calls) ? (data.tool_calls as ToolCall[]) : []
         patchLiveAssistant(messageId, {
           content: stringValue(data.content),
-          thinking,
+          // 个别 provider 只在 delta 里给 reasoning，completed 的 thinking
+          // 可能为空；此时保留已累积内容，避免思考突然“残缺”。
+          thinking: thinking.length ? thinking : current.thinking,
           toolCalls: calls,
           status: 'completed',
         })
@@ -354,8 +362,14 @@ export const useChatStore = defineStore('chat', () => {
       }
       case 'tool.result': {
         const callId = event.call_id || stringValue(data.call_id)
-        const current = liveTools.value[callId]
-        if (!callId || !current) return false
+        if (!callId) return false
+        // 断线重连可能错过 tool.started；结果事件也要能独立落状态。
+        const current = liveTools.value[callId] ?? {
+          callId,
+          name: stringValue(data.name) || callId,
+          status: 'running',
+          errorCode: null,
+        }
         liveTools.value = {
           ...liveTools.value,
           [callId]: {
@@ -454,13 +468,17 @@ export const useChatStore = defineStore('chat', () => {
       if (conversationId.value === targetConversationId) {
         if (terminal) {
           forgetRun(targetConversationId)
+          let refreshed = false
           try {
             await refreshMessages(targetConversationId)
+            refreshed = true
           } catch {
-            // 刷新失败保留已渲染的流式内容
+            // 刷新失败时保留已渲染的流式内容，避免回答直接消失。
           }
-          liveAssistants.value = []
-          liveTools.value = {}
+          if (refreshed) {
+            liveAssistants.value = []
+            liveTools.value = {}
+          }
         }
       }
     }

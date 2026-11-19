@@ -18,16 +18,17 @@ __all__ = [
 class QueryPlanConfig(ConfigModel):
     """Query 规划（意图识别 + query 改写）配置。
 
-    Agent 在每次 run 的上下文装配前执行一次：先用可解释规则初筛，规则
-    无法确定是否需要 RAG 时再调用 LLM；LLM 输入包含用户画像、当前会话
-    历史和垂直领域目录，输出改写 query、RAG 召回意图与用户意图。
+    Agent 在每次 run 的上下文装配前执行一次：先用可解释规则识别明确
+    不需要 RAG 的请求；其余请求交给 LLM，输入包含用户画像、当前会话
+    历史、垂直领域目录与实体类型参考，输出改写 query、RAG 召回意图、
+    扩写后的用户意图与检索实体。
     """
 
     # 是否启用 query 规划；关闭时不做意图识别/改写/RAG 决策。
     # 注意：INJECTED RAG 依赖该决策，关闭后不会自动注入检索上下文；
     # 工具模式（LLM 主动调用 search_kb）仍正常工作。
     enabled: bool = True
-    # 规则无法判断时是否调用 LLM 兜底
+    # 是否调用 LLM 规划；规则只对“明确不需要 RAG”做短路，其余交给 LLM
     use_llm: bool = True
     # 规划模型 id；为空时使用 Agent 默认 chat 模型
     model_id: str | None = None
@@ -41,6 +42,10 @@ class QueryPlanConfig(ConfigModel):
     profile_token_budget: int = Field(default=512, ge=0)
     # 垂直领域目录注入上限（字符）
     domain_catalog_chars: int = Field(default=2000, ge=0)
+    # 领域实体类型参考注入上限（字符）；0 表示不注入画像类型，使用通用兜底
+    domain_entity_types_chars: int = Field(default=1200, ge=0)
+    # 领域泛化/版式词（黑名单）注入上限（字符）；0 表示不注入，使用通用兜底
+    domain_noise_terms_chars: int = Field(default=400, ge=0)
     # 低于该字符数的 query 不调用 LLM，直接用规则结果
     min_query_chars: int = Field(default=2, ge=1)
 
@@ -100,7 +105,7 @@ class AgentPolicy(ConfigModel):
 class AgentConfig(ConfigModel):
     # 运行限制（回合/工具/LLM 次数/租约）
     policy: AgentPolicy = Field(default_factory=AgentPolicy)
-    # Query 规划：规则初筛 + LLM 兜底（意图识别/query 改写/RAG 决策）
+    # Query 规划：规则短路 + LLM 规划（意图识别/query 改写/RAG 决策）
     query_plan: QueryPlanConfig = Field(default_factory=QueryPlanConfig)
     # 主循环反思：每 N 次循环检查方向，必要时止损
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)

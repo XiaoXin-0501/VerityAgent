@@ -1,6 +1,6 @@
 """Agent 查询规划：意图识别、query 改写与 RAG 召回决策。
 
-规则初筛在前，LLM 兜底在后；产物统一为 ``QueryPlan``：
+规则只短路“明确不需要 RAG”的请求，其余交给 LLM；产物统一为 ``QueryPlan``：
 
 - ``rewritten_query``：交给 RAG 召回消费；
 - ``rag_intent``：交给 RAG rerank 消费；

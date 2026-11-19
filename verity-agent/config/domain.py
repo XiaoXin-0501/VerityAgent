@@ -48,6 +48,8 @@ __all__ = [
     "DomainPrompt",
     "DomainRelationType",
     "domain_catalog_text",
+    "domain_entity_type_text",
+    "domain_noise_terms_text",
     "list_domain_profile_names",
     "load_domain_profile",
     "load_master_profile",
@@ -580,6 +582,74 @@ def domain_catalog_text(profiles: list[DomainProfile]) -> str:
                 f"  - {child_label}（{child.name}）：{child.description or '细分方向'}"
             )
     return "\n".join(lines)
+
+
+def domain_entity_type_text(
+    profiles: list[DomainProfile],
+    *,
+    max_types: int = 24,
+    max_examples: int = 3,
+) -> str:
+    """把画像的实体类型渲染成查询规划提示词里的“类型参考”清单。
+
+    Query Plan 不能把领域类型写死在模板里：不同部署可能绑定宠物医疗、
+    金融、法律等不同画像。这里只输出**类型体系**（名称/标签/说明/少量
+    示例），供 LLM 理解“什么算领域实体”；它不是抽取白名单，LLM 仍可按
+    问题语义输出清单外的新实体。
+
+    主画像类型排在前面；子画像与主画像重复的类型按名称去重。没有画像或
+    没有类型时返回空字符串，由 Prompt 变量默认值兜底。
+    """
+    if max_types <= 0:
+        return ""
+    ordered = [item for item in profiles if item.is_master]
+    ordered.extend(item for item in profiles if not item.is_master)
+    lines: list[str] = []
+    seen: set[str] = set()
+    for profile in ordered:
+        for item in profile.entity_types:
+            key = _key(item.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = item.label or item.name
+            line = f"- {item.name}（{label}）"
+            if item.description and item.description != label:
+                line += f"：{item.description}"
+            if item.examples and max_examples > 0:
+                line += f"；示例：{'、'.join(item.examples[:max_examples])}"
+            lines.append(line)
+            if len(lines) >= max_types:
+                return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def domain_noise_terms_text(
+    profiles: list[DomainProfile],
+    *,
+    limit: int = 40,
+) -> str:
+    """把画像黑名单渲染成“不要作为实体输出”的泛化/版式词清单。
+
+    黑名单原本用于图构建与 seed 过滤；查询规划同样需要它，否则 Prompt
+    只能靠硬编码“宠物/治疗/检查”等词来举例。这里按画像顺序去重，
+    最多 ``limit`` 个，避免提示词膨胀。
+    """
+    if limit <= 0:
+        return ""
+    terms: list[str] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        for item in profile.blacklist:
+            value = str(item).strip()
+            key = _key(value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            terms.append(value)
+            if len(terms) >= limit:
+                return "、".join(terms)
+    return "、".join(terms)
 
 
 def _resolve_base_dir(directory: str | Path | None) -> Path:

@@ -47,6 +47,8 @@ _BM25F_TERM_RE = re.compile(
 _TOKEN_SPLIT_RE = re.compile(r"[\s,;:：=()（）\[\]{}<>\"'“”‘’/|]+")
 
 # 查询中常见但不适合作为 seed 的高频虚词/泛化词。
+# 这里只放语言层虚词；领域类型词（疾病/药物/疫苗…）不写死，运行时从
+# DomainProfile.entity_types 派生，避免换领域后停用词表失真。
 _STOPWORDS = frozenset(
     {
         "的", "了", "是", "在", "和", "与", "及", "或", "有", "无", "为",
@@ -56,14 +58,23 @@ _STOPWORDS = frozenset(
         "the", "and", "or", "of", "to", "in", "on", "for", "with", "is",
         "are", "was", "were", "what", "how", "which", "who", "why",
         "document", "query", "score", "term", "documents",
-        "treatment", "diagnosis", "symptom", "symptoms", "therapy",
-        "care", "disease", "vaccine", "vaccination", "medicine", "drug",
-        # 泛化域名词：它们是类型/概念，不是具体实体，作为 seed 容易命中 hub。
-        "病毒", "细菌", "真菌", "寄生虫", "细胞", "组织", "疾病", "症状",
-        "药物", "药品", "疫苗", "检查", "诊断", "预防", "感染", "病例",
-        "患者", "宠物", "动物",
     }
 )
+
+
+def _profile_type_terms(profiles: list[DomainProfile]) -> frozenset[str]:
+    """从画像声明的实体类型派生泛化词集合（类型名 + 标签）。
+
+    例如宠物医疗画像会派生 ``disease`` / ``疾病`` / ``drug`` / ``药物``；
+    这些是类型概念，不是具体实体，作为 seed 容易命中 hub。
+    """
+    terms: set[str] = set()
+    for profile in profiles:
+        for item in profile.entity_types:
+            terms.add(item.name.casefold())
+            if item.label:
+                terms.add(item.label.casefold())
+    return frozenset(terms)
 
 
 @dataclass(slots=True)
@@ -138,8 +149,15 @@ def extract_seeds_from_bm25(
 
     result: list[str] = []
     seen: set[str] = set()
+    # 领域类型词由画像派生；与画像黑名单一起过滤“疾病/药物”这类泛化词。
+    type_terms = _profile_type_terms(profiles)
     for term in ranked:
-        if not _candidate_ok(term, query_fold=query_fold, profiles=profiles):
+        if not _candidate_ok(
+            term,
+            query_fold=query_fold,
+            profiles=profiles,
+            type_terms=type_terms,
+        ):
             continue
         canonical = _canonicalize(term, profiles)
         key = canonical.casefold()
@@ -197,8 +215,9 @@ def _candidate_ok(
         *,
         query_fold: str,
         profiles: list[DomainProfile],
+        type_terms: frozenset[str] = frozenset(),
 ) -> bool:
-    """候选词过滤：长度、版式、停用词、画像黑名单、必须出现在 query 中。"""
+    """候选词过滤：长度、版式、停用词、画像黑名单/类型词、必须出现在 query 中。"""
     value = term.strip()
     if not value or len(value) > 40:
         return False
@@ -208,6 +227,8 @@ def _candidate_ok(
     if is_noise_term(value):
         return False
     if value.casefold() in _STOPWORDS:
+        return False
+    if value.casefold() in type_terms:
         return False
     if any(profile.is_blacklisted(value) for profile in profiles):
         return False

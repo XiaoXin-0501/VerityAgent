@@ -319,6 +319,9 @@ class OpenAIResponsesChatModel(ChatModel):
         payload = self._payload(request, stream=True)
         yield ChatStreamStart(model=self.spec.model)
         calls: dict[str, ModelToolCall] = {}
+        # ``ModelToolCall`` 是 frozen wire 模型；函数参数分片用独立字典累积，
+        # 避免在流式回调里原地修改模型字段。
+        raw_arguments: dict[str, str] = {}
         usage: ChatUsage | None = None
         finish_reason = ChatFinishReason.STOP
         response_id: str | None = None
@@ -363,7 +366,9 @@ class OpenAIResponsesChatModel(ChatModel):
                     call = calls.get(call_id)
                     fragment = str(data.get("delta") or "")
                     if call is not None:
-                        call.raw_arguments = (call.raw_arguments or "") + fragment
+                        raw_arguments[call_id] = (
+                            raw_arguments.get(call_id, "") + fragment
+                        )
                         yield ChatToolCallDelta(
                             call_id=call_id,
                             arguments_delta=fragment,
@@ -375,6 +380,9 @@ class OpenAIResponsesChatModel(ChatModel):
                         call_id = str(item.get("call_id") or item.get("id") or "")
                         call = calls.get(call_id)
                         raw = item.get("arguments")
+                        if not isinstance(raw, str) or not raw:
+                            # 个别兼容端点只在 delta 中给参数；回退到累积值。
+                            raw = raw_arguments.get(call_id)
                         arguments = None
                         if isinstance(raw, str):
                             try:

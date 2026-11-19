@@ -1,8 +1,8 @@
 """长期记忆画像抽取 Worker。
 
 消费 ``user_messages`` 队列：同一用户的一批消息 + 当前 7 段画像交给小模型，
-模型输出画像更新 JSON，代码用乐观锁写回 ``user_memory``，成功后删除暂存行。
-开启事实写入时，同一批抽取结果还会经过冲突判定写入 Weaviate UserFact。
+模型输出**增量**画像补丁（只含变化段）和新原子事实；代码按段覆盖写回
+``user_memory``（乐观锁），事实逐条 upsert 到 Weaviate，成功后删除暂存行。
 """
 
 from __future__ import annotations
@@ -40,6 +40,18 @@ from utils.time import isoformat_z, utcnow
 __all__ = ["MemoryProfileWorker"]
 
 logger = logging.getLogger(__name__)
+
+# 画像段在 Prompt/JSON 中可能使用 snake_case 或 current_profile 的 camelCase；
+# 两种都接受，避免模型模仿输入结构时补丁被静默丢弃。
+_SECTION_ALIASES = {
+    "work_context": "workContext",
+    "personal_context": "personalContext",
+    "top_of_mind": "topOfMind",
+    "cognitive_style": "cognitiveStyle",
+    "recent_months": "recentMonths",
+    "earlier_context": "earlierContext",
+    "long_term_background": "longTermBackground",
+}
 
 
 class MemoryProfileWorker:
@@ -381,7 +393,11 @@ def _apply_profile(
     source_msg_ids: list[UUID] | None = None,
     source_limit: int = 20,
 ) -> MemoryValue | None:
-    """只接受已知 7 段字段；未知字段忽略，缺失字段保留旧值。
+    """把抽取结果中的画像增量补丁合并进当前画像。
+
+    新 Prompt 输出 ``profile_patch``：只包含发生变化的分段；每个分段给出
+    更新后的完整摘要（覆盖式），未出现的分段保持旧值。为兼容旧版 Prompt /
+    滚动发布期间的输出，也接受顶层直接放 7 段扁平字段的旧格式。
 
     画像段被本次抽取更新时，把本批用户消息 id 并入该段的
     ``source_msg_ids``；只保留最近 ``source_limit`` 条证据。没有任何段变化
@@ -393,11 +409,16 @@ def _apply_profile(
     now = utcnow()
     sources = list(source_msg_ids or [])
     changed = False
+    # 新格式：profile_patch 只含变化段；旧格式：顶层扁平字段。
+    patch = data.get("profile_patch")
+    patch_data: Mapping[str, Any] = patch if isinstance(patch, Mapping) else data
 
     def section(name: str, old: MemorySection) -> MemorySection:
         """合并单个画像段；空值或原样返回保留旧段（含旧证据）。"""
         nonlocal changed
-        value = data.get(name)
+        value = patch_data.get(name)
+        if value is None:
+            value = patch_data.get(_SECTION_ALIASES.get(name, ""))
         if not isinstance(value, str) or not value.strip():
             return old
         text = value.strip()

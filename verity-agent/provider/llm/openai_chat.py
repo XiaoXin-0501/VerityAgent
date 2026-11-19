@@ -405,6 +405,9 @@ class OpenAIChatModel(ChatModel):
         yield ChatStreamStart(model=self.spec.model)
 
         tool_calls: dict[int, ModelToolCall] = {}
+        # 工具参数按 delta 分片到达。``ModelToolCall`` 是 frozen wire 模型，
+        # 不能原地累加 ``raw_arguments``；用独立字典累积，结束时一次构造。
+        raw_arguments: dict[int, str] = {}
         started: set[int] = set()
         usage: ChatUsage | None = None
         finish_reason = ChatFinishReason.STOP
@@ -457,9 +460,8 @@ class OpenAIChatModel(ChatModel):
                             )
                         arguments_delta = function.get("arguments")
                         if arguments_delta:
-                            call = tool_calls[index]
-                            call.raw_arguments = (call.raw_arguments or "") + str(
-                                arguments_delta
+                            raw_arguments[index] = (
+                                raw_arguments.get(index, "") + str(arguments_delta)
                             )
                             yield ChatToolCallDelta(
                                 call_id=call_id,
@@ -482,11 +484,12 @@ class OpenAIChatModel(ChatModel):
             return
 
         for index, call in sorted(tool_calls.items()):
-            arguments, _raw = _parse_arguments(call.raw_arguments)
+            raw = raw_arguments.get(index)
+            arguments, _raw = _parse_arguments(raw)
             yield ChatToolCallEnd(
                 call_id=call.call_id,
                 arguments=arguments,
-                raw_arguments=call.raw_arguments,
+                raw_arguments=raw,
                 index=index,
             )
         yield ChatStreamEnd(
