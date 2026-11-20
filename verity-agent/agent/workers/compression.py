@@ -102,16 +102,20 @@ def _sanitize_source_ids(
     *,
     allowed_msg_ids: set[UUID],
     allowed_round_ids: set[UUID],
+    existing_topic_ids: set[UUID] | None = None,
 ) -> dict[str, Any]:
-    """收敛模型输出的主题/事实来源，并保证 topic id 稳定且可被 facts 引用。
+    """收敛模型增量输出的主题/事实来源，并保证 topic id 可被 facts 引用。
 
+    - topic/fact/constraint 都是**增量 upsert**：模型只返回修改/新增项；
     - topic 只保留 ``source_round_ids``；旧 ``source_msg_ids``/``topic_id``
       在进入模型前已由 SessionSummary 兼容层归一；
-    - fact 的 ``topic_id`` 必须指向本次输出中真实存在的 topic，否则清空；
+    - fact 的 ``topic_id`` 可以指向旧摘要已有 topic，也可以指向本次新增 topic；
+      其它 id 清空；
     - facts/constraints 的 ``source_msg_ids`` 只允许输入消息或旧摘要证据。
     """
     payload["version"] = 3
-    allowed_topic_ids: set[UUID] = set()
+    allowed_topic_ids: set[UUID] = set(existing_topic_ids or ())
+    seen_topic_ids: set[UUID] = set()
 
     topics = payload.get("topics")
     if isinstance(topics, list):
@@ -119,10 +123,11 @@ def _sanitize_source_ids(
         for item in topics:
             if not isinstance(item, dict):
                 continue
-            # 已有主题沿用模型复制的 id；兼容模型误用 topic_id 的情况。
+            # 已有主题沿用模型复制的 id；新主题可省略 id，由代码生成。
             topic_id = _parse_uuid(item.get("id") or item.get("topic_id"))
-            if topic_id is None or topic_id in allowed_topic_ids:
+            if topic_id is None or topic_id in seen_topic_ids:
                 topic_id = uuid4()
+            seen_topic_ids.add(topic_id)
             allowed_topic_ids.add(topic_id)
             item["id"] = str(topic_id)
             item.pop("topic_id", None)
@@ -307,6 +312,7 @@ class CompressionService:
                 payload,
                 allowed_msg_ids=allowed_msg_ids,
                 allowed_round_ids=allowed_round_ids,
+                existing_topic_ids={topic.id for topic in old.topics},
             )
             # 模型只负责内容合并；计数/时间/ID 稳定性与 topic 遗忘由代码维护。
             summary = self._merge_summary(old, summary)
@@ -348,8 +354,9 @@ class CompressionService:
         *,
         allowed_msg_ids: set[UUID],
         allowed_round_ids: set[UUID],
+        existing_topic_ids: set[UUID],
     ) -> SessionSummary:
-        """调用 LLM、过滤非法来源 id 并校验 SessionSummary。"""
+        """调用 LLM、过滤非法来源 id 并校验增量 SessionSummary。"""
         request = ChatModelRequest(
             model=self.model_id,
             messages=[
@@ -380,45 +387,51 @@ class CompressionService:
                 parse_json_object(_response_text(response)),
                 allowed_msg_ids=allowed_msg_ids,
                 allowed_round_ids=allowed_round_ids,
+                existing_topic_ids=existing_topic_ids,
             )
         )
 
     def _merge_summary(
         self,
         old: SessionSummary,
-        new: SessionSummary,
+        delta: SessionSummary,
     ) -> SessionSummary:
-        """把模型输出与旧摘要合并，维护稳定 ID、计数与时间字段。
+        """把模型返回的增量 topic/fact/constraint 应用到旧摘要。
 
-        模型只负责主题/事实内容的合并；以下字段由代码权威维护：
-        - topic：`id` 若模型未稳定复制则按名称回退，`mention_count` 单调 +0/1，
-          `last_mentioned_at` 在新增讨论时更新；
-        - fact/constraint：`fact_id`/`constraint_id` 按旧 id 或内容复用，
-          `confirmation_count` 单调 +0/1，`last_confirmed_at` 仅在确认时更新。
+        模型只返回“需要修改或新增”的条目；代码以旧摘要为基底 upsert，
+        并权威维护：
+        - topic：mention_count、last_mentioned_at、source_round_ids；
+        - fact/constraint：confirmation_count、last_confirmed_at、source_msg_ids。
+        未在增量中出现的旧条目原样保留。
         """
         now = utcnow()
-        topics, topic_remap = self._merge_topics(old.topics, new.topics, now=now)
+        topics, topic_remap = self._apply_topic_deltas(
+            old.topics,
+            delta.topics,
+            now=now,
+        )
         topic_ids = {topic.id for topic in topics}
-        facts = self._merge_records(
+        facts = self._apply_record_deltas(
             old.facts,
-            new.facts,
+            delta.facts,
             id_name="fact_id",
             now=now,
             source_limit=self.config.compression_source_msg_limit,
             topic_ids=topic_ids,
             topic_remap=topic_remap,
         )
-        constraints = self._merge_records(
+        facts = self._limit_summary_facts(facts)
+        constraints = self._apply_record_deltas(
             old.constraints,
-            new.constraints,
+            delta.constraints,
             id_name="constraint_id",
             now=now,
             source_limit=self.config.compression_source_msg_limit,
             topic_ids=None,
             topic_remap=None,
         )
-        return new.model_copy(
-            update={
+        return SessionSummary.model_validate(
+            {
                 "version": 3,
                 "topics": topics,
                 "facts": facts,
@@ -426,66 +439,90 @@ class CompressionService:
             }
         )
 
-    def _merge_topics(
+    def _apply_topic_deltas(
         self,
         old_topics: list[SummaryTopic],
-        new_topics: list[SummaryTopic],
+        deltas: list[SummaryTopic],
         *,
         now: datetime,
     ) -> tuple[list[SummaryTopic], dict[UUID, UUID]]:
-        """合并 topic：稳定 id、维护计数/时间与轮次并集。
+        """在旧 topic 列表上应用增量；返回合并结果与 id 重映射。
 
-        返回 ``(topics, id_remap)``；``id_remap`` 把模型临时生成的 topic id
-        映射到合并后的稳定 id，供 fact 的 ``topic_id`` 重写，避免主题按名称
-        复用旧 id 后 fact 引用失效。
+        - 按 id 或规范化 name 命中旧主题；
+        - 命中时保留旧 id，合并轮次，mention_count 按新增轮次数增加；
+        - 未命中时视为新主题，生成/沿用稳定 id，mention_count=1；
+        - 未出现在增量中的旧主题原样保留。
         """
-        old_by_id = {topic.id: topic for topic in old_topics}
-        old_by_name = {_normalize_text(topic.name): topic for topic in old_topics}
-        used: set[UUID] = set()
-        result: list[SummaryTopic] = []
-        id_remap: dict[UUID, UUID] = {}
-        for topic in new_topics:
-            original_id = topic.id
-            previous = old_by_id.get(topic.id) or old_by_name.get(
-                _normalize_text(topic.name)
+        result = [topic.model_copy(deep=True) for topic in old_topics]
+        by_id = {topic.id: index for index, topic in enumerate(result)}
+        by_name = {
+            _normalize_text(topic.name): index
+            for index, topic in enumerate(result)
+        }
+        used = set(by_id)
+        remap: dict[UUID, UUID] = {}
+        round_limit = self.config.compression_topic_round_limit
+        for delta in deltas:
+            original_id = delta.id
+            index = by_id.get(delta.id)
+            if index is None:
+                index = by_name.get(_normalize_text(delta.name))
+            if index is not None:
+                previous = result[index]
+                new_rounds = [
+                    round_id
+                    for round_id in delta.source_round_ids
+                    if round_id not in previous.source_round_ids
+                ]
+                updated = previous.model_copy(
+                    update={
+                        "name": delta.name.strip() or previous.name,
+                        "summary": delta.summary.strip() or previous.summary,
+                        "source_round_ids": _dedupe_ids(
+                            [
+                                *previous.source_round_ids,
+                                *delta.source_round_ids,
+                            ],
+                            round_limit,
+                        ),
+                        # 讨论次数只按本轮新增轮次增加；没有新轮次时保持旧值，
+                        # 避免模型回显未变化主题导致计数膨胀。
+                        "mention_count": previous.mention_count + len(new_rounds),
+                        "last_mentioned_at": (
+                            now if new_rounds else previous.last_mentioned_at
+                        ),
+                    }
+                )
+                result[index] = updated
+                by_name[_normalize_text(updated.name)] = index
+                remap[original_id] = previous.id
+                continue
+            new_id = delta.id if delta.id not in used else uuid4()
+            topic = delta.model_copy(
+                update={
+                    "id": new_id,
+                    "name": delta.name.strip() or "未命名主题",
+                    "summary": delta.summary.strip(),
+                    "source_round_ids": _dedupe_ids(
+                        delta.source_round_ids,
+                        round_limit,
+                    ),
+                    "mention_count": 1,
+                    "last_mentioned_at": now,
+                }
             )
-            if previous is not None and previous.id in used:
-                previous = None
-            if previous is not None:
-                topic.id = previous.id
-                # 模型可把 mention_count 增加 1 表示本轮继续讨论；其余情况按
-                # 旧值处理，避免每次压缩无条件累加。
-                if topic.mention_count > previous.mention_count:
-                    topic.mention_count = min(
-                        topic.mention_count,
-                        previous.mention_count + 1,
-                    )
-                    topic.last_mentioned_at = now
-                else:
-                    topic.mention_count = previous.mention_count
-                    topic.last_mentioned_at = previous.last_mentioned_at
-                topic.source_round_ids = _dedupe_ids(
-                    [*previous.source_round_ids, *topic.source_round_ids],
-                    self.config.compression_topic_round_limit,
-                )
-            else:
-                if topic.id in used:
-                    topic.id = uuid4()
-                topic.mention_count = 1
-                topic.last_mentioned_at = now
-                topic.source_round_ids = _dedupe_ids(
-                    topic.source_round_ids,
-                    self.config.compression_topic_round_limit,
-                )
-            used.add(topic.id)
-            id_remap[original_id] = topic.id
             result.append(topic)
-        return result, id_remap
+            index = len(result) - 1
+            by_id[new_id] = index
+            by_name[_normalize_text(topic.name)] = index
+            used.add(new_id)
+            remap[original_id] = new_id
+        return result, remap
 
-    def _merge_records(
+    def _apply_record_deltas(
         self,
         old_items: list[Any],
-        new_items: list[Any],
+        deltas: list[Any],
         *,
         id_name: str,
         now: datetime,
@@ -493,79 +530,145 @@ class CompressionService:
         topic_ids: set[UUID] | None,
         topic_remap: dict[UUID, UUID] | None,
     ) -> list[Any]:
-        """合并 fact/constraint：稳定 id、证据并集与确认计数。"""
-        old_by_id = {getattr(item, id_name): item for item in old_items}
-        old_by_content = {
-            _normalize_text(item.content): item for item in old_items
+        """在旧 fact/constraint 列表上应用增量 upsert。
+
+        同 id（或同内容）命中旧条目时复用旧 id：
+        - 内容不变：确认次数按新增证据数增加，最近确认时间更新；
+        - 内容变化：确认次数重置为 1，旧证据不再支持新内容；
+        未命中时按新条目写入，确认次数为 1。
+        """
+        result = [item.model_copy(deep=True) for item in old_items]
+        by_id = {
+            getattr(item, id_name): index
+            for index, item in enumerate(result)
         }
-        used: set[UUID] = set()
-        result: list[Any] = []
-        for item in new_items:
-            item_id = getattr(item, id_name)
-            previous = old_by_id.get(item_id) or old_by_content.get(
-                _normalize_text(item.content)
-            )
-            if previous is not None and getattr(previous, id_name) in used:
-                previous = None
-            if previous is not None:
-                setattr(item, id_name, getattr(previous, id_name))
-                if _normalize_text(previous.content) == _normalize_text(item.content):
-                    # 同一事实被再次确认：计数最多 +1，时间是本次压缩时间。
-                    item.confidence = max(previous.confidence, item.confidence)
-                    if item.confirmation_count > previous.confirmation_count:
-                        item.confirmation_count = min(
-                            item.confirmation_count,
-                            previous.confirmation_count + 1,
-                        )
-                        item.last_confirmed_at = now
-                    else:
-                        item.confirmation_count = previous.confirmation_count
-                        item.last_confirmed_at = previous.last_confirmed_at
-                    item.source_msg_ids = _dedupe_ids(
-                        [*previous.source_msg_ids, *item.source_msg_ids],
+        by_content = {
+            _normalize_text(item.content): index
+            for index, item in enumerate(result)
+        }
+        used = set(by_id)
+        for delta in deltas:
+            content = str(delta.content or "").strip()
+            if not content:
+                continue
+            delta_id = getattr(delta, id_name)
+            index = by_id.get(delta_id)
+            if index is None:
+                index = by_content.get(_normalize_text(content))
+            if index is not None:
+                previous = result[index]
+                old_content_key = _normalize_text(previous.content)
+                same_content = (
+                    _normalize_text(previous.content) == _normalize_text(content)
+                )
+                if same_content:
+                    added = len(
+                        set(delta.source_msg_ids) - set(previous.source_msg_ids)
+                    )
+                    confirmation_count = previous.confirmation_count + added
+                    sources = _dedupe_ids(
+                        [
+                            *previous.source_msg_ids,
+                            *delta.source_msg_ids,
+                        ],
                         source_limit,
+                    )
+                    confidence = max(previous.confidence, delta.confidence)
+                    last_confirmed_at = (
+                        now if added else previous.last_confirmed_at
                     )
                 else:
-                    # 同 id 但内容被改写：旧证据不再支持新内容，计数重置。
-                    item.confirmation_count = 1
-                    item.last_confirmed_at = now
-                    item.source_msg_ids = _dedupe_ids(
-                        item.source_msg_ids,
-                        source_limit,
-                    )
-                if topic_ids is not None:
-                    if item.topic_id is not None and topic_remap:
-                        item.topic_id = topic_remap.get(
-                            item.topic_id,
-                            item.topic_id,
-                        )
-                    if item.topic_id is None:
-                        item.topic_id = previous.topic_id
-                    if item.topic_id not in topic_ids:
-                        item.topic_id = None
-            else:
-                item.confirmation_count = 1
-                item.last_confirmed_at = now
-                item.source_msg_ids = _dedupe_ids(
-                    item.source_msg_ids,
-                    source_limit,
+                    # 冲突改写/覆盖：旧证据不再支持新正文。
+                    confirmation_count = 1
+                    sources = _dedupe_ids(delta.source_msg_ids, source_limit)
+                    confidence = delta.confidence
+                    last_confirmed_at = now
+                    by_content.pop(old_content_key, None)
+                topic_id = self._resolve_topic_id(
+                    getattr(delta, "topic_id", None),
+                    topic_remap,
+                    topic_ids,
+                    fallback=getattr(previous, "topic_id", None),
                 )
+                update = {
+                    id_name: getattr(previous, id_name),
+                    "content": content,
+                    "source_msg_ids": sources,
+                    "confidence": confidence,
+                    "confirmation_count": confirmation_count,
+                    "last_confirmed_at": last_confirmed_at,
+                }
                 if topic_ids is not None:
-                    if item.topic_id is not None and topic_remap:
-                        item.topic_id = topic_remap.get(
-                            item.topic_id,
-                            item.topic_id,
-                        )
-                    if item.topic_id not in topic_ids:
-                        item.topic_id = None
-            if getattr(item, id_name) in used:
-                # 模型输出了重复 id：保留第一条，后续按新事实处理。
-                setattr(item, id_name, uuid4())
-                item.confirmation_count = 1
-                item.last_confirmed_at = now
-            used.add(getattr(item, id_name))
+                    update["topic_id"] = topic_id
+                updated = previous.model_copy(update=update)
+                result[index] = updated
+                by_content[_normalize_text(content)] = index
+                continue
+            new_id = delta_id if delta_id not in used else uuid4()
+            topic_id = self._resolve_topic_id(
+                getattr(delta, "topic_id", None),
+                topic_remap,
+                topic_ids,
+                fallback=None,
+            )
+            update = {
+                id_name: new_id,
+                "content": content,
+                "source_msg_ids": _dedupe_ids(
+                    delta.source_msg_ids,
+                    source_limit,
+                ),
+                "confidence": delta.confidence,
+                "confirmation_count": 1,
+                "last_confirmed_at": now,
+            }
+            if topic_ids is not None:
+                update["topic_id"] = topic_id
+            item = delta.model_copy(update=update)
             result.append(item)
+            index = len(result) - 1
+            by_id[new_id] = index
+            by_content[_normalize_text(content)] = index
+            used.add(new_id)
         return result
+
+    @staticmethod
+    def _resolve_topic_id(
+        topic_id: UUID | None,
+        topic_remap: dict[UUID, UUID] | None,
+        topic_ids: set[UUID] | None,
+        *,
+        fallback: UUID | None,
+    ) -> UUID | None:
+        """把模型给的 topic id 映射到合并后的 topic；无效时回退。"""
+        if topic_ids is None:
+            return None
+        mapped = topic_id
+        if mapped is not None and topic_remap:
+            mapped = topic_remap.get(mapped, mapped)
+        if mapped in topic_ids:
+            return mapped
+        return fallback if fallback in topic_ids else None
+
+    def _limit_summary_facts(self, facts: list[Any]) -> list[Any]:
+        """超过 ``compression_max_facts`` 时遗忘最弱事实。
+
+        排序依据：确认次数少、最近确认时间旧、置信度低；保留原有顺序。
+        """
+        limit = max(1, int(self.config.compression_max_facts))
+        if len(facts) <= limit:
+            return facts
+        def rank(item: Any) -> tuple:
+            return (
+                item.confirmation_count,
+                ensure_utc(item.last_confirmed_at),
+                item.confidence,
+            )
+        ordered = sorted(facts, key=rank)
+        removed = {
+            item.fact_id for item in ordered[: len(facts) - limit]
+        }
+        return [item for item in facts if item.fact_id not in removed]
 
     def _apply_topic_forgetting(
         self,

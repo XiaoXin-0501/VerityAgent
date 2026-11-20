@@ -294,8 +294,8 @@ class WeaviateFactStore:
         user_id: Any,
         max_facts: int = MAX_USER_FACTS,
     ) -> int:
-        """超过上限时淘汰最久未确认的 active 事实；返回淘汰数量。"""
-        from weaviate.classes.query import Filter, Sort
+        """超过上限时按确认少、最久未确认、低置信度淘汰 active 事实。"""
+        from weaviate.classes.query import Filter
 
         collection = self.store.user_facts
         where = Filter.by_property("user_id").equal(str(user_id)) & (
@@ -308,12 +308,28 @@ class WeaviateFactStore:
         response = await self.store.maybe_to_thread(
             collection.query.fetch_objects,
             filters=where,
-            limit=overflow,
-            sort=Sort.by_property("last_confirmed_at", ascending=True),
+            limit=max(1, active),
+            return_properties=[
+                "confirmation_count",
+                "last_confirmed_at",
+                "confidence",
+            ],
         )
+        objects = list(getattr(response, "objects", []) or [])
+
+        def rank(item: Any) -> tuple[int, str, float]:
+            """淘汰排序：确认次数少 → 最久未确认 → 置信度低。"""
+            props = dict(getattr(item, "properties", {}) or {})
+            return (
+                int(props.get("confirmation_count") or 0),
+                str(_iso(props.get("last_confirmed_at")) or ""),
+                float(props.get("confidence") or 0.0),
+            )
+
+        objects.sort(key=rank)
         ids = [
             str(getattr(item, "uuid", ""))
-            for item in getattr(response, "objects", []) or []
+            for item in objects[:overflow]
         ]
         return await self.deprecate_facts(user_id=user_id, fact_ids=ids)
 

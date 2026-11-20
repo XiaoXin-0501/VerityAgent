@@ -167,7 +167,10 @@ class MemoryProfileWorker:
                     limit = getattr(self.facts_store, "enforce_fact_limit", None)
                     if callable(limit):
                         # facts_store 是实现协议；可选上限方法由调用方按存在性探测。
-                        await limit(user_id=user_id)  # pyright: ignore[reportGeneralTypeIssues]
+                        await limit(
+                            user_id=user_id,
+                            max_facts=self.config.fact_max_active,
+                        )
                 fact_count = await self.facts_store.count_active(user_id=user_id)
             await self.memories.update_with_retry(
                 user_id,

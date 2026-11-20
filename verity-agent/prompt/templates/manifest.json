@@ -333,8 +333,8 @@
     },
     "memory.compression.system": {
       "file": "memory/compression.system.md",
-      "version": 7,
-      "description": "会话摘要压缩：事实/约束不随 topic 遗忘，事实冲突直接改写",
+      "version": 8,
+      "description": "会话摘要增量压缩：只返回变更/新增 topic 与事实，代码维护计数和时间",
       "purpose": "memory.compression",
       "static": true,
       "cacheable": true,

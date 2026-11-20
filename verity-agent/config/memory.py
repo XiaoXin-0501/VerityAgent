@@ -55,6 +55,8 @@ class MemoryConfig(ConfigModel):
     compression_keep_turn_max_tokens: int = Field(default=2048, ge=128)
     # 最近两回合合计 token 上限
     compression_keep_pair_max_tokens: int = Field(default=4096, ge=128)
+    # 摘要 facts 上限；超过后淘汰确认次数少、最久未确认、置信度低的事实
+    compression_max_facts: int = Field(default=50, ge=1)
     # 压缩输入消息/摘要的最大 token
     compression_max_input_tokens: int = Field(default=8000, ge=256)
     # 压缩输出 token 上限
@@ -84,6 +86,8 @@ class MemoryConfig(ConfigModel):
     fact_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     # 是否把抽取结果写入 Weaviate UserFact
     fact_write_enabled: bool = False
+    # 单用户 active 事实上限；达到上限后按低确认/最旧优先淘汰
+    fact_max_active: int = Field(default=150, ge=1, le=150)
 
     # 是否启动用户跨存储删除 worker
     deletion_worker_enabled: bool = False

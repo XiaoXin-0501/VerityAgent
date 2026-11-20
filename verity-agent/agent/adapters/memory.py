@@ -10,6 +10,7 @@ from store.pg.repositories import (
     ConversationSummaryRepository,
     UserMemoryRepository,
 )
+from utils.time import ensure_utc
 from utils.tokens import truncate_to_tokens
 
 __all__ = ["PgMemoryProfileAdapter"]
@@ -100,22 +101,56 @@ def _render_memory(value: MemoryValue) -> str:
 
 
 def _render_session_summary(summary: SessionSummary) -> str:
-    """把 topics/facts/constraints 渲染成紧凑的会话摘要。
+    """把 topics/facts/constraints 渲染成紧凑但保留判断依据的会话摘要。
 
-    topic 带上轮次 id，让模型在需要原始问答时调用 ``recall_round``；
-    不展开中间消息。
+    - topic 带讨论次数、最近讨论时间与轮次 id，供模型判断话题热度并调用
+      ``recall_round``；
+    - fact/constraint 带置信度、确认次数、最近确认时间与所属主题，供模型
+      判断信息稳定性和时效；
+    - 不展开中间消息，避免把摘要变成完整历史。
     """
+    topic_names = {topic.id: topic.name for topic in summary.topics}
     lines: list[str] = []
     for topic in summary.topics:
         if not topic.summary.strip():
             continue
         rounds = ", ".join(str(item) for item in topic.source_round_ids)
         suffix = f" [rounds: {rounds}]" if rounds else ""
-        lines.append(f"- 主题 {topic.name}: {topic.summary.strip()}{suffix}")
+        lines.append(
+            f"- 主题 {topic.name}（讨论 {topic.mention_count} 次，"
+            f"最近 {_format_time(topic.last_mentioned_at)}）: "
+            f"{topic.summary.strip()}{suffix}"
+        )
     for fact in summary.facts:
-        if fact.content.strip():
-            lines.append(f"- 事实: {fact.content.strip()}")
+        content = fact.content.strip()
+        if not content:
+            continue
+        topic_name = topic_names.get(fact.topic_id)
+        meta = (
+            f"置信度 {fact.confidence:.2f}，确认 {fact.confirmation_count} 次，"
+            f"最近 {_format_time(fact.last_confirmed_at)}"
+        )
+        if topic_name:
+            meta = f"主题 {topic_name}；{meta}"
+        lines.append(f"- 事实: {content}（{meta}）")
     for constraint in summary.constraints:
-        if constraint.content.strip():
-            lines.append(f"- 约束: {constraint.content.strip()}")
+        content = constraint.content.strip()
+        if not content:
+            continue
+        meta = (
+            f"置信度 {constraint.confidence:.2f}，"
+            f"确认 {constraint.confirmation_count} 次，"
+            f"最近 {_format_time(constraint.last_confirmed_at)}"
+        )
+        lines.append(f"- 约束: {content}（{meta}）")
     return "\n".join(lines)
+
+
+def _format_time(value) -> str:
+    """把摘要时间格式化为 UTC 分钟精度；缺失/异常时返回 ``未知``。"""
+    if value is None:
+        return "未知"
+    try:
+        return ensure_utc(value).strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError):
+        return str(value)
