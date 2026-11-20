@@ -111,8 +111,9 @@ class AgentConfig(ConfigModel):
     stream: AgentStreamConfig = Field(default_factory=AgentStreamConfig)
     # 运行期状态落 Redis 时的 TTL；必须大于 run 租约
     run_state_ttl_s: int = Field(default=3600, ge=60)
-    # 默认消息窗口条数；ContextAssembler 会在 token 预算内继续裁剪
-    history_limit: int = Field(default=40, ge=1)
+    # 工作窗口单次最多加载的消息条数（安全阀）；实际保留由
+    # ContextBudgetPlanner 按 token 预算决定，不是固定召回条数。
+    history_limit: int = Field(default=400, ge=1)
     # 取消 run 时等待工具/流收尾的宽限时间（秒）
     cancel_grace_s: float = Field(default=5.0, ge=0)
     # 是否将事件镜像到 Redis Stream，支持多实例 replay/resync

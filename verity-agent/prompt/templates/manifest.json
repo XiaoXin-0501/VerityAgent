@@ -129,6 +129,15 @@
         }
       ]
     },
+    "rag.chunk_conflict.system": {
+      "file": "rag/chunk_conflict.system.md",
+      "version": 1,
+      "description": "知识库片段冲突处理：事实冲突按时间/质量，观点冲突综合邻居片段",
+      "purpose": "rag.chunk_conflict",
+      "static": true,
+      "cacheable": true,
+      "variables": []
+    },
     "rag.table.description.system": {
       "file": "rag/table.description.system.md",
       "version": 1,
@@ -256,8 +265,8 @@
     },
     "agent.system": {
       "file": "agent/system.md",
-      "version": 1,
-      "description": "Agent 主循环的基础 system prompt（角色、工具、引用、安全与表达规则）",
+      "version": 2,
+      "description": "Agent 主循环基础 prompt（角色、工具、引用、记忆/冲突优先级、安全与表达）",
       "purpose": "agent.chat",
       "static": false,
       "cacheable": true,
@@ -324,8 +333,8 @@
     },
     "memory.compression.system": {
       "file": "memory/compression.system.md",
-      "version": 5,
-      "description": "会话摘要压缩 system prompt",
+      "version": 6,
+      "description": "会话摘要压缩：事实/约束不随 topic 遗忘，事实冲突合并规则",
       "purpose": "memory.compression",
       "static": true,
       "cacheable": true,
@@ -333,8 +342,8 @@
     },
     "memory.fact_conflict.system": {
       "file": "memory/fact_conflict.system.md",
-      "version": 2,
-      "description": "UserFact 冲突判定 system prompt",
+      "version": 3,
+      "description": "UserFact 冲突判定：直接覆盖/合并/部分冲突/兼容/未决",
       "purpose": "memory.fact_conflict",
       "static": true,
       "cacheable": true,

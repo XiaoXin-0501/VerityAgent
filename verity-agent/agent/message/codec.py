@@ -281,7 +281,8 @@ def decode_stored_row(row: Mapping[str, Any]) -> StoredMessage:
     """解码数据库行并附带 seq_no，供消息窗口使用。"""
     message = decode_row(row)
     seq_no = int(row["seq_no"])
-    return StoredMessage(seq_no=seq_no, message=message)
+    round_id = row.get("round_id")
+    return StoredMessage(seq_no=seq_no, round_id=round_id, message=message)
 
 
 # ——————————————————— 内部：版本归一 ———————————————————

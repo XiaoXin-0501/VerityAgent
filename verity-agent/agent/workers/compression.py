@@ -570,6 +570,8 @@ class CompressionService:
         }
         kept = [topic for topic in topics if topic.id not in removed]
         facts = [
+            # topic 被遗忘只解除关联，不删除事实本身；约束没有 topic_id，
+            # 始终保留。
             fact.model_copy(update={"topic_id": None})
             if fact.topic_id in removed
             else fact

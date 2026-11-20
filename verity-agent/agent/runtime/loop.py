@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Sequence
 from datetime import timedelta
@@ -19,6 +20,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any, Coroutine
 from uuid import UUID
 
+from agent.context.budget import ContextBudgetPlanner
 from agent.context.models import ContextSection
 from agent.llm import (
     FilePart,
@@ -82,6 +84,7 @@ from utils.ids import uuid7
 from utils.log_context import bind_run_context, reset_run_context
 from utils.log_summary import summary_block
 from utils.time import utcnow
+from utils.tokens import estimate_tokens
 
 if TYPE_CHECKING:
     from agent.public import AgentRequest, AgentResult
@@ -99,6 +102,16 @@ class AgentLoop:
         self.config = config
         self.deps = dependencies
         self.prompt_builder = PromptBuilder(default_model_id=dependencies.model_id)
+        context = dependencies.context
+        self.budget_planner = ContextBudgetPlanner(
+            max_context_tokens=int(
+                getattr(context, "max_context_tokens", 8192) or 8192
+            ),
+            reserved_output_tokens=int(
+                getattr(context, "reserved_output_tokens", 2048) or 2048
+            ),
+            max_history_messages=int(dependencies.history_limit or 400),
+        )
         # 反思与主对话共用 LLM 端口/模型路由，但使用独立提示词与 purpose。
         reflection_cfg = config.reflection
         self.reflection = (
@@ -324,16 +337,6 @@ class AgentLoop:
                 turn_id=turn_id,
             )
 
-            history: list[StoredMessage] = await self.deps.messages.load_window(
-                conversation_id,
-                limit=self.deps.history_limit,
-            )
-            # 某些适配器按最近 N 条读取；确保本轮用户消息在窗口里。
-            # append_user 返回的是落库后的副本，id 以 user_stored 为准；
-            # 用追加前的 user_message 比较会永远不相等，导致本轮用户消息
-            # 被拼接两次（一次来自窗口，一次来自这里）。
-            history = _ensure_current_user_message(history, user_stored)
-
             limits = self._limits(request)
             # 轮次召回工具只在摘要压缩到阈值后暴露：工具已在注册表里，
             # 这里按会话压缩次数动态追加权限码，不修改全局注册表。
@@ -348,8 +351,8 @@ class AgentLoop:
             )
             tools = self._tool_descriptors(tool_selection)
             llm_messages, query_plan, plan_result = await self._assemble_context(
-                history,
                 request,
+                user_stored,
                 tools,
                 run_id=run_id,
                 turn_id=turn_id,
@@ -1413,7 +1416,7 @@ class AgentLoop:
             source="rag",
             name="injected_context",
             content="\n\n".join(lines),
-            priority=60,
+            priority=90,
             token_estimate=0,
         )
 
@@ -1473,26 +1476,28 @@ class AgentLoop:
 
     async def _assemble_context(
         self,
-        history: Sequence[StoredMessage],
         request: AgentRequest,
+        user_stored: StoredMessage,
         tools: list[LLMToolDescriptor],
         *,
         run_id: str,
         turn_id: str,
         flow: RunFlowLog | None = None,
     ) -> tuple[list[LLMMessage], QueryPlan, QueryPlanResult | None]:
-        """加载 memory/预算并组装 Prompt。
+        """加载 memory/history、预算工作窗口并组装 Prompt。
 
-        先做查询规划，再用规划结果召回长期事实、决定是否注入 RAG；
-        未注入 assembler 时仍执行规划，只跳过 section 组装。
+        历史只加载会话摘要 ``covered_through_seq`` 之后的未摘要消息；
+        ContextBudgetPlanner 再按 token 预算选择完整轮次，避免固定条数
+        与摘要重叠。
         """
         # 画像最多占上下文的 1/4，避免长期记忆挤占当前对话与工具结果。
-        memory_budget = max(
-            256,
-            int(getattr(self.deps.context, "max_context_tokens", 8192)) // 4,
+        context_max_tokens = int(
+            getattr(self.deps.context, "max_context_tokens", 8192) or 8192
         )
+        memory_budget = max(256, context_max_tokens // 4)
         memory_text: str | None = None
         session_text: str | None = None
+        covered_through_seq = 0
         if self.deps.memory is not None:
             try:
                 memory_text = await self.deps.memory.load_profile(
@@ -1502,12 +1507,31 @@ class AgentLoop:
             except Exception:  # noqa: BLE001 - 画像读取失败不阻断对话
                 logger.warning("加载用户画像失败", exc_info=True)
             try:
-                session_text = await self.deps.memory.load_session_summary(
-                    request.conversation_id,
-                    token_budget=memory_budget,
+                state_loader = getattr(
+                    self.deps.memory,
+                    "load_session_summary_state",
+                    None,
                 )
+                if callable(state_loader):
+                    session_text, covered_through_seq = await state_loader(
+                        request.conversation_id,
+                        token_budget=memory_budget,
+                    )
+                else:
+                    session_text = await self.deps.memory.load_session_summary(
+                        request.conversation_id,
+                        token_budget=memory_budget,
+                    )
             except Exception:  # noqa: BLE001 - 摘要读取失败不阻断对话
                 logger.warning("加载会话摘要失败", exc_info=True)
+
+        # 只加载摘要水位线之后的未摘要消息，避免历史与摘要重复进 Prompt。
+        history = await self.deps.messages.load_after(
+            request.conversation_id,
+            max(0, int(covered_through_seq)),
+            limit=max(1, int(self.deps.history_limit)),
+        )
+        history = _ensure_current_user_message(history, user_stored)
 
         query_plan, plan_result = await self._plan_query(
             request,
@@ -1580,18 +1604,19 @@ class AgentLoop:
                 ),
             )
 
+        tool_tokens = _tool_descriptors_tokens(tools)
         if self.deps.context is None:
+            budget_plan = self.budget_planner.plan(
+                history,
+                system_prompt=self.deps.system_prompt,
+                tool_tokens=tool_tokens,
+            )
             return (
-                await self._llm_messages(history, request),
+                await self._llm_messages(budget_plan.messages, request),
                 query_plan,
                 plan_result,
             )
 
-        base_messages = await self._llm_messages(
-            history,
-            request,
-            include_system=False,
-        )
         sections: list[ContextSection] = []
         rag_section = await self._injected_rag_section(
             request,
@@ -1606,7 +1631,7 @@ class AgentLoop:
                     source="memory",
                     name="long_term_profile",
                     content=memory_text,
-                    priority=80,
+                    priority=40,
                     token_estimate=0,
                 )
             )
@@ -1616,7 +1641,7 @@ class AgentLoop:
                     source="summary",
                     name="session_summary",
                     content=session_text,
-                    priority=70,
+                    priority=85,
                     token_estimate=0,
                 )
             )
@@ -1649,14 +1674,41 @@ class AgentLoop:
                         source="facts",
                         name="long_term_facts",
                         content="\n".join(f"- {line}" for line in fact_lines),
-                        priority=65,
+                        priority=35,
                         token_estimate=0,
                     )
                 )
+
+        # 预算规划：system/sections/tools 扣除后，只保留放得下的完整轮次；
+        # 历史已从摘要水位线之后加载，避免与 session_summary 重叠。
+        budget_plan = self.budget_planner.plan(
+            history,
+            system_prompt=self.deps.system_prompt,
+            sections=sections,
+            tool_tokens=tool_tokens,
+        )
+        base_messages = await self._llm_messages(
+            budget_plan.messages,
+            request,
+            include_system=False,
+        )
+        if flow is not None:
+            flow.event(
+                "context.budget",
+                history_budget=budget_plan.history_budget,
+                kept_messages=len(budget_plan.messages),
+                kept_rounds=budget_plan.kept_rounds,
+                dropped_messages=budget_plan.dropped_messages,
+                history_tokens=budget_plan.token_estimate,
+                truncated=budget_plan.truncated,
+            )
         await self._emit_hook(
             "context.assemble.start",
             {
                 "history_count": len(base_messages),
+                "history_rounds": budget_plan.kept_rounds,
+                "history_budget": budget_plan.history_budget,
+                "dropped_messages": budget_plan.dropped_messages,
                 "section_count": len(sections),
                 "tool_count": len(tools),
             },
@@ -1668,8 +1720,7 @@ class AgentLoop:
             system_prompt=self.deps.system_prompt,
             sections=sections,
             messages=base_messages,
-            tool_tokens=sum(len(item.name) + len(item.description) for item in tools)
-            // 4,
+            tool_tokens=tool_tokens,
         )
         if flow is not None:
             flow.event(
@@ -2482,6 +2533,16 @@ def _safe_arguments(arguments: dict) -> dict:
         "keys": sorted(arguments.keys()),
         "preview": str(arguments)[:200],
     }
+
+
+def _tool_descriptors_tokens(tools: Sequence[LLMToolDescriptor]) -> int:
+    """估算工具 schema 占用的 token（名称/说明/参数 JSON）。"""
+    return sum(
+        estimate_tokens(item.name)
+        + estimate_tokens(item.description)
+        + estimate_tokens(json.dumps(item.parameters or {}, ensure_ascii=False))
+        for item in tools
+    )
 
 
 def _content_bytes(message: object) -> int:

@@ -6,7 +6,14 @@ from pydantic import Field
 
 from .base import ConfigModel
 
-__all__ = ["LLMConfig", "StructuredOutputConfig"]
+__all__ = ["LLMConfig", "StructuredOutputConfig", "TokenizerConfig"]
+
+
+class TokenizerConfig(ConfigModel):
+    """本地 token 估算配置。"""
+
+    # tiktoken 编码器名；默认 o200k_base 更适合中英文混合
+    encoding: str = Field(default="o200k_base", min_length=1, max_length=64)
 
 
 class StructuredOutputConfig(ConfigModel):
@@ -47,3 +54,5 @@ class LLMConfig(ConfigModel):
     structured_output: StructuredOutputConfig = Field(
         default_factory=StructuredOutputConfig
     )
+    # 本地 token 估算
+    tokenizer: TokenizerConfig = Field(default_factory=TokenizerConfig)

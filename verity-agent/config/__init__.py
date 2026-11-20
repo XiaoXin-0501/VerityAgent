@@ -49,7 +49,7 @@ from .infrastructure import (
     RedisConfig,
     WeaviateConfig,
 )
-from .llm import LLMConfig, StructuredOutputConfig
+from .llm import LLMConfig, StructuredOutputConfig, TokenizerConfig
 from .memory import MemoryConfig
 from .message import MessageConfig
 from .model import ModelConfig
@@ -98,6 +98,7 @@ __all__ = [
     # llm
     "LLMConfig",
     "StructuredOutputConfig",
+    "TokenizerConfig",
     # memory
     "MemoryConfig",
     # prompt
@@ -232,6 +233,8 @@ class Settings(EnvSettings):
                 refs.append(model_id)
         if self.rag.retriever.rerank_model_id:
             refs.append(self.rag.retriever.rerank_model_id)
+        if self.rag.retriever.chunk_conflict_model_id:
+            refs.append(self.rag.retriever.chunk_conflict_model_id)
         if self.agent.query_plan.model_id:
             refs.append(self.agent.query_plan.model_id)
         if self.agent.reflection.model_id:

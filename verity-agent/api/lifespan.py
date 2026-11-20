@@ -29,8 +29,6 @@ from agent.recovery import (
 from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 from agent.workers import (
     CompressionService,
-    ConflictPenaltyQueue,
-    FactConfidencePenaltyWorker,
     FactConflictService,
     FactReconciliationWorker,
     MemoryProfileWorker,
@@ -39,6 +37,7 @@ from agent.workers import (
 from prompt import PromptId, build_prompt_registry
 from provider.factory import build_registry
 from rag.bootstrap import build_default_indexer, build_default_retriever
+from rag.retriever.chunk_conflict import ChunkConflictService
 from config.domain import load_domain_profile, load_master_profile
 from store.minio import close_minio, init_minio
 from store.neo4j import (
@@ -52,6 +51,7 @@ from store.pg import close_pg, init_pg, init_schema
 from store.pg.repositories import (
     ConversationMessageRepository,
     ConversationRepository,
+    DocumentRepository,
 )
 from store.redis import close_redis, init_redis
 from store.weaviate import (
@@ -61,6 +61,7 @@ from store.weaviate import (
     init_weaviate,
 )
 from utils.time import utcnow
+from utils.tokens import configure_tokenizer
 
 from .logging_setup import setup_logging, shutdown_logging
 
@@ -353,6 +354,36 @@ def _build_compressor(registry, hook_dispatcher, prompt_registry):
     )
 
 
+def _build_chunk_conflict_service(registry, prompt_registry):
+    """构造知识库片段冲突处理服务；未启用/无 Weaviate 时返回 None。"""
+    cfg = settings.rag.retriever
+    if not cfg.chunk_conflict_tool_enabled:
+        return None
+    if not settings.weaviate.enabled:
+        logger.warning("Weaviate 未启用，跳过 chunk 冲突处理服务")
+        return None
+    default_chat = _default_chat_model_id()
+    model_id = cfg.chunk_conflict_model_id or default_chat
+    model = _resolve_model(
+        registry,
+        model_id,
+        fallback=default_chat,
+        kind="chat",
+    )
+    if model is None:
+        logger.warning("chunk 冲突处理缺少可用 chat 模型，跳过")
+        return None
+    return ChunkConflictService(
+        model=model,
+        model_id=str(model_id),
+        documents=DocumentRepository(),
+        timeout_s=cfg.chunk_conflict_timeout_s,
+        max_output_tokens=cfg.chunk_conflict_max_output_tokens,
+        neighbor_window=cfg.chunk_conflict_neighbor_window,
+        prompts=prompt_registry,
+    )
+
+
 def _build_deletion_worker(config):
     """按配置构造用户删除 worker；未启用时返回 None。"""
     if not config.deletion_worker_enabled:
@@ -370,23 +401,6 @@ def _build_reconciliation_worker(config):
     return FactReconciliationWorker(
         config,
         facts_store=WeaviateFactStore(),
-    )
-
-
-def _build_penalty_worker(config, queue):
-    """按配置构造事实置信度惩罚 worker；未启用/无 Weaviate 时返回 None。"""
-    if not config.penalty_worker_enabled:
-        return None
-    if not settings.weaviate.enabled:
-        logger.warning("Weaviate 未启用，跳过事实惩罚 worker")
-        return None
-    return FactConfidencePenaltyWorker(
-        queue=queue,
-        facts_store=WeaviateFactStore(),
-        disputed_threshold=config.penalty_disputed_threshold,
-        batch_size=config.penalty_batch_size,
-        interval_s=config.penalty_interval_s,
-        max_attempts=config.penalty_max_attempts,
     )
 
 
@@ -425,6 +439,8 @@ def _build_agent_system_prompt(prompt_registry) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """启动/关闭全部基础设施；任一步失败也按相反顺序释放已建资源。"""
+    # 统一 tokenizer，确保预算/切片/压缩使用同一编码器。
+    configure_tokenizer(settings.llm.tokenizer.encoding)
     # 外部 uvicorn 直接加载 api.app:app 时也在这里安装文件日志 handler。
     try:
         app.state.log_file = setup_logging()
@@ -452,8 +468,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     deletion_worker_task = None
     reconciliation_worker = None
     reconciliation_worker_task = None
-    penalty_worker = None
-    penalty_worker_task = None
     compressor = None
     redis_ready = False
     try:
@@ -583,27 +597,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 name="verity-reconciliation-worker",
             )
             app.state.reconciliation_worker = reconciliation_worker
-        penalty_queue = ConflictPenaltyQueue(
-            max_len=settings.memory.penalty_queue_max_len
+        # 片段冲突处理服务由工具按需调用，不注册独立 worker。
+        chunk_conflict_service = _build_chunk_conflict_service(
+            registry,
+            prompts,
         )
-        app.state.conflict_penalty_queue = penalty_queue
-        penalty_worker = _build_penalty_worker(settings.memory, penalty_queue)
-        if penalty_worker is not None:
-            penalty_worker_task = asyncio.create_task(
-                penalty_worker.run_forever(),
-                name="verity-penalty-worker",
-            )
-        if (
-            settings.rag.retriever.chunk_conflict_tool_enabled
-            and not settings.memory.penalty_worker_enabled
-        ):
-            logger.warning(
-                "resolve_chunk_conflict 已启用，但 penalty worker 未启用；"
-                "惩罚消息只会在有界队列中等待/被淘汰"
-            )
+        app.state.chunk_conflict_service = chunk_conflict_service
         tool_registry = build_tool_registry(
             retriever=rag_retriever,
-            conflict_enabled=settings.rag.retriever.chunk_conflict_tool_enabled,
+            # 只有服务真正可用时才暴露工具，避免模型调到必然失败的工具。
+            conflict_enabled=chunk_conflict_service is not None,
             search_kb=settings.tools.search_kb,
             recall_round=settings.tools.recall_round,
         )
@@ -648,14 +651,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             reconciliation_worker_task.cancel()
             await asyncio.gather(
                 reconciliation_worker_task,
-                return_exceptions=True,
-            )
-        if penalty_worker is not None:
-            penalty_worker.stop()
-        if penalty_worker_task is not None:
-            penalty_worker_task.cancel()
-            await asyncio.gather(
-                penalty_worker_task,
                 return_exceptions=True,
             )
         if rag_retriever is not None:

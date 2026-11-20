@@ -14,11 +14,6 @@ from .compression import CompressionService
 from .deletion import UserDeletionWorker
 from .fact_conflict import FactConflictDecision, FactConflictService
 from .memory import MemoryProfileWorker
-from .penalty import (
-    ConflictPenaltyQueue,
-    FactConfidencePenalty,
-    FactConfidencePenaltyWorker,
-)
 from .reconciliation import FactReconciliationWorker
 
 __all__ = [
@@ -28,9 +23,6 @@ __all__ = [
     "MemoryProfileWorker",
     "UserDeletionWorker",
     "FactReconciliationWorker",
-    "FactConfidencePenalty",
-    "ConflictPenaltyQueue",
-    "FactConfidencePenaltyWorker",
     "TaskStatus",
     "TaskLease",
     "TaskError",

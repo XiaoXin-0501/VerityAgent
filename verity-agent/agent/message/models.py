@@ -283,6 +283,8 @@ class StoredMessage(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     seq_no: int = Field(gt=0)
+    # 轮次 id：同一次用户提问到完整回答共享；旧数据/内存构造可为 None。
+    round_id: UUID | None = None
     message: BaseMessage | RawMessage
 
 

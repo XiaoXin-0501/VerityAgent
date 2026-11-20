@@ -84,18 +84,6 @@ class MemoryConfig(ConfigModel):
     fact_conflict_timeout_s: float = Field(default=20.0, gt=0)
     # 冲突判定 LLM 输出 token 上限（只输出简短 JSON 决策）
     fact_conflict_max_output_tokens: int = Field(default=128, ge=16)
-    # 是否启动事实置信度惩罚 worker
-    penalty_worker_enabled: bool = False
-    # 单批处理惩罚数
-    penalty_batch_size: int = Field(default=20, ge=1)
-    # 惩罚轮询间隔（秒）
-    penalty_interval_s: float = Field(default=5.0, gt=0)
-    # 惩罚队列最大长度；超出时丢弃最旧消息
-    penalty_queue_max_len: int = Field(default=10_000, ge=1)
-    # 单条惩罚失败后的最大尝试次数；超过后丢弃并记录
-    penalty_max_attempts: int = Field(default=3, ge=1)
-    # 置信度低于该值置 disputed
-    penalty_disputed_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
 
     # 是否启动用户跨存储删除 worker
     deletion_worker_enabled: bool = False

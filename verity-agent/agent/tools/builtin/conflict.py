@@ -1,8 +1,8 @@
-"""内置 ``resolve_chunk_conflict``：记录 chunk/fact 冲突并投递置信度惩罚。"""
+"""内置 ``resolve_chunk_conflict``：解决知识库片段之间的冲突。"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -10,77 +10,105 @@ from agent.tools.enums import ToolKind, ToolSideEffect
 from agent.tools.models import ToolContext, ToolError, ToolResult, ToolSpec
 from agent.tools.policies import ToolPolicy
 from agent.tools.registry import ToolRegistry
-from agent.workers.penalty import FactConfidencePenalty
 from exception.tool import ToolErrorCode
 
 __all__ = ["ResolveConflictArgs", "register_conflict_tool"]
 
 
 class ResolveConflictArgs(BaseModel):
-    """冲突工具参数；只影响事实置信度，不改 chunk 正文。"""
+    """片段冲突工具参数。"""
 
-    fact_ids: list[str] = Field(default_factory=list)
-    chunk_ids: list[str] = Field(default_factory=list)
-    doc_ids: list[str] = Field(default_factory=list)
-    delta: float = Field(default=0.1, gt=0.0, le=1.0)
-    reason: str = ""
+    # 至少两个冲突片段；LLM 从已召回片段中挑选
+    chunk_ids: list[str] = Field(min_length=2, max_length=8)
+    # 冲突性质：硬事实 / 观点差异 / 无法判断
+    conflict_type: Literal["factual", "viewpoint", "ambiguous"] = "factual"
+    # 用户原始问题/当前回答目标；工具据此判断冲突是否相关
+    question: str = Field(min_length=1, max_length=2000)
+    # 为什么认为这些片段冲突（可选，便于审计）
+    reason: str = Field(default="", max_length=500)
 
     @model_validator(mode="after")
-    def _has_target(self) -> "ResolveConflictArgs":
-        """冲突必须至少指向一类对象，否则惩罚没有作用对象。"""
-        if not self.fact_ids and not self.chunk_ids and not self.doc_ids:
-            raise ValueError("fact_ids/chunk_ids/doc_ids 至少提供一个")
+    def _unique_chunks(self) -> "ResolveConflictArgs":
+        """冲突片段去重后仍至少两个。"""
+        if len(set(self.chunk_ids)) < 2:
+            raise ValueError("chunk_ids 至少需要两个不同片段")
         return self
 
 
 async def _executor(arguments: dict[str, Any], context: ToolContext) -> ToolResult:
-    """把冲突惩罚写入 Redis 队列，由 penalty worker 异步执行。"""
+    """调用冲突服务，返回可直接用于回答的结论。"""
     parsed = ResolveConflictArgs.model_validate(arguments)
-    queue = getattr(context.services, "conflict_penalty_queue", None)
-    if queue is None:
+    service = getattr(context.services, "chunk_conflict_service", None)
+    if service is None:
         return ToolResult.failure(
             call_id=context.call_id,
             tool_name="resolve_chunk_conflict",
             error=ToolError(
                 code=ToolErrorCode.UPSTREAM_ERROR,
-                message="冲突惩罚队列未配置",
+                message="知识库冲突处理服务未配置",
                 retryable=False,
             ),
         )
-    await queue.enqueue(
-        FactConfidencePenalty(
+    try:
+        result = await service.resolve(
             user_id=context.user_id,
-            fact_ids=list(parsed.fact_ids),
-            delta=parsed.delta,
-            reason=parsed.reason,
-            chunk_ids=list(parsed.chunk_ids),
-            doc_ids=list(parsed.doc_ids),
+            permissions=context.permissions,
+            question=parsed.question,
+            conflict_type=parsed.conflict_type,
+            chunk_ids=list(dict.fromkeys(parsed.chunk_ids)),
         )
-    )
+    except Exception as exc:  # noqa: BLE001 - 工具错误统一结构化
+        return ToolResult.failure(
+            call_id=context.call_id,
+            tool_name="resolve_chunk_conflict",
+            error=ToolError(
+                code=ToolErrorCode.UPSTREAM_ERROR,
+                message="知识库冲突处理失败，请稍后重试",
+                retryable=True,
+                cause=str(exc),
+            ),
+        )
+    answer = str(result.get("answer") or "").strip()
+    if not answer:
+        return ToolResult.failure(
+            call_id=context.call_id,
+            tool_name="resolve_chunk_conflict",
+            error=ToolError(
+                code=ToolErrorCode.UPSTREAM_ERROR,
+                message="知识库冲突处理未返回结论",
+                retryable=True,
+            ),
+        )
     return ToolResult.success(
         call_id=context.call_id,
         tool_name="resolve_chunk_conflict",
-        content="冲突已记录，事实置信度将在后台调整。",
-        data={"queued": True},
+        content=answer,
+        data={
+            "conflict_type": parsed.conflict_type,
+            "resolution": result.get("resolution"),
+            "preferred_chunk_ids": result.get("preferred_chunk_ids") or [],
+            "conflict_summary": result.get("conflict_summary") or "",
+            "chunk_ids": parsed.chunk_ids,
+        },
     )
 
 
 def register_conflict_tool(registry: ToolRegistry) -> None:
-    """注册冲突记录工具；只有配置显式开启时才暴露。"""
+    """注册片段冲突处理工具；只有配置显式开启时才暴露。"""
     registry.register_tool(
         ToolSpec(
             name="resolve_chunk_conflict",
             description=(
-                "记录知识库片段与用户事实的冲突，并建议下调事实置信度。"
-                "不修改 chunk、文档描述或事实正文。"
+                "处理知识库片段之间的矛盾。检索结果中两个片段对同一问题给出"
+                "冲突信息且会影响回答时，传入至少两个 chunk_id、冲突类型"
+                "（factual/viewpoint/ambiguous）和用户问题；工具会结合文档时间、"
+                "质量分与相邻片段给出结论。不要用它处理普通追问。"
             ),
             group="kb",
             kind=ToolKind.EXECUTABLE,
-            # 只投递异步惩罚，不直接改 chunk/文档/事实正文，因此按 READ 允许自动执行。
-            # 重复调用会重复下调 confidence，worker 负责下限保护。
             side_effect=ToolSideEffect.READ,
             policy=ToolPolicy(),
-            tags=["rag", "memory", "conflict"],
+            tags=["rag", "conflict"],
         ),
         _executor,
         argument_model=ResolveConflictArgs,

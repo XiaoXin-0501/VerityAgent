@@ -53,15 +53,30 @@ class PgMemoryProfileAdapter:
         token_budget: int | None = None,
     ) -> str | None:
         """返回会话摘要文本；没有摘要或读取失败返回 None。"""
+        text, _ = await self.load_session_summary_state(
+            conversation_id,
+            token_budget=token_budget,
+        )
+        return text
+
+    async def load_session_summary_state(
+        self,
+        conversation_id: UUID,
+        *,
+        token_budget: int | None = None,
+    ) -> tuple[str | None, int]:
+        """返回 (会话摘要文本, covered_through_seq)。
+
+        ``covered_through_seq`` 用于历史窗口加载：只加载摘要尚未覆盖的消息，
+        避免摘要与工作窗口重复进 Prompt。
+        """
         summary = await self.summary_repository.get(conversation_id)
         if summary is None:
-            return None
+            return None, 0
         text = _render_session_summary(summary.summary_json)
-        if not text:
-            return None
-        if token_budget is not None and token_budget > 0:
+        if text and token_budget is not None and token_budget > 0:
             text = truncate_to_tokens(text, token_budget)
-        return text
+        return text or None, int(summary.covered_through_seq)
 
     async def compression_count(self, conversation_id: UUID) -> int:
         """返回会话摘要成功压缩次数；无摘要时按 0 处理。"""

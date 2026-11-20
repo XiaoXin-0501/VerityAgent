@@ -310,6 +310,14 @@ class RetrieverConfig(ConfigModel):
     include_doc_meta: bool = True
     # 是否注册/暴露 resolve_chunk_conflict 工具（D-88）
     chunk_conflict_tool_enabled: bool = False
+    # 冲突处理模型 id；为空使用默认 chat
+    chunk_conflict_model_id: str | None = None
+    # 冲突处理 LLM 超时（秒）
+    chunk_conflict_timeout_s: float = Field(default=20.0, gt=0)
+    # 冲突处理 LLM 输出上限
+    chunk_conflict_max_output_tokens: int = Field(default=512, ge=64)
+    # 观点冲突时向两侧额外召回的邻居 chunk 数
+    chunk_conflict_neighbor_window: int = Field(default=1, ge=0, le=3)
     # 是否启用 rerank
     rerank_enabled: bool = True
     # rerank 应用模型 id

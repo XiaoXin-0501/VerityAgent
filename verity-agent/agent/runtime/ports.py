@@ -220,6 +220,15 @@ class MemoryPort(Protocol):
         """返回可注入 system 的会话摘要文本；无摘要返回 None。"""
         ...
 
+    async def load_session_summary_state(
+        self,
+        conversation_id: UUID,
+        *,
+        token_budget: int | None = None,
+    ) -> tuple[str | None, int]:
+        """返回 (摘要文本, covered_through_seq)；实现方可选提供。"""
+        ...
+
     async def compression_count(self, conversation_id: UUID) -> int:
         """返回会话摘要成功压缩次数；无摘要返回 0。"""
         ...
@@ -349,8 +358,8 @@ class AgentDependencies:
     background_tasks: Any = None
     # 基础 system prompt；ContextAssembler 会与 memory/RAG sections 合并
     system_prompt: str | None = None
-    # 读取最近消息条数；后续由 ContextBudgetPlanner 取代
-    history_limit: int = 40
+    # 单次加载消息安全上限；实际工作窗口由 ContextBudgetPlanner 决定
+    history_limit: int = 400
     # 传给 ToolContext 的共享服务对象（RAG/存储等由工具执行器解释）
     services: Any = None
     # 扩展元数据；不进入 Prompt
