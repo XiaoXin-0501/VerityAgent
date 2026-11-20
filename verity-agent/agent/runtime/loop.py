@@ -77,7 +77,12 @@ from agent.runtime.models import AgentLimits, AgentWarningData
 from agent.runtime.ports import AgentDependencies
 from agent.runtime.reflection import ReflectionAction, ReflectionEngine
 from agent.tools.enums import ToolResultStatus
-from agent.tools.models import ToolContext, ToolResult
+from agent.tools.models import (
+    ToolContext,
+    ToolExposureContext,
+    ToolResult,
+    ToolSelection,
+)
 from config.agent import AgentConfig
 from exception import ConfigurationError
 from utils.ids import uuid7
@@ -338,25 +343,16 @@ class AgentLoop:
             )
 
             limits = self._limits(request)
-            # 轮次召回工具只在摘要压缩到阈值后暴露：工具已在注册表里，
-            # 这里按会话压缩次数动态追加权限码，不修改全局注册表。
-            effective_permissions = await self._tool_permissions(
-                request.permissions,
-                conversation_id,
-            )
-            tool_selection = (
-                self.deps.tools.select(effective_permissions)
-                if self.deps.tools is not None
-                else None
-            )
-            tools = self._tool_descriptors(tool_selection)
-            llm_messages, query_plan, plan_result = await self._assemble_context(
-                request,
-                user_stored,
-                tools,
-                run_id=run_id,
-                turn_id=turn_id,
-                flow=flow,
+            # 权限只来自登录态；工具注册/暴露过滤不再动态追加权限码。
+            effective_permissions = request.permissions
+            llm_messages, query_plan, plan_result, tool_selection, tools = (
+                await self._assemble_context(
+                    request,
+                    user_stored,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    flow=flow,
+                )
             )
             # 规划阶段如果调用了 LLM，计一次调用与 token；规则结果不计。
             if plan_result is not None and plan_result.model_id is not None:
@@ -1254,31 +1250,6 @@ class AgentLoop:
             max_parallel_tools=policy.max_parallel_tools,
         )
 
-    async def _tool_permissions(
-        self,
-        permissions: frozenset[str],
-        conversation_id: UUID,
-    ) -> frozenset[str]:
-        """按会话摘要次数决定是否授予轮次召回工具的权限。
-
-        工具注册表启动后只读；动态能力通过“运行时追加权限码”控制暴露，
-        避免为单个会话修改全局注册表。
-        """
-        code = self.deps.recall_round_permission
-        if not code or self.deps.memory is None:
-            return permissions
-        loader = getattr(self.deps.memory, "compression_count", None)
-        if not callable(loader):
-            return permissions
-        try:
-            count = int(await loader(conversation_id))
-        except Exception:  # noqa: BLE001 - 摘要计数失败不阻断对话
-            logger.warning("读取会话压缩次数失败，跳过轮次召回工具", exc_info=True)
-            return permissions
-        if count < max(0, int(self.deps.recall_round_min_compressions)):
-            return permissions
-        return permissions | {code}
-
     @staticmethod
     def _check_runtime(
         limits: AgentLimits,
@@ -1485,17 +1456,23 @@ class AgentLoop:
         self,
         request: AgentRequest,
         user_stored: StoredMessage,
-        tools: list[LLMToolDescriptor],
         *,
         run_id: str,
         turn_id: str,
         flow: RunFlowLog | None = None,
-    ) -> tuple[list[LLMMessage], QueryPlan, QueryPlanResult | None]:
-        """加载 memory/history、预算工作窗口并组装 Prompt。
+    ) -> tuple[
+        list[LLMMessage],
+        QueryPlan,
+        QueryPlanResult | None,
+        ToolSelection | None,
+        list[LLMToolDescriptor],
+    ]:
+        """加载 memory/history、规划查询、选择暴露工具并组装 Prompt。
 
         历史只加载会话摘要 ``covered_through_seq`` 之后的未摘要消息；
         ContextBudgetPlanner 再按 token 预算选择完整轮次，避免固定条数
-        与摘要重叠。
+        与摘要重叠。工具选择放在查询规划之后，以便按“是否需要 RAG”
+        决定 chunk 冲突工具是否暴露。
         """
         # 画像最多占上下文的 1/4，避免长期记忆挤占当前对话与工具结果。
         context_max_tokens = int(
@@ -1613,6 +1590,11 @@ class AgentLoop:
                 ),
             )
 
+        tool_selection, tools = await self._select_tools(
+            request,
+            query_plan=query_plan,
+            flow=flow,
+        )
         tool_tokens = _tool_descriptors_tokens(tools)
         if self.deps.context is None:
             budget_plan = self.budget_planner.plan(
@@ -1624,6 +1606,8 @@ class AgentLoop:
                 await self._llm_messages(budget_plan.messages, request),
                 query_plan,
                 plan_result,
+                tool_selection,
+                tools,
             )
 
         sections: list[ContextSection] = []
@@ -1763,7 +1747,13 @@ class AgentLoop:
             run_id=run_id,
             turn_id=turn_id,
         )
-        return context_plan.messages, query_plan, plan_result
+        return (
+            context_plan.messages,
+            query_plan,
+            plan_result,
+            tool_selection,
+            tools,
+        )
 
     def _should_reflect(
         self,
@@ -1924,6 +1914,51 @@ class AgentLoop:
                 )
             parts.append(part)
         return LLMMessage(role=LLMRole.USER, content=parts)
+
+    async def _select_tools(
+        self,
+        request: AgentRequest,
+        *,
+        query_plan: QueryPlan,
+        flow: RunFlowLog | None = None,
+    ) -> tuple[ToolSelection | None, list[LLMToolDescriptor]]:
+        """每轮请求扫描工具表，按用户权限 + 暴露策略生成工具集合。
+
+        - 权限：过滤用户无权使用的工具；
+        - ``rag_required``：chunk 冲突工具只在需要 RAG 召回时暴露；
+        - ``compression_count``：recall_round 只在摘要压缩达到阈值后暴露。
+        注册表本身不因单次请求变化。
+        """
+        if self.deps.tools is None:
+            return None, []
+        compression_count = 0
+        if self.deps.memory is not None:
+            loader = getattr(self.deps.memory, "compression_count", None)
+            if callable(loader):
+                try:
+                    compression_count = int(
+                        await loader(request.conversation_id)
+                    )
+                except Exception:  # noqa: BLE001 - 计数失败按 0 处理
+                    logger.warning("读取会话压缩次数失败", exc_info=True)
+        exposure = ToolExposureContext(
+            rag_required=bool(query_plan.needs_rag),
+            compression_count=max(0, compression_count),
+        )
+        selection = self.deps.tools.select(
+            request.permissions,
+            exposure=exposure,
+        )
+        tools = self._tool_descriptors(selection)
+        if flow is not None:
+            flow.event(
+                "tools.select",
+                rag_required=exposure.rag_required,
+                compression_count=exposure.compression_count,
+                mode=getattr(selection.mode, "value", selection.mode),
+                tools=[item.name for item in tools],
+            )
+        return selection, tools
 
     @staticmethod
     def _tool_descriptors(selection) -> list[LLMToolDescriptor]:

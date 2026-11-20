@@ -16,6 +16,7 @@ from .models import (
     RegisteredTool,
     ToolCatalog,
     ToolDescriptor,
+    ToolExposureContext,
     ToolGroup,
     ToolGroupDescriptor,
     ToolSelection,
@@ -34,15 +35,18 @@ def build_selection(
     catalog: ToolCatalog,
     permissions: frozenset[str],
     routing: ToolRoutingPolicy,
+    exposure: ToolExposureContext | None = None,
 ) -> ToolSelection:
-    """按权限与路由策略生成一次运行的 ToolSelection。"""
+    """按权限、请求暴露策略与路由策略生成一次运行的 ToolSelection。"""
     allowed_tools = [
-        tool for tool in catalog.tools.values() if spec_allowed(tool.spec, permissions)
+        tool
+        for tool in catalog.tools.values()
+        if spec_allowed(tool.spec, permissions, exposure)
     ]
     allowed_groups = [
         group
         for group in catalog.groups.values()
-        if group_allowed(group, catalog, permissions)
+        if group_allowed(group, catalog, permissions, exposure)
     ]
 
     routed = (
@@ -60,7 +64,7 @@ def build_selection(
             router is not None
             and router.spec.kind is ToolKind.ROUTER
             and router.spec.router_group == group.name
-            and spec_allowed(router.spec, permissions)
+            and spec_allowed(router.spec, permissions, exposure)
         ):
             descriptors.append(ToolDescriptor.from_spec(router.spec))
 
@@ -86,13 +90,16 @@ def activate_group(
     selection: ToolSelection,
     group_name: str,
     permissions: frozenset[str],
+    exposure: ToolExposureContext | None = None,
 ) -> ToolSelection:
     """router 调用后激活组内工具，返回新的 selection。
 
     不原地修改入参，Agent 可用返回值替换当前快照。
     """
     group = catalog.get_group(group_name)
-    if group is None or not group_allowed(group, catalog, permissions):
+    if group is None or not group_allowed(
+        group, catalog, permissions, exposure
+    ):
         raise ToolNotFoundError(
             group_name,
             message=f"路由组不存在或不可用: {group_name}",
@@ -113,7 +120,7 @@ def activate_group(
 
     for name in group.tool_names:
         tool = catalog.tools.get(name)
-        if tool is None or not spec_allowed(tool.spec, permissions):
+        if tool is None or not spec_allowed(tool.spec, permissions, exposure):
             continue
         if name in updated.exposed_tool_names:
             continue

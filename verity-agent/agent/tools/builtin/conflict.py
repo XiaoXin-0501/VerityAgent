@@ -6,13 +6,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from agent.tools.enums import ToolKind, ToolSideEffect
-from agent.tools.models import ToolContext, ToolError, ToolResult, ToolSpec
-from agent.tools.policies import ToolPolicy
-from agent.tools.registry import ToolRegistry
+from agent.tools.models import ToolContext, ToolError, ToolResult
 from exception.tool import ToolErrorCode
 
-__all__ = ["ResolveConflictArgs", "register_conflict_tool"]
+__all__ = ["ResolveConflictArgs", "execute_conflict_tool"]
 
 
 class ResolveConflictArgs(BaseModel):
@@ -35,7 +32,10 @@ class ResolveConflictArgs(BaseModel):
         return self
 
 
-async def _executor(arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+async def execute_conflict_tool(
+    arguments: dict[str, Any],
+    context: ToolContext,
+) -> ToolResult:
     """调用冲突服务，返回可直接用于回答的结论。"""
     parsed = ResolveConflictArgs.model_validate(arguments)
     service = getattr(context.services, "chunk_conflict_service", None)
@@ -91,27 +91,4 @@ async def _executor(arguments: dict[str, Any], context: ToolContext) -> ToolResu
             "conflict_summary": result.get("conflict_summary") or "",
             "chunk_ids": chunk_ids,
         },
-    )
-
-
-def register_conflict_tool(registry: ToolRegistry) -> None:
-    """注册片段冲突处理工具；只有配置显式开启时才暴露。"""
-    registry.register_tool(
-        ToolSpec(
-            name="resolve_chunk_conflict",
-            description=(
-                "处理知识库片段之间的矛盾。检索结果中两个片段对同一问题给出"
-                "冲突信息且会影响回答时，从检索结果里的 chunk_id 取至少两个"
-                "片段，并传入冲突类型（factual/viewpoint/ambiguous）和用户问题；"
-                "工具会结合文档时间、质量分与相邻片段给出结论。不要用它处理普通追问。"
-            ),
-            group="kb",
-            kind=ToolKind.EXECUTABLE,
-            side_effect=ToolSideEffect.READ,
-            policy=ToolPolicy(),
-            tags=["rag", "conflict"],
-        ),
-        _executor,
-        argument_model=ResolveConflictArgs,
-        source="builtin",
     )

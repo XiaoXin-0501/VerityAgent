@@ -39,6 +39,7 @@ from .enums import (
     ToolApprovalStatus,
     ToolBatchStatus,
     ToolCircuitState,
+    ToolExposureMode,
     ToolKind,
     ToolResultStatus,
     ToolSelectionMode,
@@ -54,6 +55,7 @@ __all__ = [
     "RegisteredTool",
     "ToolCatalog",
     "ToolSelection",
+    "ToolExposureContext",
     "ToolExecutor",
     "ToolContext",
     "ToolError",
@@ -123,6 +125,10 @@ class ToolSpec(_Model):
     supports_reconcile: bool = False
     # 是否注册/暴露
     enabled: bool = True
+    # 单次请求的暴露策略；注册表仍保留工具，选择时按请求上下文过滤
+    exposure: ToolExposureMode = ToolExposureMode.ALWAYS
+    # AFTER_COMPRESSIONS 模式下的最小摘要压缩次数
+    min_compressions: int = Field(default=0, ge=0)
     # 工具版本；破坏性 schema 变更时递增
     version: str = "1"
     # EXECUTABLE / ROUTER
@@ -328,15 +334,31 @@ class ToolCatalog:
         self,
         permissions: frozenset[str],
         routing: ToolRoutingPolicy | None = None,
+        exposure: ToolExposureContext | None = None,
     ) -> "ToolSelection":
         # 延迟导入，避免 registry/selection 与 models 循环
-        """按权限与路由策略生成本次运行的工具选择。"""
+        """按权限 + 请求暴露策略 + 路由策略生成本次运行的工具选择。"""
         from .selection import build_selection
 
-        return build_selection(self, permissions, routing or ToolRoutingPolicy())
+        return build_selection(
+            self,
+            permissions,
+            routing or ToolRoutingPolicy(),
+            exposure,
+        )
 
 
 # ——————————————————— 选择层 ———————————————————
+
+@dataclass(frozen=True, slots=True)
+class ToolExposureContext:
+    """单次请求的工具暴露上下文；只影响 ToolSelection，不改注册表。"""
+
+    # 本次查询规划是否判定需要 RAG 召回
+    rag_required: bool = False
+    # 当前会话成功压缩次数；用于 recall_round 等延迟暴露工具
+    compression_count: int = 0
+
 
 class ToolSelection(_MutableModel):
     """某次运行实际暴露给 LLM 的工具集合。"""

@@ -1,6 +1,7 @@
 """工具模块配置。
 
-工具定义与执行器由代码注册，不建 PG 表；这里只放**运行期策略**：
+工具静态声明集中在 ``agent/tools/manifest.json``，执行器在 builtin 中实现；
+这里只放**运行期策略**：
 
 - 工具选择的扁平/路由阈值；
 - 单批并行上限；
@@ -8,9 +9,9 @@
 - 危险工具确认开关（v1 只预留，不实现暂停流程）。
 
 单工具的超时/重试/缓存/幂等/熔断/限流/结果上限属于 ``ToolPolicy``，
-跟随 ``ToolSpec`` 一起声明，不在这里重复。内置 ``search_kb`` 是例外：
-它的默认召回数与缓存/限流值需要在注册工具时由运维配置，因此放在
-``SearchKbToolConfig``，注册后仍落到对应 ``ToolPolicy``。
+由 manifest 的 ``policy_preset`` + 实现装配决定，不在这里重复。内置
+``search_kb`` 是例外：默认召回数与缓存/限流值需要运维配置，因此放在
+``SearchKbToolConfig``，注册后落到对应 ``ToolPolicy``。
 """
 
 from __future__ import annotations
@@ -59,7 +60,8 @@ class RecallRoundToolConfig(ConfigModel):
     """内置 ``recall_round`` 的启用条件与返回上限。
 
     该工具按轮次 id 召回“用户提问 + 最终回答”，中间工具调用与过程消息省略。
-    只有会话摘要成功压缩到 ``min_compressions`` 次后，才会在运行时向模型暴露；
+    manifest 将其声明为 ``AFTER_COMPRESSIONS`` 暴露策略：只有会话摘要成功压缩到
+    ``min_compressions`` 次后，才会在本次请求的 ToolSelection 中暴露；
     摘要 topic 的 ``source_round_ids`` 是模型可用的轮次 id 来源。
     """
 
@@ -71,12 +73,6 @@ class RecallRoundToolConfig(ConfigModel):
     max_rounds: int = Field(default=5, ge=1, le=20)
     # 单次返回文本的字符上限；超出截断并提示
     max_chars: int = Field(default=4000, ge=200)
-    # 工具暴露所需的内部权限码；由 Agent 在满足阈值时动态授予
-    permission_code: str = Field(
-        default="tool:memory:recall_round",
-        min_length=1,
-        max_length=100,
-    )
 
 
 class ToolRoutingMode(StrEnum):

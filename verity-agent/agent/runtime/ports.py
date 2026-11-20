@@ -19,7 +19,12 @@ from agent.message.models import (
     ToolMessage,
     UserMessage,
 )
-from agent.tools.models import ToolContext, ToolResult, ToolSelection
+from agent.tools.models import (
+    ToolContext,
+    ToolExposureContext,
+    ToolResult,
+    ToolSelection,
+)
 
 __all__ = [
     "LeasePort",
@@ -158,8 +163,13 @@ class LLMPort(Protocol):
 class ToolPort(Protocol):
     """工具选择与批量执行端口。"""
 
-    def select(self, permissions: frozenset[str]) -> ToolSelection:
-        """按权限生成本次暴露的工具集合。"""
+    def select(
+        self,
+        permissions: frozenset[str],
+        *,
+        exposure: ToolExposureContext | None = None,
+    ) -> ToolSelection:
+        """按权限与本次请求暴露策略生成工具集合。"""
         ...
 
     def activate_group(
@@ -167,6 +177,8 @@ class ToolPort(Protocol):
         selection: ToolSelection,
         router_name: str,
         permissions: frozenset[str],
+        *,
+        exposure: ToolExposureContext | None = None,
     ) -> ToolSelection:
         """router 调用后展开组内工具；不支持路由的端口可不实现。"""
         ...
@@ -361,10 +373,6 @@ class AgentDependencies:
     fact_min_confidence: float | None = None
     # 回合后会话摘要压缩；为空表示不压缩
     compressor: Any = None
-    # 轮次召回工具的暴露条件：摘要压缩达到阈值后，把 permission_code
-    # 追加到本次运行的工具权限集合。permission_code 为空表示不启用。
-    recall_round_permission: str | None = None
-    recall_round_min_compressions: int = 0
     # Redis 事件/快照存储；为空表示只使用内存 ring buffer
     event_store: Any = None
     # 后台任务运行器；为空时 Agent 自己创建一个进程内 runner

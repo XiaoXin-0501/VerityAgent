@@ -4,8 +4,8 @@
 与工具结果只用于过程展示，本工具只返回用户提问和该轮最后一条有正文的
 assistant 消息，避免把冗长的中间消息重新塞回上下文。
 
-工具暴露由 Agent 按会话摘要压缩次数控制（见 ``AgentLoop._tool_permissions``），
-本模块只负责读取与格式化。
+工具暴露由 manifest 的 ``ToolExposureMode.AFTER_COMPRESSIONS`` 控制（会话摘要
+压缩次数达到阈值后才进入本次 ToolSelection）；本模块只负责读取与格式化。
 """
 
 from __future__ import annotations
@@ -16,10 +16,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from agent.tools.enums import ToolKind, ToolSideEffect
-from agent.tools.models import ToolContext, ToolError, ToolResult, ToolSpec
-from agent.tools.policies import CachePolicy, ToolPolicy
-from agent.tools.registry import ToolRegistry
+from agent.tools.models import ToolContext, ToolError, ToolResult
 from config.tools import RecallRoundToolConfig
 from exception.tool import ToolErrorCode
 from store.pg.repositories import ConversationMessageRepository
@@ -28,7 +25,6 @@ from utils.text import extract_content_text, truncate
 __all__ = [
     "RecallRoundArgs",
     "RecallRoundExecutor",
-    "register_recall_round",
 ]
 
 logger = logging.getLogger(__name__)
@@ -172,42 +168,3 @@ class RecallRoundExecutor:
             if text:
                 answer = text
         return truncate(answer, _ITEM_MAX_CHARS)
-
-
-def register_recall_round(
-    registry: ToolRegistry,
-    *,
-    config: RecallRoundToolConfig | None = None,
-) -> None:
-    """注册 ``recall_round``；是否对某次运行暴露由运行时权限决定。"""
-    policy = config or RecallRoundToolConfig()
-    if not policy.enabled:
-        logger.info("轮次召回工具已禁用，跳过 recall_round 注册")
-        return
-
-    executor = RecallRoundExecutor(policy)
-    registry.register_tool(
-        ToolSpec(
-            name="recall_round",
-            description=(
-                "按轮次 id 回看历史问答：返回指定轮次的用户提问和最终回答，"
-                "省略中间工具调用。只在会话摘要中的主题标注了 rounds 时使用，"
-                "round_ids 必须来自摘要或历史工具结果，不要编造。"
-            ),
-            group="memory",
-            kind=ToolKind.EXECUTABLE,
-            side_effect=ToolSideEffect.READ,
-            # 由 Agent 在摘要压缩次数达到阈值后动态授予该权限码
-            required_permission=policy.permission_code,
-            policy=ToolPolicy(
-                # 结果只对当前会话有效；缓存 key 不含 conversation_id，
-                # 直接关闭缓存，避免任何跨会话命中风险。
-                cache=CachePolicy(enabled=False),
-            ),
-            tags=["memory", "history"],
-            metadata={"cache_permission_scoped": True},
-        ),
-        executor,
-        argument_model=RecallRoundArgs,
-        source="builtin",
-    )

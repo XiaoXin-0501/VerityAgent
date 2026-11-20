@@ -14,12 +14,10 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from config import settings
-from exception import ConfigurationError, RedisError
-from agent.bootstrap import build_default_agent
 from agent.adapters.facts import WeaviateFactStore
 from agent.adapters.hooks import DispatcherHookAdapter
 from agent.adapters.rag_events import HookRagEventSink
+from agent.bootstrap import build_default_agent
 from agent.hooks.builtin.factory import build_dispatcher
 from agent.recovery import (
     recover_expired_leases,
@@ -33,11 +31,13 @@ from agent.workers import (
     MemoryProfileWorker,
     UserDeletionWorker,
 )
+from config import settings
+from config.domain import load_domain_profile, load_master_profile
+from exception import ConfigurationError, RedisError
 from prompt import PromptId, build_prompt_registry
 from provider.factory import build_registry
 from rag.bootstrap import build_default_indexer, build_default_retriever
 from rag.retriever.chunk_conflict import ChunkConflictService
-from config.domain import load_domain_profile, load_master_profile
 from store.minio import close_minio, init_minio
 from store.neo4j import (
     check_schema as check_graph_schema,
@@ -51,6 +51,7 @@ from store.pg.repositories import (
     ConversationMessageRepository,
     ConversationRepository,
     DocumentRepository,
+    PermissionRepository,
 )
 from store.redis import close_redis, init_redis
 from store.weaviate import (
@@ -61,7 +62,6 @@ from store.weaviate import (
 )
 from utils.time import utcnow
 from utils.tokens import configure_tokenizer
-
 from .logging_setup import setup_logging, shutdown_logging
 
 logger = logging.getLogger(__name__)
@@ -82,11 +82,11 @@ async def _optional_store(name: str, required: bool, action) -> bool:
 
 
 def _resolve_model(
-    registry,
-    model_id: str | None,
-    *,
-    fallback: str | None = None,
-    kind: str | None = None,
+        registry,
+        model_id: str | None,
+        *,
+        fallback: str | None = None,
+        kind: str | None = None,
 ):
     """按应用模型 id 解析句柄；缺失/禁用/类型不符时返回 None。"""
     target = model_id or fallback
@@ -137,11 +137,11 @@ def _load_domain_profile_by_name(name: str):
 
 
 async def _build_rag_retriever(
-    registry,
-    prompt_registry,
-    *,
-    available: bool = True,
-    event_sink=None,
+        registry,
+        prompt_registry,
+        *,
+        available: bool = True,
+        event_sink=None,
 ):
     """按 Settings 构造 RAG Retriever；向量库未就绪时返回 None。"""
     cfg = settings.rag
@@ -187,11 +187,11 @@ async def _build_rag_retriever(
 
 
 async def _build_rag_indexer(
-    registry,
-    prompt_registry,
-    *,
-    available: bool = True,
-    event_sink=None,
+        registry,
+        prompt_registry,
+        *,
+        available: bool = True,
+        event_sink=None,
 ):
     """按 Settings 构造 RAG Indexer；MinIO/Weaviate/embedding 未就绪时返回 None。"""
     cfg = settings.rag
@@ -394,8 +394,8 @@ def _build_agent_system_prompt(prompt_registry) -> str:
             path=(
                 settings.rag.indexer.domain_profile_path
                 if settings.rag.indexer.domain_profile_path
-                and Path(settings.rag.indexer.domain_profile_path).stem
-                == settings.rag.indexer.master_profile
+                   and Path(settings.rag.indexer.domain_profile_path).stem
+                   == settings.rag.indexer.master_profile
                 else None
             ),
             directory=settings.rag.indexer.domain_profile_dir,
@@ -584,12 +584,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             available=weaviate_ready,
         )
         app.state.chunk_conflict_service = chunk_conflict_service
+        # 启动期权限定义用于工具注册前过滤；请求期仍按用户实际权限过滤。
+        try:
+            registered_permissions = (
+                await PermissionRepository().list_all_codes()
+            )
+        except Exception:  # noqa: BLE001 - 权限表不可读时保留全部工具
+            logger.warning("读取权限码失败，跳过工具注册权限过滤", exc_info=True)
+            registered_permissions = None
         tool_registry = build_tool_registry(
             retriever=rag_retriever,
-            # 只有服务真正可用时才暴露工具，避免模型调到必然失败的工具。
-            conflict_enabled=chunk_conflict_service is not None,
-            search_kb=settings.tools.search_kb,
-            recall_round=settings.tools.recall_round,
+            chunk_conflict_service=chunk_conflict_service,
+            available_permissions=registered_permissions,
+            tools_config=settings.tools,
         )
         app.state.tool_registry = tool_registry
         # 轮次召回工具通过 app.state 共享 PG 仓库，不 import 全局单例。

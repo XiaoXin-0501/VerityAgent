@@ -1,15 +1,19 @@
-"""内置工具注册入口。"""
+"""内置工具实现入口。
 
-from .conflict import ResolveConflictArgs, register_conflict_tool
-from .recall_round import RecallRoundArgs, register_recall_round
-from .search_kb import SearchKbArgs, register_search_kb, search_kb_executor
+本模块只导出参数模型与执行实现；工具描述、权限、暴露策略统一在
+``agent.tools.manifest`` 声明，由 tools bootstrap 装配。
+"""
+
+from .conflict import ResolveConflictArgs, execute_conflict_tool
+from .recall_round import RecallRoundArgs, RecallRoundExecutor
+from .search_kb import SearchKbArgs, build_search_kb_executor, search_kb_executor
 
 __all__ = [
     "SearchKbArgs",
-    "register_search_kb",
+    "build_search_kb_executor",
     "search_kb_executor",
     "ResolveConflictArgs",
-    "register_conflict_tool",
+    "execute_conflict_tool",
     "RecallRoundArgs",
-    "register_recall_round",
+    "RecallRoundExecutor",
 ]

@@ -16,7 +16,13 @@ from exception.tool import ToolNotFoundError, ToolRegistrationError
 from utils.hashing import sha256_json
 
 from .enums import ToolKind
-from .models import RegisteredTool, ToolCatalog, ToolGroup, ToolSpec
+from .models import (
+    RegisteredTool,
+    ToolCatalog,
+    ToolExposureContext,
+    ToolGroup,
+    ToolSpec,
+)
 from .policies import ToolRoutingPolicy
 from .selection import build_selection
 from .validation import (
@@ -137,12 +143,14 @@ class ToolRegistry:
         self,
         permissions: frozenset[str],
         routing: ToolRoutingPolicy | None = None,
+        exposure: ToolExposureContext | None = None,
     ):
-        """按权限生成 ToolSelection；内部使用当前快照。"""
+        """按权限与请求暴露策略生成 ToolSelection；内部使用当前快照。"""
         return build_selection(
             self.snapshot(),
             permissions,
             routing or ToolRoutingPolicy(),
+            exposure,
         )
 
     def clear(self) -> None:

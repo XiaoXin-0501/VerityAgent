@@ -396,6 +396,19 @@ class PermissionRepository(BaseRepository):
             )
         return self._models(UserPermission, rows)
 
+    async def list_all_codes(
+        self,
+        *,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> set[str]:
+        """返回部署中已定义的权限码集合；供启动期工具注册过滤。"""
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                "SELECT permission_code FROM permissions",
+            )
+        return {row["permission_code"] for row in rows}
+
     async def list_codes_for_user(
         self, user_id: UUID | str, *, conn: AsyncConnection[Row] | None = None
     ) -> set[str]:

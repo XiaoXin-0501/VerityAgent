@@ -12,20 +12,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from agent.tools.enums import ToolKind, ToolSideEffect
-from agent.tools.models import ToolContext, ToolError, ToolResult, ToolSpec
-from agent.tools.policies import (
-    CachePolicy,
-    CircuitBreakerPolicy,
-    RateLimitPolicy,
-    ToolPolicy,
-)
-from agent.tools.registry import ToolRegistry
+from agent.tools.models import ToolContext, ToolError, ToolResult
 from config.tools import SearchKbToolConfig
 from exception.tool import ToolErrorCode
 from rag.shared.models import RetrievalRequest
 
-__all__ = ["SearchKbArgs", "register_search_kb", "search_kb_executor"]
+__all__ = ["SearchKbArgs", "build_search_kb_executor", "search_kb_executor"]
 
 logger = logging.getLogger(__name__)
 
@@ -179,17 +171,8 @@ async def search_kb_executor(
     )
 
 
-def register_search_kb(
-    registry: ToolRegistry,
-    retriever: Any | None,
-    *,
-    config: SearchKbToolConfig | None = None,
-) -> None:
-    """注册 ``search_kb``；没有可用 Retriever 时保持不暴露，避免误导 LLM。"""
-    if retriever is None:
-        logger.info("RAG Retriever 未就绪，跳过 search_kb 注册")
-        return
-
+def build_search_kb_executor(config: SearchKbToolConfig | None = None):
+    """构造 ``search_kb`` 执行器；Spec/策略由 tools.manifest 统一声明。"""
     policy = config or SearchKbToolConfig()
 
     async def _executor(
@@ -204,33 +187,4 @@ def register_search_kb(
         )
         return await search_kb_executor(parsed, bound, config=policy)
 
-    registry.register_tool(
-        ToolSpec(
-            name="search_kb",
-            description=(
-                "在当前已绑定的知识库中检索相关片段。用户询问领域知识、"
-                "事实、文档内容或需要引用依据时优先使用；返回片段和引用。"
-            ),
-            group="kb",
-            kind=ToolKind.EXECUTABLE,
-            side_effect=ToolSideEffect.READ,
-            policy=ToolPolicy(
-                # 检索结果由 RAG 的 RetrievalCache 负责（key 已包含改写 query/
-                # 召回意图/索引版本/权限）；工具层再缓存会掩盖规划字段变化，
-                # 因此这里只保留熔断与限流。
-                cache=CachePolicy(enabled=False),
-                circuit_breaker=CircuitBreakerPolicy(enabled=True),
-                rate_limit=RateLimitPolicy(
-                    enabled=True,
-                    max_calls=policy.rate_limit_calls,
-                    window_s=policy.rate_limit_window_s,
-                ),
-            ),
-            tags=["rag", "knowledge"],
-            # 不声明权限范围缓存：工具层缓存已关闭，检索缓存由 RAG 负责。
-            metadata={},
-        ),
-        _executor,
-        argument_model=SearchKbArgs,
-        source="builtin",
-    )
+    return _executor

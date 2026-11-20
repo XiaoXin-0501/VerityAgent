@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from agent.tools.enums import ToolKind
-from agent.tools.models import ToolContext, ToolResult, ToolSelection
+from agent.tools.models import (
+    ToolContext,
+    ToolExposureContext,
+    ToolResult,
+    ToolSelection,
+)
 from agent.tools.pipeline import ToolPipeline
 from agent.tools.policies import ToolRoutingPolicy
 from agent.tools.registry import ToolRegistry
@@ -27,15 +32,26 @@ class PipelineToolAdapter:
         self.pipeline = pipeline
         self.routing = ToolRoutingPolicy.from_config(config.routing)
 
-    def select(self, permissions: frozenset[str]) -> ToolSelection:
-        """按权限生成一次运行的暴露工具集合。"""
-        return self.registry.for_permissions(permissions, self.routing)
+    def select(
+        self,
+        permissions: frozenset[str],
+        *,
+        exposure: ToolExposureContext | None = None,
+    ) -> ToolSelection:
+        """按权限与本次请求暴露策略生成工具集合。"""
+        return self.registry.for_permissions(
+            permissions,
+            self.routing,
+            exposure,
+        )
 
     def activate_group(
         self,
         selection: ToolSelection,
         router_name: str,
         permissions: frozenset[str],
+        *,
+        exposure: ToolExposureContext | None = None,
     ) -> ToolSelection:
         """router 工具调用后展开组内工具；非 router 返回原 selection。"""
         registered = self.registry.get(router_name)
@@ -49,6 +65,7 @@ class PipelineToolAdapter:
             selection,
             group_name,
             permissions,
+            exposure,
         )
 
     async def execute_batch(

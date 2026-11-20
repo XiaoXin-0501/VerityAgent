@@ -15,7 +15,14 @@ from typing import Any
 
 from exception.tool import ToolArgumentValidationError, ToolPermissionDeniedError
 
-from .models import TEMPLATE_FIELD_RE, ToolCatalog, ToolGroup, ToolSpec
+from .enums import ToolExposureMode
+from .models import (
+    TEMPLATE_FIELD_RE,
+    ToolCatalog,
+    ToolExposureContext,
+    ToolGroup,
+    ToolSpec,
+)
 
 __all__ = [
     "has_required_permission",
@@ -37,15 +44,38 @@ def has_required_permission(
     )
 
 
-def spec_allowed(spec: ToolSpec, permissions: frozenset[str]) -> bool:
-    """工具是否可暴露：启用 + 静态权限通过。"""
-    return spec.enabled and has_required_permission(spec, permissions)
+def exposure_allowed(
+    spec: ToolSpec,
+    exposure: ToolExposureContext | None,
+) -> bool:
+    """按单次请求上下文判断工具暴露策略；权限不参与这里。"""
+    if exposure is None:
+        return True
+    if spec.exposure == ToolExposureMode.RAG_REQUIRED:
+        return exposure.rag_required
+    if spec.exposure == ToolExposureMode.AFTER_COMPRESSIONS:
+        return exposure.compression_count >= spec.min_compressions
+    return True
+
+
+def spec_allowed(
+    spec: ToolSpec,
+    permissions: frozenset[str],
+    exposure: ToolExposureContext | None = None,
+) -> bool:
+    """工具是否可暴露：启用 + 静态权限通过 + 请求暴露策略通过。"""
+    return (
+        spec.enabled
+        and has_required_permission(spec, permissions)
+        and exposure_allowed(spec, exposure)
+    )
 
 
 def group_allowed(
     group: ToolGroup,
     catalog: ToolCatalog,
     permissions: frozenset[str],
+    exposure: ToolExposureContext | None = None,
 ) -> bool:
     """组是否可暴露：组启用、组权限通过，且至少一个组内工具可用。"""
     if not group.enabled:
@@ -57,7 +87,7 @@ def group_allowed(
         return False
     for name in group.tool_names:
         tool = catalog.tools.get(name)
-        if tool is not None and spec_allowed(tool.spec, permissions):
+        if tool is not None and spec_allowed(tool.spec, permissions, exposure):
             return True
     return False
 
