@@ -182,6 +182,59 @@ def _sanitize_source_ids(
     return payload
 
 
+def _split_turns(rows: list[Any]) -> list[list[Any]]:
+    """按用户消息边界切完整回合；首条 assistant/tool 归入当前回合。"""
+    turns: list[list[Any]] = []
+    current: list[Any] = []
+    for row in rows:
+        role = getattr(getattr(row, "role", None), "value", None)
+        if role == "user" and current:
+            turns.append(current)
+            current = []
+        current.append(row)
+    if current:
+        turns.append(current)
+    return turns
+
+
+def _row_tokens(row: Any) -> int:
+    """估算一条待压缩消息的 content token。"""
+    return estimate_tokens(extract_content_text(getattr(row, "content", None)))
+
+
+def _keep_turns(turns: list[list[Any]], config: MemoryConfig) -> int:
+    """按窗口回合数与最近回合长度动态决定压缩后保留几轮。
+
+    规则与《记忆模块数据结构设计》§4.3 一致：
+    - 窗口 < 3 轮：保留 0 轮；
+    - 3~4 轮：最近一轮长度合适保留 1 轮，否则 0；
+    - >= 5 轮：最近两轮都合适且合计不超上限保留 2 轮，否则最近一轮合适
+      保留 1 轮，否则 0。
+    始终至少压掉 1 轮，避免没有可推进的水位线。
+    """
+    count = len(turns)
+    if count <= 1:
+        return 0
+    latest = sum(_row_tokens(row) for row in turns[-1])
+    if count < config.compression_keep_zero_below_turns:
+        keep = 0
+    elif count < config.compression_keep_one_below_turns:
+        keep = 1 if latest <= config.compression_keep_turn_max_tokens else 0
+    else:
+        previous = sum(_row_tokens(row) for row in turns[-2])
+        if (
+            latest <= config.compression_keep_turn_max_tokens
+            and previous <= config.compression_keep_turn_max_tokens
+            and latest + previous <= config.compression_keep_pair_max_tokens
+        ):
+            keep = 2
+        elif latest <= config.compression_keep_turn_max_tokens:
+            keep = 1
+        else:
+            keep = 0
+    return max(0, min(keep, config.compression_keep_recent_turns_max, count - 1))
+
+
 class CompressionService:
     """回合后异步压缩会话摘要。"""
 
@@ -223,22 +276,16 @@ class CompressionService:
             conversation_id,
             after_seq=covered,
         )
-        keep = self.config.compression_keep_recent_messages
-        # 只在“用户消息”边界切分，避免把 assistant/tool 链从中间截断。
-        user_indexes = [
-            index
-            for index, row in enumerate(rows)
-            if getattr(getattr(row, "role", None), "value", None) == "user"
-        ]
-        if len(user_indexes) <= keep:
+        # 按用户提问切完整回合；压缩/保留都不能拆 assistant/tool 链。
+        turns = _split_turns(rows)
+        keep_turns = _keep_turns(turns, self.config)
+        if len(turns) <= keep_turns:
             return False
-        compressible = rows[: user_indexes[-keep]]
+        compressible_turns = turns[: len(turns) - keep_turns] if keep_turns else turns
+        compressible = [row for turn in compressible_turns for row in turn]
         if not compressible:
             return False
-        tokens = sum(
-            estimate_tokens(extract_content_text(row.content))
-            for row in compressible
-        )
+        tokens = sum(_row_tokens(row) for row in compressible)
         if tokens < self.config.compression_trigger_tokens:
             return False
 

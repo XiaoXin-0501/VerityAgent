@@ -129,6 +129,19 @@ class MessagePort(Protocol):
         """读取 ``seq_no`` 之后的消息；幂等命中时重建已有回合。"""
         ...
 
+    async def load_recent_after(
+        self,
+        conversation_id: UUID,
+        seq_no: int,
+        *,
+        limit: int = 400,
+    ) -> list[StoredMessage]:
+        """读取 ``seq_no`` 之后最近的 N 条消息，按 seq 升序返回。
+
+        上下文工作窗口使用本方法；实现方不能返回该区间最老的 N 条。
+        """
+        ...
+
 
 class LLMPort(Protocol):
     """LLM 应用层端口；Agent 不直接 import provider。"""

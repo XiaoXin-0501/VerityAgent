@@ -1,8 +1,9 @@
 """长期记忆画像抽取 Worker。
 
-消费 ``user_messages`` 队列：同一用户的一批消息 + 当前 7 段画像交给小模型，
-模型输出**增量**画像补丁（只含变化段）和新原子事实；代码按段覆盖写回
-``user_memory``（乐观锁），事实逐条 upsert 到 Weaviate，成功后删除暂存行。
+消费 ``user_messages`` 队列：同一用户的一批消息 + 当前 7 段画像 + 相关既有事实
+候选交给小模型，模型输出**增量**画像补丁、新原子事实以及事实冲突结论；
+代码按段覆盖写回 ``user_memory``（乐观锁），事实按冲突结论逐条 upsert 到
+Weaviate，成功后删除暂存行。
 """
 
 from __future__ import annotations
@@ -67,7 +68,6 @@ class MemoryProfileWorker:
         memory_repository: UserMemoryRepository | None = None,
         hook_dispatcher: Any | None = None,
         facts_store: Any | None = None,
-        conflict_service: Any | None = None,
         prompts: PromptRegistry | None = None,
     ) -> None:
         """保存模型、仓库、Prompt 注册表与可选 Hook dispatcher；不建立连接。"""
@@ -78,7 +78,6 @@ class MemoryProfileWorker:
         self.memories = memory_repository or UserMemoryRepository()
         self.hook_dispatcher = hook_dispatcher
         self.facts_store = facts_store
-        self.conflict_service = conflict_service
         self.prompts = prompts or get_default_prompt_registry()
         self.system_prompt = self.prompts.render_text(
             PromptId.MEMORY_EXTRACTION_SYSTEM
@@ -140,7 +139,8 @@ class MemoryProfileWorker:
         try:
             current = await self.memories.get_or_create(user_id)
             content_text = messages_text(items, self.config.extraction_max_input_tokens)
-            data = await self._extract(current.value, content_text)
+            candidates = await self._load_fact_candidates(user_id, content_text)
+            data = await self._extract(current.value, content_text, candidates)
             fact_count: int | None = None
             facts_written = 0
             if self.facts_store is not None and self.config.fact_write_enabled:
@@ -152,6 +152,7 @@ class MemoryProfileWorker:
                     facts_written = await self._apply_facts(
                         user_id=user_id,
                         facts=facts,
+                        candidates=candidates,
                         allowed_msg_ids={
                             str(item.message_id) for item in items
                         },
@@ -206,26 +207,94 @@ class MemoryProfileWorker:
                 "status": "failed",
             })
 
+    async def _load_fact_candidates(
+        self,
+        user_id: UUID,
+        content_text: str,
+    ) -> list[dict[str, Any]]:
+        """用本批消息 BM25 召回既有事实，供抽取 Prompt 一并判断冲突。
+
+        只回喂有限候选而不是全部 150 条，避免画像/消息输入被事实列表挤爆。
+        召回失败不影响抽取，模型按无既有事实继续。
+        """
+        limit = int(self.config.extraction_fact_candidates)
+        if not self.facts_store or not self.config.fact_write_enabled or limit <= 0:
+            return []
+        query = content_text.strip()
+        if not query:
+            return []
+        try:
+            # 取最近一段消息作为 BM25 query；用户最新表达通常比更早寒暄更能
+            # 命中需要判断的偏好/属性事实。
+            raw = await self.facts_store.find_similar(
+                user_id=user_id,
+                content=query[-4000:],
+                limit=limit,
+            )
+            # 只回喂冲突判断需要的字段，避免 score/status 等噪声挤占抽取输入。
+            fields = (
+                "id",
+                "content",
+                "category",
+                "confidence",
+                "confirmation_count",
+                "last_confirmed_at",
+                "context",
+                "scope",
+            )
+            return [
+                {key: item.get(key) for key in fields}
+                for item in raw
+                if item.get("id") and item.get("content")
+            ]
+        except Exception:  # noqa: BLE001 - 候选召回失败不阻断抽取
+            logger.warning("事实候选召回失败，按无冲突候选继续", exc_info=True)
+            return []
+
     async def _apply_facts(
         self,
         *,
         user_id: UUID,
         facts: list[dict[str, Any]],
+        candidates: list[dict[str, Any]],
         allowed_msg_ids: set[str],
         default_source_msg_ids: list[str],
         message_times: Mapping[str, str],
     ) -> int:
-        """写入事实；冲突判定结果决定覆盖、合并或部分改写。
+        """按抽取模型直接给出的冲突结论增量写入事实。
 
-        逐条写入让 ``source_msg_ids`` 精确到单条用户消息；直接覆盖/合并/
-        部分冲突通过“写入新内容 + 旧事实 supersede”落库，保留审计痕迹，
-        但活跃事实只有用户最新的表达。
+        事实冲突不再单独调用规则/第二个 LLM：
+        - ``none``：新增事实；
+        - ``override``：写入新事实并 supersede 旧事实；
+        - ``merge``：把旧事实替换为模型给的 ``target_content``（确认次数重置 1）；
+        - ``partial_conflict``：旧事实替换为 ``target_content``，同时新增本次
+          被否定/补充的 ``content``。
+        所有 target id 必须来自抽取时回喂的候选集，模型编造的 id 按新增处理。
         """
         assert self.facts_store is not None
         written = 0
         for fact in facts:
             content = str(fact.get("content") or "").strip()
-            if not content:
+            target_content = str(
+                fact.get("target_content") or fact.get("merged_content") or ""
+            ).strip()
+            conflict_type = str(
+                fact.get("conflict_type") or "none"
+            ).strip().lower()
+            # 兼容滚动发布期间旧版抽取输出；新版只输出四种类型。
+            conflict_type = {
+                "direct_override": "override",
+                "supersede": "override",
+                "duplicate": "none",
+                "compatible": "none",
+                "unresolved": "none",
+            }.get(conflict_type, conflict_type)
+            if conflict_type not in {"none", "override", "merge", "partial_conflict"}:
+                conflict_type = "none"
+            if conflict_type in {"merge", "partial_conflict"}:
+                if not target_content and not content:
+                    continue
+            elif not content:
                 continue
             written += 1
             sources = _fact_sources(
@@ -240,6 +309,7 @@ class MemoryProfileWorker:
                 *,
                 status: str = "active",
                 confidence: float | None = None,
+                confirmation_count: int | None = None,
             ) -> None:
                 """写入一条事实；空内容或同内容重复跳过。"""
                 text = fact_content.strip()
@@ -254,6 +324,7 @@ class MemoryProfileWorker:
                     source_msg_ids=sources,
                     confirmed_at=confirmed_at,
                     status=status,
+                    confirmation_count=confirmation_count,
                 )
 
             async def supersede(target_id: str | None, new_content: str) -> None:
@@ -268,89 +339,55 @@ class MemoryProfileWorker:
                         new_fact_id=new_id,
                     )
 
-            if self.conflict_service is None:
-                await write(content)
-                continue
-
-            candidates = await self.facts_store.find_similar(
-                user_id=user_id,
-                content=content,
-                limit=self.conflict_service.max_candidates,
-            )
-            decision = await self.conflict_service.decide(
-                # observed_at 让模型能按“后出现的事实优先”判断，
-                # 而不是只看候选的确认时间。
-                new_fact={**fact, "observed_at": confirmed_at},
-                candidates=candidates,
-            )
-            target = next(
-                (
-                    item
-                    for item in candidates
-                    if str(item.get("id")) == str(decision.target_id or "")
-                ),
-                None,
-            )
-            kind = decision.decision
-            if kind == "unresolved":
-                # 证据不足：新事实与候选都置 disputed，等待下次对话确认。
-                await write(content, status="disputed")
-                mark_disputed = getattr(self.facts_store, "mark_disputed", None)
-                if decision.target_id and callable(mark_disputed):
-                    await mark_disputed(
-                        user_id=user_id,
-                        fact_ids=[decision.target_id],
-                    )
-                continue
-            if kind == "duplicate":
-                # 同义确认：沿用候选正文，合并证据与确认计数。
-                await write(str((target or {}).get("content") or content))
-                continue
-            if kind in {"direct_override", "merge", "supersede"}:
-                merged = (decision.merged_content or content).strip()
-                if target is None:
-                    # 模型给了不存在的 target：保守按新增事实处理。
-                    await write(merged)
-                    continue
-                confidence = (
-                    max(
-                        float(fact.get("confidence") or 0.5),
-                        float((target or {}).get("confidence") or 0.0),
-                    )
-                    if kind == "merge"
-                    else float(fact.get("confidence") or 0.5)
+            target_key = str(
+                fact.get("target_fact_id") or fact.get("target_id") or ""
+            ).strip().lower()
+            target_fact = (
+                next(
+                    (
+                        item
+                        for item in candidates
+                        if str(item.get("id") or "").strip().lower() == target_key
+                    ),
+                    None,
                 )
-                await write(merged, confidence=confidence)
-                await supersede(str(target.get("id") or ""), merged)
-                continue
-            if kind == "partial_conflict":
-                old_content = (
-                    decision.merged_content
-                    or str((target or {}).get("content") or "")
-                ).strip()
-                if target is not None and old_content:
-                    # 改写旧事实：写入修订后的内容并 supersede 旧事实。
-                    await write(
-                        old_content,
-                        confidence=float(target.get("confidence") or 0.5),
-                    )
-                    await supersede(str(target.get("id") or ""), old_content)
-                new_content = (decision.new_content or "").strip()
-                if new_content:
-                    # 部分否定产生的新事实单独保留。
-                    await write(new_content)
-                elif content.strip() and content.strip() != old_content:
-                    # 模型漏填 new_content 时，至少保留本次新事实本身。
+                if target_key
+                else None
+            )
+            target_id = str((target_fact or {}).get("id") or "")
+            if conflict_type in {"merge", "partial_conflict"}:
+                if target_fact is None or not target_content:
+                    # 模型给了不存在的 target 或漏填改写正文：保守按新增处理，
+                    # 不能误覆盖用户历史事实。
+                    await write(content or target_content)
+                    continue
+                await write(target_content, confirmation_count=1)
+                await supersede(target_id, target_content)
+                if (
+                    conflict_type == "partial_conflict"
+                    and content
+                    and content != target_content
+                ):
                     await write(content)
                 continue
-            # compatible / 其他未知结果：作为一条可同时成立的新事实。
+            if conflict_type == "override" and target_fact is not None:
+                await write(content)
+                await supersede(target_id, content)
+                continue
+            # none / target 不存在 / 未知类型：按新增事实处理。
             await write(content)
         return written
 
-    async def _extract(self, current: MemoryValue, content_text: str) -> dict[str, Any]:
-        """调用小模型生成画像更新字段（只返回解析后的 JSON）。"""
+    async def _extract(
+        self,
+        current: MemoryValue,
+        content_text: str,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """调用小模型生成画像更新、事实与事实冲突结论（只返回解析后的 JSON）。"""
         payload = {
             "current_profile": current.model_dump(mode="json", by_alias=True),
+            "existing_facts": candidates,
             "new_messages": content_text,
         }
         request = ChatModelRequest(

@@ -1,4 +1,4 @@
-"""UserFact Weaviate 适配器（只读召回）。"""
+"""UserFact Weaviate 适配器（召回/写入/软删除/数量对账）。"""
 
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ class WeaviateFactStore:
                     "confirmation_count": int(
                         props.get("confirmation_count") or 0
                     ),
-                    "last_confirmed_at": props.get("last_confirmed_at"),
-                    "created_at": props.get("created_at"),
-                    "updated_at": props.get("updated_at"),
+                    "last_confirmed_at": _iso(props.get("last_confirmed_at")),
+                    "created_at": _iso(props.get("created_at")),
+                    "updated_at": _iso(props.get("updated_at")),
                     "status": props.get("status"),
                     "source_type": props.get("source_type"),
                     "score": float(getattr(metadata, "score", 0.0) or 0.0),
@@ -115,9 +115,9 @@ class WeaviateFactStore:
                     "confirmation_count": int(
                         props.get("confirmation_count") or 0
                     ),
-                    "last_confirmed_at": props.get("last_confirmed_at"),
-                    "created_at": props.get("created_at"),
-                    "updated_at": props.get("updated_at"),
+                    "last_confirmed_at": _iso(props.get("last_confirmed_at")),
+                    "created_at": _iso(props.get("created_at")),
+                    "updated_at": _iso(props.get("updated_at")),
                     "context": props.get("context"),
                     "scope": props.get("scope"),
                     "source_type": props.get("source_type"),
@@ -165,12 +165,16 @@ class WeaviateFactStore:
         source_msg_ids: list[str],
         confirmed_at: str | None = None,
         status: str = "active",
+        confirmation_count: int | None = None,
     ) -> int:
         """按确定性 id 写入/更新事实；返回处理条数。
 
         ``confirmed_at`` 是该事实证据消息的时间；缺省使用当前时间。更新时
         ``last_confirmed_at`` 取旧值与新证据时间的较大者。``status`` 默认
-        active；冲突判定为 unresolved 时写入 disputed。
+        active；disputed 供后台标记待确认。
+
+        ``confirmation_count`` 非空时用于“合并/部分冲突改写旧事实”：证据只
+        取本次消息，确认次数按调用方要求重置（通常为 1）。
         """
         if not facts:
             return 0
@@ -191,6 +195,7 @@ class WeaviateFactStore:
                 now=now,
                 confirmed_at=confirmed,
                 status=status,
+                confirmation_count=confirmation_count,
             )
             try:
                 existing = await self.store.maybe_to_thread(
@@ -207,23 +212,37 @@ class WeaviateFactStore:
                 )
             else:
                 old = dict(getattr(existing, "properties", {}) or {})
-                merged_sources = sorted(
-                    {
-                        *(str(item) for item in old.get("source_msg_ids") or []),
-                        *source_msg_ids,
-                    }
-                )
-                old_confirmed = str(old.get("last_confirmed_at") or "")
+                if confirmation_count is not None:
+                    # 合并/部分冲突改写：只保留本次证据，确认次数按调用方
+                    # 重置，避免把旧事实的多次确认带入新语义。
+                    merged_sources = sorted(
+                        {str(item) for item in source_msg_ids if str(item)}
+                    )
+                    last_confirmed = confirmed
+                else:
+                    merged_sources = sorted(
+                        {
+                            *(
+                                str(item)
+                                for item in old.get("source_msg_ids") or []
+                            ),
+                            *source_msg_ids,
+                        }
+                    )
+                    last_confirmed = _max_iso(
+                        str(old.get("last_confirmed_at") or ""),
+                        confirmed,
+                    )
                 properties.update(
                     {
                         "revision": int(old.get("revision") or 0) + 1,
                         "source_msg_ids": merged_sources,
-                        "confirmation_count": len(merged_sources),
-                        # 证据时间是消息时间，可能早于上次写入；保持单调不回退。
-                        "last_confirmed_at": _max_iso(
-                            old_confirmed,
-                            confirmed,
+                        "confirmation_count": (
+                            max(1, int(confirmation_count))
+                            if confirmation_count is not None
+                            else len(merged_sources)
                         ),
+                        "last_confirmed_at": last_confirmed,
                         "created_at": old.get("created_at") or now,
                     }
                 )
@@ -298,73 +317,6 @@ class WeaviateFactStore:
         ]
         return await self.deprecate_facts(user_id=user_id, fact_ids=ids)
 
-    async def mark_disputed(
-        self,
-        *,
-        user_id: Any,
-        fact_ids: list[str],
-    ) -> int:
-        """把事实标记为 disputed；用于冲突判定 unresolved 的两条事实。"""
-        collection = self.store.user_facts
-        now = utcnow().isoformat()
-        changed = 0
-        for fact_id in fact_ids:
-            try:
-                existing = await self.store.maybe_to_thread(
-                    collection.query.fetch_object_by_id,
-                    fact_id,
-                )
-                if existing is None or str(
-                    (getattr(existing, "properties", {}) or {}).get("user_id")
-                ) != str(user_id):
-                    continue
-                await self.store.maybe_to_thread(
-                    collection.data.update,
-                    uuid=fact_id,
-                    properties={
-                        "status": "disputed",
-                        "updated_at": now,
-                    },
-                )
-                changed += 1
-            except Exception:  # noqa: BLE001 - 标记失败不阻断新事实写入
-                logger.warning("事实置 disputed 失败: %s", fact_id, exc_info=True)
-        return changed
-
-    async def penalize_facts(        self,
-        *,
-        user_id: Any,
-        fact_ids: list[str],
-        delta: float = 0.1,
-        disputed_threshold: float = 0.4,
-    ) -> int:
-        """下调事实置信度；低于阈值置 disputed，返回修改条数。"""
-        collection = self.store.user_facts
-        changed = 0
-        now = utcnow().isoformat()
-        for fact_id in fact_ids:
-            existing = await self.store.maybe_to_thread(
-                collection.query.fetch_object_by_id,
-                fact_id,
-            )
-            props = dict(getattr(existing, "properties", {}) or {}) if existing else {}
-            if not existing or str(props.get("user_id")) != str(user_id):
-                continue
-            old = float(props.get("confidence") or 0.0)
-            confidence = max(0.0, old - max(0.0, float(delta)))
-            status = "disputed" if confidence < disputed_threshold else props.get("status", "active")
-            await self.store.maybe_to_thread(
-                collection.data.update,
-                uuid=fact_id,
-                properties={
-                    "confidence": confidence,
-                    "status": status,
-                    "updated_at": now,
-                },
-            )
-            changed += 1
-        return changed
-
     async def count_active(self, *, user_id: Any) -> int:
         """统计用户 active 事实数；用于 PG fact_count 对账。"""
         from weaviate.classes.query import Filter
@@ -379,6 +331,20 @@ class WeaviateFactStore:
             filters=where,
         )
         return int(getattr(result, "total_count", 0) or 0)
+
+
+def _iso(value: Any) -> str | None:
+    """把 Weaviate date 属性归一为 ISO 字符串，供 JSON/LLM 安全消费。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    text = str(value).strip()
+    return text or None
 
 
 def _max_iso(left: str, right: str) -> str:
@@ -402,6 +368,7 @@ def _fact_properties(
     now: str,
     confirmed_at: str,
     status: str = "active",
+    confirmation_count: int | None = None,
 ) -> dict[str, Any]:
     """把抽取 fact 规范成 UserFact properties。"""
     confidence = float(fact.get("confidence") or 0.5)
@@ -410,13 +377,18 @@ def _fact_properties(
     if category not in {"work", "personal", "preference", "constraint", "goal", "history"}:
         category = "history"
     sources = sorted({str(item) for item in source_msg_ids if str(item)})
+    count = (
+        max(1, int(confirmation_count))
+        if confirmation_count is not None
+        else len(sources)
+    )
     return {
         "user_id": str(user_id),
         "revision": 0,
         "content": content,
         "category": category,
         "confidence": confidence,
-        "confirmation_count": len(sources),
+        "confirmation_count": count,
         "last_confirmed_at": confirmed_at,
         "source_msg_ids": sources,
         "context": fact.get("context"),

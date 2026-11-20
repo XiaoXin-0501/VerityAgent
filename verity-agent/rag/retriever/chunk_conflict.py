@@ -61,7 +61,7 @@ class ChunkConflictService:
         store: WeaviateStore | None = None,
         documents: DocumentRepository | None = None,
         timeout_s: float = 20.0,
-        max_output_tokens: int = 512,
+        max_output_tokens: int = 1024,
         neighbor_window: int = 1,
         prompts: PromptRegistry | None = None,
     ) -> None:
@@ -118,12 +118,18 @@ class ChunkConflictService:
         except Exception:  # noqa: BLE001 - 冲突处理失败降级为确定性摘要
             logger.warning("chunk 冲突 LLM 处理失败，使用降级摘要", exc_info=True)
             result = self._fallback(chunks, conflict_type)
-        allowed_ids = {str(item.get("chunk_id") or "") for item in chunks}
-        result["preferred_chunk_ids"] = [
-            item
-            for item in result.get("preferred_chunk_ids") or []
-            if str(item) in allowed_ids
-        ]
+        allowed_ids = {
+            str(item.get("chunk_id") or "").strip().lower(): str(
+                item.get("chunk_id") or ""
+            )
+            for item in chunks
+        }
+        preferred: list[str] = []
+        for item in result.get("preferred_chunk_ids") or []:
+            canonical = allowed_ids.get(str(item).strip().lower())
+            if canonical and canonical not in preferred:
+                preferred.append(canonical)
+        result["preferred_chunk_ids"] = preferred
         return result
 
     async def _call_model(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -139,7 +145,11 @@ class ChunkConflictService:
                     role=ModelRole.USER,
                     content=[
                         ModelTextPart(
-                            text=json.dumps(payload, ensure_ascii=False)
+                            text=json.dumps(
+                                payload,
+                                ensure_ascii=False,
+                                default=str,
+                            )
                         )
                     ],
                 ),
@@ -175,11 +185,14 @@ class ChunkConflictService:
         """按 id 读取 chunk 与文档元数据；过滤无权 KB。"""
         collection = self.store.doc_chunks
         results: list[dict[str, Any]] = []
+        # 同一文档可能贡献多个冲突片段，文档元数据只查一次。
+        doc_cache: dict[str, Any | None] = {}
         for chunk_id in chunk_ids:
             try:
                 obj = await self.store.maybe_to_thread(
                     collection.query.fetch_object_by_id,
                     chunk_id,
+                    return_properties=_CHUNK_PROPERTIES,
                 )
             except Exception:  # noqa: BLE001 - 单个坏 id 不影响其它片段
                 obj = None
@@ -190,7 +203,9 @@ class ChunkConflictService:
             if not _can_read(permissions, kb_id):
                 continue
             doc_id = str(props.get("doc_id") or "")
-            doc = await self._get_document(doc_id)
+            if doc_id not in doc_cache:
+                doc_cache[doc_id] = await self._get_document(doc_id)
+            doc = doc_cache[doc_id]
             results.append(
                 {
                     "chunk_id": str(getattr(obj, "uuid", chunk_id)),
@@ -204,7 +219,7 @@ class ChunkConflictService:
                     "heading": props.get("heading"),
                     "chunk_index": props.get("chunk_index"),
                     "quality_score": props.get("quality_score"),
-                    "created_at": props.get("created_at"),
+                    "created_at": _iso(props.get("created_at")),
                     "content": props.get("content_zh")
                     or props.get("content_en")
                     or "",
@@ -225,20 +240,37 @@ class ChunkConflictService:
         """取同文档相邻 chunk，供观点冲突时补充上下文。"""
         if self.neighbor_window <= 0 or not chunk.get("doc_id"):
             return []
+        index = chunk.get("chunk_index")
+        if not isinstance(index, int):
+            return []
         try:
             from weaviate.classes.query import Filter
 
             collection = self.store.doc_chunks
+            # 同时限定文档、索引版本和 chunk_index 区间：文档重灌后同一
+            # doc_id 可能残留多个版本的 chunk，不能把旧版邻居当上下文。
+            where = Filter.by_property("doc_id").equal(str(chunk["doc_id"]))
+            version = chunk.get("index_version")
+            if version is not None:
+                try:
+                    where = where & Filter.by_property("index_version").equal(
+                        int(version)
+                    )
+                except (TypeError, ValueError):
+                    pass
+            where = where & Filter.by_property("chunk_index").greater_or_equal(
+                index - self.neighbor_window
+            )
+            where = where & Filter.by_property("chunk_index").less_or_equal(
+                index + self.neighbor_window
+            )
             response = await self.store.maybe_to_thread(
                 collection.query.fetch_objects,
-                filters=Filter.by_property("doc_id").equal(str(chunk["doc_id"])),
-                limit=200,
+                filters=where,
+                limit=max(4, self.neighbor_window * 2 + 2),
                 return_properties=_CHUNK_PROPERTIES,
             )
         except Exception:  # noqa: BLE001 - 邻居失败不影响主片段
-            return []
-        index = chunk.get("chunk_index")
-        if not isinstance(index, int):
             return []
         neighbors: list[dict[str, str]] = []
         for obj in getattr(response, "objects", []) or []:
@@ -273,7 +305,7 @@ class ChunkConflictService:
         chunks: list[dict[str, Any]],
         conflict_type: str,
     ) -> dict[str, Any]:
-        """LLM 不可用时的确定性摘要：列冲突 + 按较新/质量优先。"""
+        """LLM 不可用时的确定性摘要：列出冲突，并按类型给出保守结论。"""
         def rank(item: dict[str, Any]) -> tuple:
             stamp = item.get("doc_updated_at") or item.get("doc_created_at") or ""
             quality = float(item.get("quality_score") or 0.0)
@@ -286,16 +318,31 @@ class ChunkConflictService:
         for item in chunks:
             excerpt = str(item.get("content") or "").strip().replace("\n", " ")[:180]
             lines.append(f"- 《{item.get('doc_name')}》：{excerpt}")
-        lines.append(
-            f"按文档更新时间/质量分优先，建议以《{preferred.get('doc_name')}》"
-            f"的记载为准；如冲突仍影响结论，请提供更多上下文以便进一步核实。"
-        )
-        if conflict_type == "viewpoint":
-            lines.append("如果两种说法来自不同观点或经验，建议分别说明其来源与适用背景。")
+        if conflict_type == "ambiguous":
+            lines.append(
+                "现有片段信息不足以可靠判断哪一方正确；请补充适用范围、"
+                "数据口径或时间信息后再确认。"
+            )
+            resolution = "clarify"
+            preferred_ids: list[str] = []
+        elif conflict_type == "viewpoint":
+            lines.append(
+                "两种说法可能来自不同观点或适用背景，建议分别说明其来源，"
+                "不要在没有依据时强行合并。"
+            )
+            resolution = "synthesized"
+            preferred_ids = []
+        else:
+            lines.append(
+                f"按文档更新时间/质量分优先，建议以《{preferred.get('doc_name')}》"
+                f"的记载为准；如冲突仍影响结论，请提供更多上下文以便进一步核实。"
+            )
+            resolution = "factual_newer"
+            preferred_ids = [str(preferred.get("chunk_id") or "")]
         return {
             "answer": "\n".join(lines),
-            "resolution": "factual_newer" if conflict_type == "factual" else "synthesized",
-            "preferred_chunk_ids": [str(preferred.get("chunk_id") or "")],
+            "resolution": resolution,
+            "preferred_chunk_ids": preferred_ids,
             "conflict_summary": "文档片段之间存在冲突，已按元数据降级判断",
         }
 

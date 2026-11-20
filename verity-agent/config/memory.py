@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .base import ConfigModel
 
@@ -36,6 +36,8 @@ class MemoryConfig(ConfigModel):
     profile_source_msg_limit: int = Field(default=20, ge=1)
     # 画像抽取输出 token 上限
     extraction_max_output_tokens: int = Field(default=1024, ge=128)
+    # 抽取前用本批消息 BM25 回喂的既有事实候选数；0 表示不回喂
+    extraction_fact_candidates: int = Field(default=20, ge=0)
 
     # 是否启用回合后会话摘要压缩
     compression_enabled: bool = False
@@ -43,8 +45,16 @@ class MemoryConfig(ConfigModel):
     compression_model_id: str | None = None
     # 工作窗口估算 token 超过该值才压缩
     compression_trigger_tokens: int = Field(default=6000, ge=256)
-    # 压缩后保留最近消息数
-    compression_keep_recent_messages: int = Field(default=10, ge=1)
+    # 压缩后最多保留的完整回合数
+    compression_keep_recent_turns_max: int = Field(default=2, ge=0)
+    # 窗口完整回合数低于该值：压缩后不保留原始回合
+    compression_keep_zero_below_turns: int = Field(default=3, ge=1)
+    # 窗口完整回合数低于该值：最多保留 1 个完整回合
+    compression_keep_one_below_turns: int = Field(default=5, ge=2)
+    # 单回合“长度合适”的 token 上限
+    compression_keep_turn_max_tokens: int = Field(default=2048, ge=128)
+    # 最近两回合合计 token 上限
+    compression_keep_pair_max_tokens: int = Field(default=4096, ge=128)
     # 压缩输入消息/摘要的最大 token
     compression_max_input_tokens: int = Field(default=8000, ge=256)
     # 压缩输出 token 上限
@@ -74,16 +84,6 @@ class MemoryConfig(ConfigModel):
     fact_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     # 是否把抽取结果写入 Weaviate UserFact
     fact_write_enabled: bool = False
-    # 是否启用事实冲突判定（规则优先，必要时 LLM 兜底）
-    fact_conflict_enabled: bool = False
-    # 冲突判定模型 id；为空使用默认 chat
-    fact_conflict_model_id: str | None = None
-    # 冲突判定候选事实数
-    fact_conflict_max_candidates: int = Field(default=10, ge=1)
-    # 冲突判定 LLM 超时（秒）
-    fact_conflict_timeout_s: float = Field(default=20.0, gt=0)
-    # 冲突判定 LLM 输出 token 上限（只输出简短 JSON 决策）
-    fact_conflict_max_output_tokens: int = Field(default=128, ge=16)
 
     # 是否启动用户跨存储删除 worker
     deletion_worker_enabled: bool = False
@@ -100,3 +100,16 @@ class MemoryConfig(ConfigModel):
     reconciliation_batch_size: int = Field(default=50, ge=1)
     # 对账轮询间隔（秒）
     reconciliation_interval_s: float = Field(default=300.0, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_compression_keep_turns(self) -> "MemoryConfig":
+        """保留轮数阈值必须递增，避免配置出无法命中的分支。"""
+        if (
+            self.compression_keep_one_below_turns
+            <= self.compression_keep_zero_below_turns
+        ):
+            raise ValueError(
+                "compression_keep_one_below_turns 必须大于 "
+                "compression_keep_zero_below_turns"
+            )
+        return self

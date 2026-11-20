@@ -101,11 +101,18 @@ class ContextAssembler:
                 truncated = True
                 continue
             if tokens > message_budget:
+                # 预算规划已经按完整轮次选过消息；这里复核超限时只能保留
+                # 连续后缀，不能跳过中间消息继续装更老的，否则会留下没有
+                # 调用来源的 ToolMessage 或半条工具链。
                 truncated = True
-                continue
+                break
             kept_reversed.append(message)
             message_budget -= tokens
         kept = list(reversed(kept_reversed))
+        # 预算复核只能按消息粒度裁剪，可能从某轮中间截断；丢掉开头没有
+        # 用户提问的 assistant/tool 后缀，保证工作窗口从完整回合开始。
+        while len(kept) > 1 and kept[0].role != LLMRole.USER:
+            kept.pop(0)
 
         system_text = _render_system(base, included)
         result_messages: list[LLMMessage] = []

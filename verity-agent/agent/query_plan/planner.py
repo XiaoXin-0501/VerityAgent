@@ -129,7 +129,10 @@ class QueryPlanner:
                 original_query,
                 normalized_query=normalized,
                 profile_text=_clip_text(profile_text, self.config.profile_token_budget),
-                session_summary=session_summary,
+                session_summary=_clip_text(
+                    session_summary,
+                    self.config.summary_token_budget,
+                ),
                 history_text=history_text,
                 domain_catalog=prompt_domain,
                 rule=rule,

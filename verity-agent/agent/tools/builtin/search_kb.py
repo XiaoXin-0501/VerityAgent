@@ -62,7 +62,15 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
         title = getattr(chunk, "doc_name", None) or str(chunk.doc_id)
         heading = getattr(chunk, "heading", None)
         label = f"{title} / {heading}" if heading else title
-        lines.append(f"[{index}] {label}\n{chunk.content}".strip())
+        # chunk_id 必须进入给 LLM 的文本：resolve_chunk_conflict 需要模型
+        # 从检索结果中挑选真实片段 id；结构化 data 不会进入 ToolMessage。
+        chunk_id = getattr(chunk, "chunk_id", None)
+        prefix = (
+            f"[{index}] chunk_id={chunk_id} | {label}"
+            if chunk_id
+            else f"[{index}] {label}"
+        )
+        lines.append(f"{prefix}\n{chunk.content}".strip())
     data = {
         "query": getattr(result, "query", None),
         "rewritten_query": getattr(result, "rewritten_query", None),

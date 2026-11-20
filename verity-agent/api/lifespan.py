@@ -29,7 +29,6 @@ from agent.recovery import (
 from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 from agent.workers import (
     CompressionService,
-    FactConflictService,
     FactReconciliationWorker,
     MemoryProfileWorker,
     UserDeletionWorker,
@@ -296,24 +295,6 @@ def _build_memory_worker(registry, hook_dispatcher, prompt_registry):
     if model is None:
         logger.warning("记忆抽取 worker 缺少可用 chat 模型，跳过启动")
         return None
-    conflict_service = None
-    if cfg.fact_conflict_enabled:
-        conflict_model_id = cfg.fact_conflict_model_id or model_id
-        conflict_model = _resolve_model(
-            registry,
-            conflict_model_id,
-            fallback=model_id,
-            kind="chat",
-        )
-        if conflict_model is not None:
-            conflict_service = FactConflictService(
-                model=conflict_model,
-                model_id=str(conflict_model_id),
-                max_candidates=cfg.fact_conflict_max_candidates,
-                timeout_s=cfg.fact_conflict_timeout_s,
-                max_output_tokens=cfg.fact_conflict_max_output_tokens,
-                prompts=prompt_registry,
-            )
     return MemoryProfileWorker(
         cfg,
         model=model,
@@ -324,7 +305,6 @@ def _build_memory_worker(registry, hook_dispatcher, prompt_registry):
             if cfg.fact_write_enabled and settings.weaviate.enabled
             else None
         ),
-        conflict_service=conflict_service,
         prompts=prompt_registry,
     )
 
@@ -354,13 +334,13 @@ def _build_compressor(registry, hook_dispatcher, prompt_registry):
     )
 
 
-def _build_chunk_conflict_service(registry, prompt_registry):
-    """构造知识库片段冲突处理服务；未启用/无 Weaviate 时返回 None。"""
+def _build_chunk_conflict_service(registry, prompt_registry, *, available: bool):
+    """构造知识库片段冲突处理服务；未启用或 Weaviate 不可用时返回 None。"""
     cfg = settings.rag.retriever
     if not cfg.chunk_conflict_tool_enabled:
         return None
-    if not settings.weaviate.enabled:
-        logger.warning("Weaviate 未启用，跳过 chunk 冲突处理服务")
+    if not available or not settings.weaviate.enabled:
+        logger.warning("Weaviate 未就绪，跳过 chunk 冲突处理服务")
         return None
     default_chat = _default_chat_model_id()
     model_id = cfg.chunk_conflict_model_id or default_chat
@@ -601,6 +581,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         chunk_conflict_service = _build_chunk_conflict_service(
             registry,
             prompts,
+            available=weaviate_ready,
         )
         app.state.chunk_conflict_service = chunk_conflict_service
         tool_registry = build_tool_registry(

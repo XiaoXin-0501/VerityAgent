@@ -243,8 +243,6 @@ class Settings(EnvSettings):
             refs.append(self.memory.extraction_model_id)
         if self.memory.compression_model_id:
             refs.append(self.memory.compression_model_id)
-        if self.memory.fact_conflict_model_id:
-            refs.append(self.memory.fact_conflict_model_id)
         unknown = sorted({item for item in refs if item not in seen})
         if unknown:
             raise ValueError(f"配置引用了未声明的模型 id: {unknown}")

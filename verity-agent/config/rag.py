@@ -314,8 +314,8 @@ class RetrieverConfig(ConfigModel):
     chunk_conflict_model_id: str | None = None
     # 冲突处理 LLM 超时（秒）
     chunk_conflict_timeout_s: float = Field(default=20.0, gt=0)
-    # 冲突处理 LLM 输出上限
-    chunk_conflict_max_output_tokens: int = Field(default=512, ge=64)
+    # 冲突处理 LLM 输出上限；需容纳 500 字 answer + JSON 字段
+    chunk_conflict_max_output_tokens: int = Field(default=1024, ge=64)
     # 观点冲突时向两侧额外召回的邻居 chunk 数
     chunk_conflict_neighbor_window: int = Field(default=1, ge=0, le=3)
     # 是否启用 rerank

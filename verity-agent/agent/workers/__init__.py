@@ -12,14 +12,11 @@ from .base import (
 )
 from .compression import CompressionService
 from .deletion import UserDeletionWorker
-from .fact_conflict import FactConflictDecision, FactConflictService
 from .memory import MemoryProfileWorker
 from .reconciliation import FactReconciliationWorker
 
 __all__ = [
     "CompressionService",
-    "FactConflictDecision",
-    "FactConflictService",
     "MemoryProfileWorker",
     "UserDeletionWorker",
     "FactReconciliationWorker",

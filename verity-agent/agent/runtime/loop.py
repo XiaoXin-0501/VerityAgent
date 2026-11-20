@@ -1411,7 +1411,14 @@ class AgentLoop:
             title = getattr(chunk, "doc_name", None) or str(chunk.doc_id)
             heading = getattr(chunk, "heading", None)
             label = f"{title} / {heading}" if heading else title
-            lines.append(f"[RAG {index}] {label}\n{chunk.content}".strip())
+            # chunk_id 进入 Prompt：模型需要它调用 resolve_chunk_conflict。
+            chunk_id = getattr(chunk, "chunk_id", None)
+            prefix = (
+                f"[RAG {index}] chunk_id={chunk_id} | {label}"
+                if chunk_id
+                else f"[RAG {index}] {label}"
+            )
+            lines.append(f"{prefix}\n{chunk.content}".strip())
         return ContextSection(
             source="rag",
             name="injected_context",
@@ -1526,7 +1533,9 @@ class AgentLoop:
                 logger.warning("加载会话摘要失败", exc_info=True)
 
         # 只加载摘要水位线之后的未摘要消息，避免历史与摘要重复进 Prompt。
-        history = await self.deps.messages.load_after(
+        # 安全上限按“最近 N 条”截断，不能取该区间最老的 N 条；否则长会话
+        # 会在达到上限后永久停留在旧消息上。
+        history = await self.deps.messages.load_recent_after(
             request.conversation_id,
             max(0, int(covered_through_seq)),
             limit=max(1, int(self.deps.history_limit)),
@@ -1701,6 +1710,16 @@ class AgentLoop:
                 dropped_messages=budget_plan.dropped_messages,
                 history_tokens=budget_plan.token_estimate,
                 truncated=budget_plan.truncated,
+            )
+        if budget_plan.truncated:
+            logger.info(
+                "上下文窗口裁剪: kept_rounds=%d kept_messages=%d "
+                "dropped_messages=%d history_tokens=%d budget=%d",
+                budget_plan.kept_rounds,
+                len(budget_plan.messages),
+                budget_plan.dropped_messages,
+                budget_plan.token_estimate,
+                budget_plan.history_budget,
             )
         await self._emit_hook(
             "context.assemble.start",
@@ -2322,7 +2341,7 @@ def _ensure_current_user_message(
 ) -> list[StoredMessage]:
     """保证本轮已落库的用户消息在历史窗口中，且只出现一次。
 
-    ``load_window`` 通常已经包含刚追加的消息；只有适配器按“最近 N 条”
+    ``load_recent_after`` 通常已经包含刚追加的消息；只有适配器按“最近 N 条”
     读取较早窗口、恰好排除当前消息时才需要补到末尾。比较必须使用
     ``append_user`` 返回的落库副本 id；请求里的 ``UserMessage`` 没有
     经过存储层，id 与落库行不同。
@@ -2362,7 +2381,11 @@ def _history_text(
         role = getattr(message, "role", "unknown")
         content = str(getattr(message, "content", "") or "").strip()
         if isinstance(message, ToolMessage):
-            tool_name = getattr(message, "tool_name", "") or "tool"
+            tool_name = (
+                getattr(message, "name", None)
+                or getattr(message, "tool_name", None)
+                or "tool"
+            )
             content = f"{tool_name}: {content}"
         if not content:
             continue

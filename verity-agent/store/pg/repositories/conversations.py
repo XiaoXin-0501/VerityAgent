@@ -702,6 +702,40 @@ class ConversationMessageRepository(BaseRepository):
             rows = await self._fetch_all(c, sql, params)
         return self._models(ConversationMessage, rows)
 
+    async def list_recent_after(
+        self,
+        conversation_id: UUID | str,
+        *,
+        after_seq: int = 0,
+        limit: int = 200,
+        conn: AsyncConnection[Row] | None = None,
+    ) -> list[ConversationMessage]:
+        """按 ``seq_no`` 升序返回水位线之后**最近**的 N 条消息。
+
+        上下文装配需要“摘要水位线之后的最新工作窗口”，而不是该区间最老的
+        N 条；否则未压缩消息超过安全上限时，窗口会永久停在旧消息上。
+        先倒序取最近 N 条，再在子查询外升序返回，保持调用方按时间阅读。
+        """
+        if after_seq < 0:
+            raise ValidationError("after_seq 不能为负数")
+        limit, _ = pagination(limit, 0)
+        async with self._transaction(conn) as c:
+            rows = await self._fetch_all(
+                c,
+                """
+                SELECT * FROM (
+                    SELECT * FROM conversation_messages
+                    WHERE conversation_id = %s
+                      AND seq_no > %s
+                    ORDER BY seq_no DESC
+                    LIMIT %s
+                ) recent
+                ORDER BY seq_no ASC
+                """,
+                (as_uuid(conversation_id), after_seq, limit),
+            )
+        return self._models(ConversationMessage, rows)
+
     async def list_rounds(
         self,
         conversation_id: UUID | str,

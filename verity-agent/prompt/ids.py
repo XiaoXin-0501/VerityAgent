@@ -33,7 +33,6 @@ class PromptId(StrEnum):
     RAG_CODE_DESCRIPTION_USER = "rag.code.description.user"
     # RAG：知识库片段冲突处理（事实冲突/观点冲突/上下文不足）
     RAG_CHUNK_CONFLICT_SYSTEM = "rag.chunk_conflict.system"
-    # Memory：长期画像/事实抽取、会话压缩、事实冲突判定
+    # Memory：长期画像/事实抽取、会话压缩
     MEMORY_EXTRACTION_SYSTEM = "memory.extraction.system"
     MEMORY_COMPRESSION_SYSTEM = "memory.compression.system"
-    MEMORY_FACT_CONFLICT_SYSTEM = "memory.fact_conflict.system"

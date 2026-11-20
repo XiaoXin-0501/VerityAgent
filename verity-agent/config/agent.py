@@ -40,6 +40,8 @@ class QueryPlanConfig(ConfigModel):
     history_messages: int = Field(default=8, ge=0)
     # 用户画像注入上限（token）
     profile_token_budget: int = Field(default=512, ge=0)
+    # 会话摘要注入上限（token）；避免长摘要挤占规划提示词
+    summary_token_budget: int = Field(default=1024, ge=0)
     # 垂直领域目录注入上限（字符）
     domain_catalog_chars: int = Field(default=2000, ge=0)
     # 领域实体类型参考注入上限（字符）；0 表示不注入画像类型，使用通用兜底

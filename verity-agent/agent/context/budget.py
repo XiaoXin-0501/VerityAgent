@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Sequence
 from uuid import UUID
 
 from agent.context.models import ContextSection
-from agent.message.models import RawMessage, StoredMessage, ToolMessage, UserMessage
+from agent.message.models import RawMessage, StoredMessage, UserMessage
+from utils.serialization import json_dumps
 from utils.tokens import estimate_tokens
 
 __all__ = ["ContextBudgetPlan", "ContextBudgetPlanner", "message_tokens"]
@@ -63,7 +63,16 @@ class ContextBudgetPlanner:
             available -= section.token_estimate or estimate_tokens(section.content)
         budget = max(64, available)
 
+        # 安全上限截断或丢弃半轮，也算本次窗口发生裁剪。
+        truncated = len(items) < len(messages)
         rounds = _group_rounds(items)
+        # 安全上限按最近 N 条截断时，最老一组可能只有 assistant/tool 而缺少
+        # 起始 user 消息；丢弃这条不完整轮次，避免把半条工具链装进 Prompt。
+        if rounds and not any(
+            isinstance(item.message, UserMessage) for item in rounds[0]
+        ):
+            rounds = rounds[1:]
+            truncated = True
         if not rounds:
             return ContextBudgetPlan(
                 messages=[],
@@ -76,7 +85,6 @@ class ContextBudgetPlanner:
 
         chosen: list[list[StoredMessage]] = []
         remaining = budget
-        truncated = False
         # 最后一条通常是当前用户问题，任何情况下都要保留。
         last_message = items[-1] if items else None
         for index, round_messages in enumerate(reversed(rounds)):
@@ -129,12 +137,12 @@ def message_tokens(stored: StoredMessage) -> int:
     for call in getattr(message, "tool_calls", []) or []:
         total += estimate_tokens(getattr(call, "name", "") or "")
         total += estimate_tokens(
-            json.dumps(getattr(call, "arguments", None) or {}, ensure_ascii=False)
+            json_dumps(getattr(call, "arguments", None) or {})
         )
     total += len(getattr(message, "images", []) or [])
     total += len(getattr(message, "files", []) or [])
-    if isinstance(message, ToolMessage):
-        total += estimate_tokens(json.dumps(message.json_data, ensure_ascii=False))
+    # ToolMessage.json 只落库/给前端，不回喂 LLM；预算只计实际发送的
+    # content/thinking/tool_calls，避免结构化数据重复占预算。
     return total
 
 

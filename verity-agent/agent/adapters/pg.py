@@ -189,6 +189,25 @@ class PgMessageAdapter:
         )
         return [decode_stored_row(row.model_dump()) for row in rows]
 
+    async def load_recent_after(
+        self,
+        conversation_id: UUID,
+        seq_no: int,
+        *,
+        limit: int = 400,
+    ) -> list[StoredMessage]:
+        """读取指定 seq 之后最近的 N 条消息，按 seq 升序返回。
+
+        上下文工作窗口使用本方法：安全上限截断时保留最新消息，不能退化成
+        “水位线之后最老的 N 条”。
+        """
+        rows = await self.repository.list_recent_after(
+            conversation_id,
+            after_seq=seq_no,
+            limit=limit,
+        )
+        return [decode_stored_row(row.model_dump()) for row in rows]
+
 
 class PgMemoryQueueAdapter:
     """UserMessageRepository -> Agent MemoryQueuePort（只负责回合终态 ready）。"""

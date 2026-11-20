@@ -50,12 +50,13 @@ async def _executor(arguments: dict[str, Any], context: ToolContext) -> ToolResu
             ),
         )
     try:
+        chunk_ids = list(dict.fromkeys(parsed.chunk_ids))
         result = await service.resolve(
             user_id=context.user_id,
             permissions=context.permissions,
             question=parsed.question,
             conflict_type=parsed.conflict_type,
-            chunk_ids=list(dict.fromkeys(parsed.chunk_ids)),
+            chunk_ids=chunk_ids,
         )
     except Exception as exc:  # noqa: BLE001 - 工具错误统一结构化
         return ToolResult.failure(
@@ -88,7 +89,7 @@ async def _executor(arguments: dict[str, Any], context: ToolContext) -> ToolResu
             "resolution": result.get("resolution"),
             "preferred_chunk_ids": result.get("preferred_chunk_ids") or [],
             "conflict_summary": result.get("conflict_summary") or "",
-            "chunk_ids": parsed.chunk_ids,
+            "chunk_ids": chunk_ids,
         },
     )
 
@@ -100,9 +101,9 @@ def register_conflict_tool(registry: ToolRegistry) -> None:
             name="resolve_chunk_conflict",
             description=(
                 "处理知识库片段之间的矛盾。检索结果中两个片段对同一问题给出"
-                "冲突信息且会影响回答时，传入至少两个 chunk_id、冲突类型"
-                "（factual/viewpoint/ambiguous）和用户问题；工具会结合文档时间、"
-                "质量分与相邻片段给出结论。不要用它处理普通追问。"
+                "冲突信息且会影响回答时，从检索结果里的 chunk_id 取至少两个"
+                "片段，并传入冲突类型（factual/viewpoint/ambiguous）和用户问题；"
+                "工具会结合文档时间、质量分与相邻片段给出结论。不要用它处理普通追问。"
             ),
             group="kb",
             kind=ToolKind.EXECUTABLE,
