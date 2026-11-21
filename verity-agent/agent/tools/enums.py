@@ -19,7 +19,6 @@ from exception.tool import (
 __all__ = [
     "ToolSideEffect",
     "ToolKind",
-    "ToolExposureMode",
     "ToolSelectionMode",
     "ToolResultStatus",
     "ToolBatchStatus",
@@ -51,21 +50,6 @@ class ToolKind(StrEnum):
 
     EXECUTABLE = "EXECUTABLE"
     ROUTER = "ROUTER"
-
-
-class ToolExposureMode(StrEnum):
-    """工具在单次请求中的暴露策略。
-
-    注册表常驻全部已装配工具；每次请求按本策略 + 用户权限生成
-    ``ToolSelection``，不动态修改注册表。
-    """
-
-    # 登录且有静态权限即可暴露
-    ALWAYS = "ALWAYS"
-    # 仅当本次查询规划判定需要 RAG 召回时暴露（如片段冲突工具）
-    RAG_REQUIRED = "RAG_REQUIRED"
-    # 会话摘要压缩次数达到工具声明阈值后暴露（如 recall_round）
-    AFTER_COMPRESSIONS = "AFTER_COMPRESSIONS"
 
 
 class ToolSelectionMode(StrEnum):

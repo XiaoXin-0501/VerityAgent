@@ -1,7 +1,7 @@
 """内置工具清单：JSON 声明 + 代码实现映射。
 
-- ``manifest.json`` 集中声明名称、描述、分组、静态权限、暴露策略、策略预设
-  与实现 id；
+- ``manifest.json`` 集中声明名称、描述、分组、静态权限、暴露条件、单工具
+  横切能力差异与实现 id；
 - 本模块把实现 id 映射到 ``builtin`` 的参数模型/执行器，构造 ``ToolSpec``；
 - 注册表启动后常驻所有已装配工具；每次请求由 Agent 扫描注册表，结合用户
   权限 + ``ToolExposureContext`` 生成实际暴露的 ToolSelection；
@@ -18,7 +18,11 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from config.tools import RecallRoundToolConfig, SearchKbToolConfig
+from config.tools import (
+    RecallRoundToolConfig,
+    SearchKbToolConfig,
+    ToolPolicyDefaults,
+)
 
 from .builtin import (
     RecallRoundArgs,
@@ -28,14 +32,10 @@ from .builtin import (
     build_search_kb_executor,
     execute_conflict_tool,
 )
-from .enums import ToolExposureMode, ToolKind, ToolSideEffect
-from .models import RegisteredTool, ToolSpec
-from .policies import (
-    CachePolicy,
-    CircuitBreakerPolicy,
-    RateLimitPolicy,
-    ToolPolicy,
-)
+from .enums import ToolKind, ToolSideEffect
+from .exposure import validate_exposure_rule
+from .models import RegisteredTool, ToolExposureRule, ToolSpec
+from .policies import ToolPolicy
 
 __all__ = [
     "TOOL_MANIFEST",
@@ -61,15 +61,24 @@ class ToolDeclaration(_Model):
     group: str | None = None
     # 静态权限码；None 表示登录用户可用
     required_permission: str | None = None
-    exposure: ToolExposureMode = ToolExposureMode.ALWAYS
-    # AFTER_COMPRESSIONS 的默认阈值；具体实现可用运行配置覆盖
-    min_compressions: int = Field(default=0, ge=0)
+    # 暴露条件：kind + 参数；具体解释器见 agent.tools.exposure
+    exposure: ToolExposureRule = Field(
+        default_factory=lambda: ToolExposureRule(kind="always")
+    )
     side_effect: ToolSideEffect = ToolSideEffect.READ
     tags: list[str] = Field(default_factory=list)
     # 实现 id；必须在本模块 _IMPLEMENTATIONS 中存在
     implementation: str = Field(min_length=1, max_length=64)
-    # 横切策略预设；实现只负责参数模型与执行器
-    policy_preset: Literal["default", "rag_search", "cacheless"] = "default"
+    # 横切能力全部铺开；只写需要修改的字段，装配时与顶层默认值深合并。
+    # 未提供的字段继承 ToolsConfig.policy；显式 null 可用 model_fields_set 区分。
+    timeout_s: float | None = Field(default=None, gt=0)
+    retry: dict[str, Any] | None = None
+    cache: dict[str, Any] | None = None
+    circuit_breaker: dict[str, Any] | None = None
+    rate_limit: dict[str, Any] | None = None
+    idempotency: dict[str, Any] | None = None
+    result_limit: dict[str, Any] | None = None
+    max_concurrency: int | None = Field(default=None, ge=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -88,6 +97,7 @@ class ToolBuildContext:
     chunk_conflict_service: Any | None
     search_kb: SearchKbToolConfig
     recall_round: RecallRoundToolConfig
+    policy_defaults: ToolPolicyDefaults
 
 
 def _load_manifest() -> tuple[ToolDeclaration, ...]:
@@ -109,7 +119,7 @@ def _spec_for(
     declaration: ToolDeclaration,
     *,
     policy: ToolPolicy,
-    min_compressions: int | None = None,
+    exposure: ToolExposureRule | None = None,
 ) -> ToolSpec:
     """把 JSON 声明投影为运行期 ToolSpec。"""
     return ToolSpec(
@@ -118,12 +128,7 @@ def _spec_for(
         group=declaration.group,
         kind=ToolKind.EXECUTABLE,
         side_effect=declaration.side_effect,
-        exposure=declaration.exposure,
-        min_compressions=(
-            declaration.min_compressions
-            if min_compressions is None
-            else min_compressions
-        ),
+        exposure=exposure or declaration.exposure,
         required_permission=declaration.required_permission,
         policy=policy,
         tags=list(declaration.tags),
@@ -131,28 +136,50 @@ def _spec_for(
     )
 
 
+def _with_param(
+    rule: ToolExposureRule,
+    key: str,
+    value: Any,
+) -> ToolExposureRule:
+    """覆盖条件参数，保持 kind 与其它参数不变。"""
+    params = dict(rule.params)
+    params[key] = value
+    return ToolExposureRule(kind=rule.kind, **params)
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并 policy 覆盖；工具只写差异字段。"""
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+_POLICY_FIELDS = (
+    "timeout_s",
+    "retry",
+    "cache",
+    "circuit_breaker",
+    "rate_limit",
+    "idempotency",
+    "result_limit",
+    "max_concurrency",
+)
+
+
 def _policy_for(declaration: ToolDeclaration, ctx: ToolBuildContext) -> ToolPolicy:
-    """按 JSON 的 policy_preset 构造横切策略。"""
-    preset = declaration.policy_preset
-    if preset == "rag_search":
-        # 检索结果由 RAG RetrievalCache 负责；工具层只保留熔断与限流。
-        return ToolPolicy(
-            cache=CachePolicy(enabled=False),
-            circuit_breaker=CircuitBreakerPolicy(enabled=True),
-            rate_limit=RateLimitPolicy(
-                enabled=True,
-                max_calls=ctx.search_kb.rate_limit_calls,
-                window_s=ctx.search_kb.rate_limit_window_s,
-            ),
-        )
-    if preset == "cacheless":
-        # 结果只对当前会话有效；缓存 key 缺 conversation_id，直接关闭。
-        return ToolPolicy(cache=CachePolicy(enabled=False))
-    if preset == "default":
-        return ToolPolicy()
-    raise ValueError(
-        f"工具 {declaration.name} 的 policy_preset 未知: {preset}"
-    )
+    """顶层默认策略 + 单工具差异字段 -> ToolPolicy。"""
+    base = ctx.policy_defaults.model_dump(mode="python")
+    overrides = {
+        key: getattr(declaration, key)
+        for key in _POLICY_FIELDS
+        if key in declaration.model_fields_set
+    }
+    return ToolPolicy.model_validate(_deep_merge(base, overrides))
 
 
 def _build_search_kb(
@@ -182,7 +209,11 @@ def _build_recall_round(
             declaration,
             policy=_policy_for(declaration, ctx),
             # JSON 中的 min_compressions 是部署默认值；运行配置可覆盖。
-            min_compressions=ctx.recall_round.min_compressions,
+            exposure=_with_param(
+                declaration.exposure,
+                "min_compressions",
+                ctx.recall_round.min_compressions,
+            ),
         ),
         executor=RecallRoundExecutor(ctx.recall_round),
         argument_model=RecallRoundArgs,
@@ -228,4 +259,6 @@ def build_declared_tool(
         raise ValueError(
             f"工具 {declaration.name} 引用了未知实现: {declaration.implementation}"
         )
+    # 暴露条件在装配期校验，允许实现模块在 import 时先注册自定义 evaluator。
+    validate_exposure_rule(declaration.exposure)
     return builder(declaration, ctx)

@@ -39,7 +39,6 @@ from .enums import (
     ToolApprovalStatus,
     ToolBatchStatus,
     ToolCircuitState,
-    ToolExposureMode,
     ToolKind,
     ToolResultStatus,
     ToolSelectionMode,
@@ -98,6 +97,27 @@ class _MutableModel(BaseModel):
 
 # ——————————————————— 定义层 ———————————————————
 
+class ToolExposureRule(BaseModel):
+    """工具暴露条件：``kind`` + 可扩展参数。
+
+    JSON 形式（参数与 kind 平铺）：
+
+    ``{"kind": "after_compressions", "min_compressions": 2}``
+
+    具体条件由 ``agent.tools.exposure`` 的评估器注册表解释；新增条件只需
+    注册 ``kind`` -> evaluator，不需要改 ToolSpec/Selection。
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    kind: str = Field(min_length=1, max_length=64)
+
+    @property
+    def params(self) -> dict[str, Any]:
+        """返回除 kind 外的条件参数。"""
+        return dict(self.model_extra or {})
+
+
 class ToolSpec(_Model):
     """工具的静态定义；不包含执行器，可序列化、可展示。"""
 
@@ -125,10 +145,10 @@ class ToolSpec(_Model):
     supports_reconcile: bool = False
     # 是否注册/暴露
     enabled: bool = True
-    # 单次请求的暴露策略；注册表仍保留工具，选择时按请求上下文过滤
-    exposure: ToolExposureMode = ToolExposureMode.ALWAYS
-    # AFTER_COMPRESSIONS 模式下的最小摘要压缩次数
-    min_compressions: int = Field(default=0, ge=0)
+    # 单次请求的暴露条件；注册表仍保留工具，选择时按请求上下文过滤
+    exposure: ToolExposureRule = Field(
+        default_factory=lambda: ToolExposureRule(kind="always")
+    )
     # 工具版本；破坏性 schema 变更时递增
     version: str = "1"
     # EXECUTABLE / ROUTER
@@ -356,8 +376,10 @@ class ToolExposureContext:
 
     # 本次查询规划是否判定需要 RAG 召回
     rag_required: bool = False
-    # 当前会话成功压缩次数；用于 recall_round 等延迟暴露工具
+    # 当前会话成功压缩次数；用于 after_compressions 条件
     compression_count: int = 0
+    # 预留扩展信号；新条件可从这里读取任意请求期信息
+    signals: dict[str, Any] = field(default_factory=dict)
 
 
 class ToolSelection(_MutableModel):

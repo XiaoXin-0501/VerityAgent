@@ -6,37 +6,61 @@
       "description": "在当前已绑定的知识库中检索相关片段。用户询问领域知识、事实、文档内容或需要引用依据时优先使用；返回片段和引用。",
       "group": "kb",
       "required_permission": null,
-      "exposure": "RAG_REQUIRED",
-      "min_compressions": 0,
+      "exposure": {
+        "kind": "rag_required"
+      },
       "side_effect": "READ",
-      "tags": ["rag", "knowledge"],
+      "tags": [
+        "rag",
+        "knowledge"
+      ],
       "implementation": "search_kb",
-      "policy_preset": "rag_search"
+      "cache": {
+        "enabled": false
+      },
+      "circuit_breaker": {
+        "enabled": true
+      },
+      "rate_limit": {
+        "enabled": true
+      }
     },
     {
       "name": "recall_round",
       "description": "按轮次 id 回看历史问答：返回指定轮次的用户提问和最终回答，省略中间工具调用。只在会话摘要中的主题标注了 rounds 时使用，round_ids 必须来自摘要或历史工具结果，不要编造。",
       "group": "memory",
       "required_permission": null,
-      "exposure": "AFTER_COMPRESSIONS",
-      "min_compressions": 2,
+      "exposure": {
+        "kind": "after_compressions",
+        "min_compressions": 2
+      },
       "side_effect": "READ",
-      "tags": ["memory", "history"],
+      "tags": [
+        "memory",
+        "history"
+      ],
       "implementation": "recall_round",
-      "policy_preset": "cacheless",
-      "metadata": {"cache_permission_scoped": true}
+      "metadata": {
+        "cache_permission_scoped": true
+      },
+      "cache": {
+        "enabled": false
+      }
     },
     {
       "name": "resolve_chunk_conflict",
       "description": "处理知识库片段之间的矛盾。检索结果中两个片段对同一问题给出冲突信息且会影响回答时，从检索结果里的 chunk_id 取至少两个片段，并传入冲突类型（factual/viewpoint/ambiguous）和用户问题；工具会结合文档时间、质量分与相邻片段给出结论。不要用它处理普通追问。",
       "group": "kb",
       "required_permission": null,
-      "exposure": "RAG_REQUIRED",
-      "min_compressions": 0,
+      "exposure": {
+        "kind": "rag_required"
+      },
       "side_effect": "READ",
-      "tags": ["rag", "conflict"],
-      "implementation": "chunk_conflict",
-      "policy_preset": "default"
+      "tags": [
+        "rag",
+        "conflict"
+      ],
+      "implementation": "chunk_conflict"
     }
   ]
 }

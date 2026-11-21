@@ -8,7 +8,7 @@
   集合中时，不注册该工具；
 - 无权限码的工具（登录用户可用）始终尝试注册；
 - 依赖缺失（RAG Retriever / chunk 冲突服务）时跳过对应实现；
-- 单次请求是否暴露由 ``ToolSelection`` 按 ``ToolExposureMode`` 再过滤。
+- 单次请求是否暴露由 ``ToolSelection`` 按 manifest 的 ``exposure`` 条件再过滤。
 """
 
 from __future__ import annotations
@@ -53,6 +53,7 @@ def build_tool_registry(
         chunk_conflict_service=chunk_conflict_service,
         search_kb=search_kb or config.search_kb,
         recall_round=recall_round or config.recall_round,
+        policy_defaults=config.policy,
     )
     registry = ToolRegistry()
     for entry in TOOL_MANIFEST:
@@ -90,13 +91,18 @@ def build_tool_pipeline(
     overflow_writer: Any | None = None,
 ) -> ToolPipeline:
     """创建执行流水线，并注入 Redis 缓存/幂等/熔断/限流与 MinIO 溢出。"""
-    state = build_redis_tool_state()
+    # 调用方已注入全部状态后端时不再创建 Redis 管理器，避免无意义的连接对象。
+    needs_redis = any(
+        item is None
+        for item in (cache, idempotency, circuit_breaker, rate_limiter)
+    )
+    state = build_redis_tool_state() if needs_redis else {}
     return ToolPipeline(
         registry,
         config,
-        cache=cache or state["cache"],
-        idempotency=idempotency or state["idempotency"],
-        circuit_breaker=circuit_breaker or state["circuit_breaker"],
-        rate_limiter=rate_limiter or state["rate_limiter"],
+        cache=cache or state.get("cache"),
+        idempotency=idempotency or state.get("idempotency"),
+        circuit_breaker=circuit_breaker or state.get("circuit_breaker"),
+        rate_limiter=rate_limiter or state.get("rate_limiter"),
         overflow_writer=overflow_writer or MinioOverflowWriter(),
     )

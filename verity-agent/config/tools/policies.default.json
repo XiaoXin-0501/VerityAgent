@@ -1,0 +1,57 @@
+{
+  "timeout_s": 30,
+  "retry": {
+    "max_attempts": 1,
+    "backoff_ms": 200,
+    "backoff_multiplier": 2.0,
+    "jitter": true,
+    "retry_on": ["TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"]
+  },
+  "cache": {
+    "backend": "REDIS",
+    "enabled": false,
+    "ttl_s": 60,
+    "key_fields": null,
+    "exclude_fields": [],
+    "cache_empty": false
+  },
+  "circuit_breaker": {
+    "backend": "REDIS",
+    "enabled": true,
+    "failure_threshold": 5,
+    "failure_rate_threshold": null,
+    "window_s": 60,
+    "open_cooldown_s": 30,
+    "half_open_max_calls": 3,
+    "success_threshold": 2,
+    "count_errors": ["TIMEOUT", "UPSTREAM_ERROR"]
+  },
+  "rate_limit": {
+    "backend": "REDIS",
+    "enabled": false,
+    "max_calls": 60,
+    "window_s": 60,
+    "scope": "TOOL"
+  },
+  "idempotency": {
+    "backend": "REDIS",
+    "mode": "NONE",
+    "ttl_s": 86400,
+    "key_fields": null,
+    "exclude_fields": ["timestamp", "now", "nonce", "request_id"],
+    "store_result": true,
+    "lock_ttl_s": 60,
+    "on_conflict": "RETURN_EXISTING"
+  },
+  "result_limit": {
+    "max_content_tokens": 4096,
+    "max_data_tokens": 16384,
+    "max_content_bytes": 65536,
+    "max_data_bytes": 65536,
+    "max_files": 10,
+    "max_images": 10,
+    "overflow_enabled": true,
+    "overflow_ttl_s": null
+  },
+  "max_concurrency": null
+}

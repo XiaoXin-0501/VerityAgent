@@ -2,7 +2,8 @@
 
 策略只描述**横切能力**，不参与 LLM 描述，也不包含执行器：
 
-- 单工具策略由 ``ToolSpec.policy`` 声明；
+- 单工具策略由 ``ToolSpec.policy`` 声明；manifest 工具从
+  ``ToolsConfig.policy`` 顶层默认值 + 单工具覆盖构造；
 - 选择/路由策略由 ``config.tools`` 映射为 ``ToolRoutingPolicy``；
 - v1 写工具默认不自动重试，只有幂等 REQUIRED + supports_reconcile 才允许。
 """

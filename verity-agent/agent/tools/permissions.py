@@ -15,7 +15,7 @@ from typing import Any
 
 from exception.tool import ToolArgumentValidationError, ToolPermissionDeniedError
 
-from .enums import ToolExposureMode
+from .exposure import rule_allowed
 from .models import (
     TEMPLATE_FIELD_RE,
     ToolCatalog,
@@ -48,14 +48,10 @@ def exposure_allowed(
     spec: ToolSpec,
     exposure: ToolExposureContext | None,
 ) -> bool:
-    """按单次请求上下文判断工具暴露策略；权限不参与这里。"""
+    """按单次请求上下文判断工具暴露条件；权限不参与这里。"""
     if exposure is None:
         return True
-    if spec.exposure == ToolExposureMode.RAG_REQUIRED:
-        return exposure.rag_required
-    if spec.exposure == ToolExposureMode.AFTER_COMPRESSIONS:
-        return exposure.compression_count >= spec.min_compressions
-    return True
+    return rule_allowed(spec.exposure, exposure)
 
 
 def spec_allowed(

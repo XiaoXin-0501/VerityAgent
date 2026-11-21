@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 from datetime import datetime, timedelta
@@ -190,16 +191,25 @@ class ToolPipeline:
                 tool_name=spec.name,
                 details={"required_permission": spec.required_permission},
             )
-        if call.raw_arguments and not call.arguments:
-            return self._failure(
-                call,
-                started,
-                started_at,
-                ToolErrorCode.INVALID_ARGUMENTS,
-                "工具参数不是合法 JSON 对象",
-                tool_name=spec.name,
-                details={"raw_arguments": call.raw_arguments},
-            )
+        # raw_arguments 是模型原始输出；空对象 "{}" 也是合法参数，不能因为
+        # 解析后是空 dict 就误判为非法 JSON。
+        if call.raw_arguments:
+            try:
+                raw_object = json.loads(call.raw_arguments)
+            except (TypeError, ValueError):
+                raw_object = None
+            if not isinstance(raw_object, dict) or (
+                raw_object and not call.arguments
+            ):
+                return self._failure(
+                    call,
+                    started,
+                    started_at,
+                    ToolErrorCode.INVALID_ARGUMENTS,
+                    "工具参数不是合法 JSON 对象",
+                    tool_name=spec.name,
+                    details={"raw_arguments": call.raw_arguments},
+                )
 
         # 入参大小保护：在 Pydantic/JSON Schema 校验前拦住超大对象
         try:
@@ -438,7 +448,7 @@ class ToolPipeline:
         max_concurrency: int | None = None,
     ) -> list[ToolResult]:
         """并行执行一批 ToolCall；返回顺序与入参一致。"""
-        limit = max_concurrency or self.config.max_batch_concurrency
+        limit = max(1, int(max_concurrency or self.config.max_batch_concurrency))
         semaphore = asyncio.Semaphore(limit)
 
         async def run(call: ToolCall) -> ToolResult:
@@ -937,13 +947,19 @@ class ToolPipeline:
             key_fields=policy.key_fields,
             exclude_fields=policy.exclude_fields,
         )
-        payload: dict[str, Any] = {"arguments": stable}
+        payload: dict[str, Any] = {
+            # 用户隔离是默认安全边界；即使工具没声明资源模板，也不能跨用户
+            # 复用结果。需要跨用户共享的工具应显式改缓存策略，而不是默认放行。
+            "user_id": str(context.user_id),
+            "tool_version": tool.spec.version,
+            "arguments": stable,
+        }
         if (
             tool.spec.resource_permission_template
             or tool.spec.metadata.get("cache_permission_scoped")
         ):
-            # 结果与权限相关（如 RAG 检索按 KB 权限过滤）时，key 必须带权限摘要，
-            # 避免跨用户/跨权限命中旧结果。
+            # 结果与权限相关（如 RAG 检索按 KB 权限过滤）时，key 再带权限摘要，
+            # 避免同一用户权限变化后命中旧结果。
             payload["permissions"] = sorted(context.permissions)
         return make_key(
             RedisKeyPrefix.TOOL_CACHE,

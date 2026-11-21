@@ -4,7 +4,7 @@
 与工具结果只用于过程展示，本工具只返回用户提问和该轮最后一条有正文的
 assistant 消息，避免把冗长的中间消息重新塞回上下文。
 
-工具暴露由 manifest 的 ``ToolExposureMode.AFTER_COMPRESSIONS`` 控制（会话摘要
+工具暴露由 manifest 的 ``after_compressions`` 暴露条件控制（会话摘要
 压缩次数达到阈值后才进入本次 ToolSelection）；本模块只负责读取与格式化。
 """
 
