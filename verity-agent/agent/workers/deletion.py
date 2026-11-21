@@ -86,16 +86,33 @@ class UserDeletionWorker:
         return bool(users)
 
     async def _delete_session_files(self, user_id) -> None:
-        """删除用户上传的会话文件原件/解析产物；按对象前缀幂等。"""
-        files = await self.files.list_by_uploader(user_id, limit=100)
-        for item in files:
-            if item.status is SessionFileStatus.DELETED:
-                continue
-            if item.status is not SessionFileStatus.DELETING:
-                await self.files.mark_deleting(item.id)
-            await self.storage.delete_session_file(
-                item.conversation_id,
-                item.id,
-                extension=item.extension,
+        """删除用户上传的会话文件原件/解析产物；按对象前缀幂等。
+
+        使用 offset 分页直到一页为空：用户可能上传超过单页上限的文件，
+        只删第一页会让 ``mark_deleted`` 提前完成、留下对象存储孤儿。
+        状态变化不会改变 ``created_at DESC`` 的排序，offset 分页稳定。
+        """
+        page_size = 100
+        offset = 0
+        while True:
+            files = await self.files.list_by_uploader(
+                user_id,
+                limit=page_size,
+                offset=offset,
             )
-            await self.files.mark_deleted(item.id)
+            if not files:
+                return
+            for item in files:
+                if item.status is SessionFileStatus.DELETED:
+                    continue
+                if item.status is not SessionFileStatus.DELETING:
+                    await self.files.mark_deleting(item.id)
+                await self.storage.delete_session_file(
+                    item.conversation_id,
+                    item.id,
+                    extension=item.extension,
+                )
+                await self.files.mark_deleted(item.id)
+            if len(files) < page_size:
+                return
+            offset += len(files)

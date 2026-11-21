@@ -17,6 +17,7 @@ from agent.tools.factory import SimpleToolFactory
 from agent.tools.models import ToolContext, ToolError, ToolResult
 from agent.tools.services import ToolServiceKey, get_tool_service
 from config.tools import SearchKbToolConfig
+from exception import RagError, RagErrorCode
 from exception.tool import ToolErrorCode
 from rag.shared.models import RetrievalRequest
 
@@ -29,7 +30,8 @@ class SearchKbArgs(BaseModel):
     """``search_kb`` 的 LLM 参数模型。"""
 
     query: str = Field(min_length=1, max_length=2000)
-    kb_ids: list[UUID] = Field(min_length=1, max_length=20)
+    # 省略时由服务端解析“当前用户可读的全部知识库”；模型不应猜测内部 id。
+    kb_ids: list[UUID] = Field(default_factory=list, max_length=20)
     # 为空时使用 ToolsConfig.search_kb.default_top_k；上限由执行器按配置收紧
     top_k: int | None = Field(default=None, ge=1, le=50)
 
@@ -130,6 +132,54 @@ async def search_kb_executor(
     # 未显式指定时使用运维配置的默认值，并统一收紧到允许上限。
     top_k = arguments.top_k if arguments.top_k is not None else policy.default_top_k
     top_k = min(top_k, policy.max_top_k)
+    # kb_ids 是可选参数：聊天请求没有“会话绑定知识库”，模型也不应看到/猜测
+    # 内部 id。省略时按用户实际权限解析可读知识库，与检索流水线共用
+    # knowledge_bases.required_permission_code。
+    kb_ids = list(dict.fromkeys(arguments.kb_ids))
+    if not kb_ids:
+        catalog = get_tool_service(context.services, ToolServiceKey.KB_CATALOG)
+        resolver = getattr(catalog, "list_readable", None)
+        if not callable(resolver):
+            return ToolResult.failure(
+                call_id=context.call_id,
+                tool_name=context.tool_name,
+                error=ToolError(
+                    code=ToolErrorCode.INVALID_ARGUMENTS,
+                    message="未提供 kb_ids，且服务端未配置知识库目录",
+                    retryable=False,
+                ),
+            )
+        try:
+            kb_ids = list(
+                await resolver(
+                    user_id=context.user_id,
+                    permissions=context.permissions,
+                    limit=policy.max_kb_ids,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - 权限目录失败按依赖错误返回
+            logger.warning("search_kb 解析可读知识库失败: %s", exc, exc_info=True)
+            return ToolResult.failure(
+                call_id=context.call_id,
+                tool_name=context.tool_name,
+                error=ToolError(
+                    code=ToolErrorCode.UPSTREAM_ERROR,
+                    message="读取可访问知识库失败，请稍后重试",
+                    retryable=True,
+                    cause=str(exc),
+                ),
+            )
+        if not kb_ids:
+            return ToolResult.failure(
+                call_id=context.call_id,
+                tool_name=context.tool_name,
+                error=ToolError(
+                    code=ToolErrorCode.PERMISSION_DENIED,
+                    message="当前没有可访问的知识库",
+                    retryable=False,
+                ),
+            )
+    kb_ids = kb_ids[: policy.max_kb_ids]
     # 查询规划由 Agent 主循环注入：用户原话、改写 query、召回意图。
     # 工具自身选择的 query 仍是主召回 query；规划字段只补充召回/rerank。
     plan = context.metadata.get("query_plan")
@@ -145,7 +195,7 @@ async def search_kb_executor(
         rewritten_query=rewritten_query,
         rag_intent=rag_intent,
         entities=entities,
-        kb_ids=list(arguments.kb_ids),
+        kb_ids=kb_ids,
         user_id=context.user_id,
         permissions=context.permissions,
         top_k=top_k,
@@ -155,6 +205,45 @@ async def search_kb_executor(
         # RAG 检索事件由 Retriever 内部的 RagEventSink 统一发送，工具层
         # 不再重复 emit rag.retrieval.*；工具执行本身由 ToolPipeline 记录。
         result = await retriever.retrieve(request)
+    except RagError as exc:
+        # 权限/参数错误是可解释的业务终态，不能统一标成可重试的
+        # UPSTREAM_ERROR，否则模型会反复重试同一个非法请求。
+        if exc.error_code is RagErrorCode.PERMISSION_DENIED:
+            return ToolResult.failure(
+                call_id=context.call_id,
+                tool_name=context.tool_name,
+                error=ToolError(
+                    code=ToolErrorCode.PERMISSION_DENIED,
+                    message="无权访问指定知识库",
+                    retryable=False,
+                    details=dict(exc.details or {}),
+                ),
+            )
+        if exc.error_code in {
+            RagErrorCode.INVALID_REQUEST,
+            RagErrorCode.INVALID_CONFIG,
+        }:
+            return ToolResult.failure(
+                call_id=context.call_id,
+                tool_name=context.tool_name,
+                error=ToolError(
+                    code=ToolErrorCode.INVALID_ARGUMENTS,
+                    message=exc.message,
+                    retryable=False,
+                    details=dict(exc.details or {}),
+                ),
+            )
+        logger.warning("search_kb 检索失败: %s", exc, exc_info=True)
+        return ToolResult.failure(
+            call_id=context.call_id,
+            tool_name=context.tool_name,
+            error=ToolError(
+                code=ToolErrorCode.UPSTREAM_ERROR,
+                message="知识库检索失败，请稍后重试",
+                retryable=True,
+                cause=str(exc),
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 - 工具错误统一结构化
         logger.warning("search_kb 检索失败: %s", exc, exc_info=True)
         return ToolResult.failure(

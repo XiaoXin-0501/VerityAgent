@@ -36,6 +36,7 @@ __all__ = [
     "MemoryQueuePort",
     "MemoryPort",
     "RagPort",
+    "KbCatalogPort",
     "FactPort",
     "QueryPlannerPort",
     "FlowLogPort",
@@ -284,6 +285,24 @@ class RagPort(Protocol):
         ...
 
 
+class KbCatalogPort(Protocol):
+    """知识库可读目录：未显式给 kb_ids 时解析用户可读知识库。
+
+    权限事实源是 PG 的 ``knowledge_bases.required_permission_code``；
+    Agent 与 search_kb 共用同一实现，避免各自拼权限码。
+    """
+
+    async def list_readable(
+        self,
+        *,
+        user_id: UUID,
+        permissions: frozenset[str],
+        limit: int = 20,
+    ) -> list[UUID]:
+        """返回用户可读的 active 知识库 id。"""
+        ...
+
+
 class QueryPlannerPort(Protocol):
     """查询规划端口：规则短路 + LLM 规划。"""
 
@@ -360,6 +379,8 @@ class AgentDependencies:
     context: Any = None
     # INJECTED RAG；为空表示只走工具模式
     rag: RagPort | None = None
+    # 知识库可读目录；INJECTED 未显式给 kb_ids 时用于解析默认检索范围
+    kb_catalog: KbCatalogPort | None = None
     # 查询规划（规则 + LLM）：意图识别/query 改写/RAG 决策/事实召回意图
     query_planner: QueryPlannerPort | None = None
     # 垂直领域目录文本（主画像 + 子画像），注入查询规划提示词

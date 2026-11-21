@@ -15,7 +15,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from config.llm import LLMConfig, StructuredOutputConfig
+from config.llm import LLMConfig
 from exception.llm import LLMError, LLMErrorCode
 from provider.base import ProviderModelSpec
 from provider.enums import ResponseFormatType, ToolChoiceMode, UsageSource
@@ -23,7 +23,6 @@ from utils.time import utcnow
 
 __all__ = [
     "LLMConfig",
-    "StructuredOutputConfig",
     "LLMError",
     "LLMErrorCode",
     "ModelKind",

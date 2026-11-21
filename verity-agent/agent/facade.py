@@ -189,9 +189,12 @@ class Agent:
             maxsize=self.config.stream.max_buffer_events
         )
         for event in active.buffer.replay(last_event_id):
-            queue.put_nowait(event)
+            # replay_buffer_size 可能大于单连接队列；逐条回放时按“丢最旧”
+            # 保持最新事件可消费，不能因为一次长时间 run 让 attach 抛
+            # QueueFull。
+            _put_nowait(queue, event)
         if active.result is not None:
-            queue.put_nowait(None)
+            _put_nowait(queue, None)
         else:
             active.subscribers.add(queue)
         return AgentStream(
@@ -426,7 +429,7 @@ class Agent:
                         agent_error(AgentErrorCode.RUN_NOT_FOUND, "run 不存在")
                     )
                 )
-            queue.put_nowait(None)
+            _put_nowait(queue, None)
             return
         last_seq = _event_seq(last_event_id)
         try:
@@ -468,7 +471,7 @@ class Agent:
                                 )
                             )
                         )
-                    queue.put_nowait(None)
+                    _put_nowait(queue, None)
                     return
                 await asyncio.sleep(self.config.remote_event_poll_interval_s)
         except asyncio.CancelledError:
@@ -476,7 +479,7 @@ class Agent:
         except Exception as exc:  # noqa: BLE001 - 远程流失败要收敛
             if not future.done():
                 future.set_exception(exc)
-            queue.put_nowait(None)
+            _put_nowait(queue, None)
 
     async def _save_event_store_run(
         self,

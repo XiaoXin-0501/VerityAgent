@@ -3,7 +3,7 @@
   "tools": [
     {
       "name": "search_kb",
-      "description": "在当前已绑定的知识库中检索相关片段。用户询问领域知识、事实、文档内容或需要引用依据时优先使用；返回片段和引用。",
+      "description": "检索知识库中的相关片段。用户询问领域知识、事实、文档内容或需要引用依据时优先使用；默认检索当前用户可访问的全部知识库，kb_ids 可省略，不要猜测内部 id；返回片段和引用。",
       "group": "kb",
       "required_permission": null,
       "exposure": {

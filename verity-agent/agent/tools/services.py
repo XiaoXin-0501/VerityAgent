@@ -19,6 +19,8 @@ class ToolServiceKey(StrEnum):
     RAG_RETRIEVER = "rag_retriever"
     CHUNK_CONFLICT_SERVICE = "chunk_conflict_service"
     CONVERSATION_MESSAGES = "conversation_messages"
+    # 知识库可读目录（PgKbCatalogAdapter）：未显式给 kb_ids 时解析默认范围
+    KB_CATALOG = "kb_catalog"
 
 
 def get_tool_service(

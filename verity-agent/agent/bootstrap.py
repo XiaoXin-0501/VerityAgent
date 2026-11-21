@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 from config import settings
 from config.agent import AgentConfig
 from config.domain import (
@@ -21,8 +22,8 @@ from config.domain import (
 )
 from prompt import PromptId, get_default_prompt_registry
 from utils.time import utcnow
-
 from .adapters.facts import WeaviateFactStore
+from .adapters.kb import PgKbCatalogAdapter
 from .adapters.llm import RoutingChatAdapter
 from .adapters.memory import PgMemoryProfileAdapter
 from .adapters.pg import PgLeaseAdapter, PgMemoryQueueAdapter, PgMessageAdapter
@@ -31,12 +32,11 @@ from .adapters.tools import PipelineToolAdapter
 from .context import ContextAssembler
 from .facade import Agent, create_agent
 from .llm_service import ChatService, ModelRegistry
-from .runtime.background import BackgroundTaskRunner
 from .query_plan import QueryPlanner
+from .runtime.background import BackgroundTaskRunner
 from .runtime.event_store import RedisEventStore
 from .runtime.flow import build_flow_log
 from .runtime.ports import AgentDependencies
-from agent.tools.bootstrap import build_tool_pipeline, build_tool_registry
 
 __all__ = ["build_default_agent_dependencies", "build_default_agent"]
 
@@ -44,30 +44,31 @@ logger = logging.getLogger(__name__)
 
 
 def build_default_agent_dependencies(
-    *,
-    provider_registry: Any,
-    model_id: str | None = None,
-    tool_registry: Any | None = None,
-    tool_pipeline: Any | None = None,
-    services: Any | None = None,
-    system_prompt: str | None = None,
-    history_limit: int | None = None,
-    hooks: Any | None = None,
-    memory_queue: Any | None = None,
-    background_tasks: Any | None = None,
-    memory: Any | None = None,
-    context: Any | None = None,
-    rag_retriever: Any | None = None,
-    compressor: Any | None = None,
-    facts: Any | None = None,
-    event_store: Any | None = None,
-    query_planner: Any | None = None,
-    query_plan_config: Any | None = None,
-    reflection_model_id: str | None = None,
-    flow_log: Any | None = None,
-    domain_catalog: str | None = None,
-    domain_entity_types: str | None = None,
-    domain_noise_terms: tuple[str, ...] | None = None,
+        *,
+        provider_registry: Any,
+        model_id: str | None = None,
+        tool_registry: Any | None = None,
+        tool_pipeline: Any | None = None,
+        services: Any | None = None,
+        system_prompt: str | None = None,
+        history_limit: int | None = None,
+        hooks: Any | None = None,
+        memory_queue: Any | None = None,
+        background_tasks: Any | None = None,
+        memory: Any | None = None,
+        context: Any | None = None,
+        rag_retriever: Any | None = None,
+        kb_catalog: Any | None = None,
+        compressor: Any | None = None,
+        facts: Any | None = None,
+        event_store: Any | None = None,
+        query_planner: Any | None = None,
+        query_plan_config: Any | None = None,
+        reflection_model_id: str | None = None,
+        flow_log: Any | None = None,
+        domain_catalog: str | None = None,
+        domain_entity_types: str | None = None,
+        domain_noise_terms: tuple[str, ...] | None = None,
 ) -> AgentDependencies:
     """用当前 Settings/ProviderRegistry 构造 Agent 依赖。
 
@@ -124,8 +125,8 @@ def build_default_agent_dependencies(
     agent_model_ids = list(settings.llm.model_ids)
     effective_plan_config = query_plan_config or settings.agent.query_plan
     for model_id in (
-        effective_plan_config.model_id,
-        reflection_model_id or settings.agent.reflection.model_id,
+            effective_plan_config.model_id,
+            reflection_model_id or settings.agent.reflection.model_id,
     ):
         if model_id and model_id not in agent_model_ids:
             agent_model_ids.append(model_id)
@@ -185,6 +186,10 @@ def build_default_agent_dependencies(
             if rag_retriever is not None
             else None
         ),
+        # 默认用 PG 知识与权限表解析可读知识库；INJECTED 与 search_kb 共用。
+        kb_catalog=(
+            kb_catalog if kb_catalog is not None else PgKbCatalogAdapter()
+        ),
         query_planner=planner,
         domain_catalog=catalog,
         flow_log=flow,
@@ -217,10 +222,10 @@ def build_default_agent_dependencies(
 
 
 async def build_default_agent(
-    config: AgentConfig | None = None,
-    *,
-    provider_registry: Any,
-    **kwargs: Any,
+        config: AgentConfig | None = None,
+        *,
+        provider_registry: Any,
+        **kwargs: Any,
 ) -> Agent:
     """构造默认 Agent；依赖由 ``build_default_agent_dependencies`` 提供。"""
     resolved_config = config or AgentConfig()

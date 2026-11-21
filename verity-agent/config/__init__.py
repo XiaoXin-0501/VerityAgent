@@ -49,7 +49,7 @@ from .infrastructure import (
     RedisConfig,
     WeaviateConfig,
 )
-from .llm import LLMConfig, StructuredOutputConfig, TokenizerConfig
+from .llm import LLMConfig, TokenizerConfig
 from .memory import MemoryConfig
 from .message import MessageConfig
 from .model import ModelConfig
@@ -97,7 +97,6 @@ __all__ = [
     "RerankProviderConfig",
     # llm
     "LLMConfig",
-    "StructuredOutputConfig",
     "TokenizerConfig",
     # memory
     "MemoryConfig",

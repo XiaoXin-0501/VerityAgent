@@ -16,6 +16,7 @@ from fastapi import FastAPI
 
 from agent.adapters.facts import WeaviateFactStore
 from agent.adapters.hooks import DispatcherHookAdapter
+from agent.adapters.kb import PgKbCatalogAdapter
 from agent.adapters.rag_events import HookRagEventSink
 from agent.bootstrap import build_default_agent
 from agent.hooks.builtin.factory import build_dispatcher
@@ -334,7 +335,13 @@ def _build_compressor(registry, hook_dispatcher, prompt_registry):
     )
 
 
-def _build_chunk_conflict_service(registry, prompt_registry, *, available: bool):
+def _build_chunk_conflict_service(
+    registry,
+    prompt_registry,
+    *,
+    available: bool,
+    kb_catalog=None,
+):
     """构造知识库片段冲突处理服务；未启用或 Weaviate 不可用时返回 None。"""
     cfg = settings.rag.retriever
     if not cfg.chunk_conflict_tool_enabled:
@@ -361,6 +368,9 @@ def _build_chunk_conflict_service(registry, prompt_registry, *, available: bool)
         max_output_tokens=cfg.chunk_conflict_max_output_tokens,
         neighbor_window=cfg.chunk_conflict_neighbor_window,
         prompts=prompt_registry,
+        # 冲突工具按 chunk_id 直接读取片段，必须复用与检索一致的 KB 权限
+        # 事实源；只凭 kb:read:<id> 会漏掉自定义 required_permission_code。
+        kb_catalog=kb_catalog,
     )
 
 
@@ -526,6 +536,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         system_prompt = _build_agent_system_prompt(prompts)
         await registry.init_all()
         app.state.provider_registry = registry
+        # 知识库可读目录：INJECTED RAG 与 search_kb 共用，权限判断只查 PG。
+        kb_catalog = PgKbCatalogAdapter()
+        app.state.kb_catalog = kb_catalog
         # Hooks 先于 RAG 装配：RAG 只向自己的 RagEventSink 发事件，
         # Agent 侧适配器再转成 HookEvent，避免 rag -> agent 反向依赖。
         hook_dispatcher = build_dispatcher(
@@ -582,6 +595,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             registry,
             prompts,
             available=weaviate_ready,
+            kb_catalog=kb_catalog,
         )
         app.state.chunk_conflict_service = chunk_conflict_service
         # 启动期权限定义用于工具注册前过滤；请求期仍按用户实际权限过滤。
@@ -612,6 +626,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             services=app.state,
             hooks=DispatcherHookAdapter(hook_dispatcher),
             rag_retriever=rag_retriever,
+            kb_catalog=kb_catalog,
             compressor=compressor,
             system_prompt=system_prompt,
         )

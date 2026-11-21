@@ -145,7 +145,6 @@ def _sanitize_source_ids(
             cleaned_topics.append(item)
         payload["topics"] = cleaned_topics
 
-    seen_item_ids: set[UUID] = set()
     for key, id_name in (
         ("facts", "fact_id"),
         ("constraints", "constraint_id"),
@@ -153,6 +152,9 @@ def _sanitize_source_ids(
         items = payload.get(key)
         if not isinstance(items, list):
             continue
+        # fact_id 与 constraint_id 是不同命名空间，必须各自去重；共用一个
+        # seen 集合会让同 UUID 的约束项被误判为重复并丢掉 id。
+        seen_item_ids: set[UUID] = set()
         cleaned_items: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict):

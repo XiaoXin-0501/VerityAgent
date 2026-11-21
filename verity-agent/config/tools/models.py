@@ -54,6 +54,9 @@ class SearchKbToolConfig(ConfigModel):
     # 单次调用允许的最大召回数；执行器会把超过的值收紧到该上限
     # 工具 schema 约定 top_k <= 50，配置上限不能突破该契约。
     max_top_k: int = Field(default=50, ge=1, le=50)
+    # 未显式提供 kb_ids 时，最多解析多少个用户可读知识库；与工具 schema 的
+    # kb_ids 上限（20）保持一致。
+    max_kb_ids: int = Field(default=20, ge=1, le=20)
 
     @model_validator(mode="after")
     def _check_top_k(self) -> "SearchKbToolConfig":

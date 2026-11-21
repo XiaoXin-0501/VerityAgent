@@ -430,6 +430,8 @@ class ToolContext(_Model):
     idempotency_key: str | None = None
     # 取消信号（运行期对象，如 asyncio.Event）
     cancel_token: Any = None
+    # 当前请求的 ToolSelection 投影；router 调用需要它展开组内工具
+    selection: ToolSelection | None = None
     # DB/Redis/检索/存储等依赖；执行器通过它取，不 import 全局单例
     services: Any = None
     metadata: dict[str, Any] = Field(default_factory=dict)

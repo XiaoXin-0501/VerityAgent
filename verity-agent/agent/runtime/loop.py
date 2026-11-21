@@ -83,6 +83,7 @@ from agent.tools.models import (
     ToolResult,
     ToolSelection,
 )
+from agent.tools.services import ToolServiceKey, get_tool_service
 from config.agent import AgentConfig
 from exception import ConfigurationError
 from utils.ids import uuid7
@@ -97,6 +98,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = ["AgentLoop"]
+
+# INJECTED 模式未显式给 kb_ids 时，最多解析多少个可读知识库；与
+# search_kb 参数 schema / ToolsConfig.search_kb.max_kb_ids 的上限一致。
+_DEFAULT_INJECTED_KB_LIMIT = 20
 
 
 class AgentLoop:
@@ -367,6 +372,9 @@ class AgentLoop:
                 usage = merge_usage(usage, plan_result.usage)
             # 工具调用历史只用于反思输入与流程日志；不进入 LLM 上下文。
             tool_history: list[dict[str, Any]] = []
+            # 已激活的路由组：刷新 ToolSelection（如 search_kb 返回片段后）
+            # 时必须重新展开，否则本轮已使用的组内工具会从下一次请求消失。
+            active_router_names: set[str] = set()
             # 反思判定止损后，下一轮主 LLM 不再暴露工具并强制最终回答。
             force_final = False
             loop_step = 0
@@ -748,6 +756,7 @@ class AgentLoop:
                         query_plan=query_plan,
                         tool_history=tool_history,
                         exposed_tool_names={item.name for item in tools},
+                        tool_selection=tool_selection,
                         flow=flow,
                     )
                     for tool_message in tool_messages:
@@ -785,6 +794,7 @@ class AgentLoop:
                             request,
                             query_plan=query_plan,
                             rag_chunk_count=rag_chunk_count,
+                            active_router_names=active_router_names,
                             flow=flow,
                         )
                     if tool_selection is not None and self.deps.tools is not None:
@@ -793,11 +803,16 @@ class AgentLoop:
                         if callable(activate):
                             for call in assistant.tool_calls:
                                 try:
-                                    tool_selection = activate(
+                                    updated = activate(
                                         tool_selection,
                                         call.name,
                                         effective_permissions,
                                     )
+                                    if updated is not tool_selection:
+                                        # 只有真正激活了路由组才会返回新对象；
+                                        # 普通工具调用保持同一 selection。
+                                        active_router_names.add(call.name)
+                                    tool_selection = updated
                                 except Exception:  # noqa: BLE001 - 路由失败不阻断回合
                                     logger.warning(
                                         "工具路由激活失败: %s",
@@ -1348,8 +1363,34 @@ class AgentLoop:
                 kb_ids.append(UUID(str(item)))
             except (TypeError, ValueError):
                 continue
+        # 与 search_kb 相同：客户端不传 kb_ids 时按用户权限解析可读知识库，
+        # 不把“猜内部 id”变成 INJECTED 模式的前置条件。
+        if not kb_ids:
+            resolver = getattr(self.deps.kb_catalog, "list_readable", None)
+            if callable(resolver):
+                try:
+                    kb_ids = list(
+                        await resolver(
+                            user_id=request.user_id,
+                            permissions=request.permissions,
+                            limit=_DEFAULT_INJECTED_KB_LIMIT,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - 解析失败按无 RAG 降级
+                    logger.warning(
+                        "INJECTED RAG 解析可读知识库失败，按无 RAG 继续",
+                        exc_info=True,
+                    )
+                    kb_ids = []
+        kb_ids = kb_ids[:_DEFAULT_INJECTED_KB_LIMIT]
         if not kb_ids or not request.content.strip():
-            logger.debug("INJECTED RAG 缺少 kb_ids 或 query，跳过注入")
+            logger.debug("INJECTED RAG 缺少可读知识库或 query，跳过注入")
+            if flow is not None:
+                flow.event(
+                    "rag.injected.skip",
+                    reason="no_readable_kb_or_empty_query",
+                    original_query=query_plan.original_query,
+                )
             return None
         top_k = request.metadata.get("top_k")
         started = perf_counter()
@@ -1960,6 +2001,7 @@ class AgentLoop:
         *,
         query_plan: QueryPlan,
         rag_chunk_count: int = 0,
+        active_router_names: set[str] | None = None,
         flow: RunFlowLog | None = None,
     ) -> tuple[ToolSelection | None, list[LLMToolDescriptor]]:
         """每轮请求扫描工具表，按用户权限 + 暴露策略生成工具集合。
@@ -1967,7 +2009,9 @@ class AgentLoop:
         - 权限：过滤用户无权使用的工具；
         - ``rag_required``：``search_kb`` 只在查询规划需要 RAG 时暴露；
         - ``rag_chunk_count``：冲突工具只在真实召回片段数达到阈值后暴露；
-        - ``compression_count``：recall_round 只在摘要压缩达到阈值后暴露。
+        - ``compression_count``：recall_round 只在摘要压缩达到阈值后暴露；
+        - ``active_router_names``：刷新选择时重新展开已激活的路由组，避免
+          组内工具在下一轮被重置成 router。
         注册表本身不因单次请求变化；工具执行期还会复核 exposure 投影。
         """
         if self.deps.tools is None:
@@ -1991,6 +2035,23 @@ class AgentLoop:
             request.permissions,
             exposure=exposure,
         )
+        # 刷新选择时重新展开已激活组：本轮已经用过的组内工具必须继续可见。
+        activate = getattr(self.deps.tools, "activate_group", None)
+        if active_router_names and callable(activate):
+            for router_name in sorted(active_router_names):
+                try:
+                    selection = activate(
+                        selection,
+                        router_name,
+                        request.permissions,
+                        exposure=exposure,
+                    )
+                except Exception:  # noqa: BLE001 - 已失效的组不应阻断其它工具
+                    logger.warning(
+                        "刷新工具选择时重新激活路由组失败: %s",
+                        router_name,
+                        exc_info=True,
+                    )
         tools = self._tool_descriptors(selection)
         if flow is not None:
             flow.event(
@@ -2236,6 +2297,7 @@ class AgentLoop:
         query_plan: QueryPlan,
         tool_history: list[dict[str, Any]],
         exposed_tool_names: set[str] | None,
+        tool_selection: ToolSelection | None,
         flow: RunFlowLog | None,
     ) -> list[ToolMessage]:
         """执行一轮工具并转换成 ToolMessage；失败也返回占位消息。
@@ -2291,6 +2353,7 @@ class AgentLoop:
             trace_id=request.request_id,
             deadline=deadline,
             cancel_token=cancel_event,
+            selection=tool_selection,
             services=self.deps.services,
             # 工具执行器通过 metadata 读取本次查询规划；search_kb 用它补充
             # 用户原话/改写 query/召回意图，不改变工具自身选择的 query。

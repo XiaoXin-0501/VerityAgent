@@ -2,6 +2,7 @@
 
 from .facts import WeaviateFactStore
 from .hooks import DispatcherHookAdapter
+from .kb import PgKbCatalogAdapter
 from .llm import ProviderChatAdapter, RoutingChatAdapter
 from .memory import PgMemoryProfileAdapter
 from .pg import PgLeaseAdapter, PgMemoryQueueAdapter, PgMessageAdapter
@@ -16,6 +17,7 @@ __all__ = [
     "PgMemoryProfileAdapter",
     "PgMemoryQueueAdapter",
     "PgMessageAdapter",
+    "PgKbCatalogAdapter",
     "RetrieverRagAdapter",
     "PipelineToolAdapter",
     "WeaviateFactStore",

@@ -18,6 +18,7 @@ from provider.llm.types import (
     ModelMessage,
     ModelTextPart,
 )
+from store.pg.models.enums import DocumentStatus
 from store.pg.repositories import DocumentRepository
 from store.weaviate import WeaviateStore
 from utils.serialization import parse_json_object
@@ -64,12 +65,19 @@ class ChunkConflictService:
         max_output_tokens: int = 1024,
         neighbor_window: int = 1,
         prompts: PromptRegistry | None = None,
+        kb_catalog: Any | None = None,
     ) -> None:
-        """保存模型、Weaviate/文档仓库与冲突处理策略。"""
+        """保存模型、Weaviate/文档仓库与冲突处理策略。
+
+        ``kb_catalog`` 是知识库可读目录（实现 ``can_read``）；为空时退回
+        ``kb:read:<id>`` 约定码，仅供离线/单测使用。生产必须注入，保证
+        自定义 ``required_permission_code`` 与检索流水线一致。
+        """
         self.model = model
         self.model_id = model_id
         self.store = store or WeaviateStore()
         self.documents = documents or DocumentRepository()
+        self.kb_catalog = kb_catalog
         self.timeout_s = max(1.0, float(timeout_s))
         self.max_output_tokens = max(64, int(max_output_tokens))
         self.neighbor_window = max(0, int(neighbor_window))
@@ -98,7 +106,11 @@ class ChunkConflictService:
                 "preferred_chunk_ids": [],
                 "conflict_summary": "",
             }
-        chunks = await self._fetch_chunks(unique_ids, permissions)
+        chunks = await self._fetch_chunks(
+            unique_ids,
+            user_id=user_id,
+            permissions=permissions,
+        )
         if len(chunks) < 2:
             return {
                 "answer": "部分片段不存在或当前无权访问，无法完成冲突处理。",
@@ -180,9 +192,11 @@ class ChunkConflictService:
     async def _fetch_chunks(
         self,
         chunk_ids: list[str],
+        *,
+        user_id: UUID,
         permissions: frozenset[str],
     ) -> list[dict[str, Any]]:
-        """按 id 读取 chunk 与文档元数据；过滤无权 KB。"""
+        """按 id 读取 chunk 与文档元数据；过滤无权 KB 与非 completed 文档。"""
         collection = self.store.doc_chunks
         results: list[dict[str, Any]] = []
         # 同一文档可能贡献多个冲突片段，文档元数据只查一次。
@@ -200,12 +214,22 @@ class ChunkConflictService:
                 continue
             props = dict(getattr(obj, "properties", {}) or {})
             kb_id = str(props.get("kb_id") or "")
-            if not _can_read(permissions, kb_id):
+            if not await self._read_allowed(
+                user_id=user_id,
+                permissions=permissions,
+                kb_id=kb_id,
+            ):
                 continue
             doc_id = str(props.get("doc_id") or "")
             if doc_id not in doc_cache:
                 doc_cache[doc_id] = await self._get_document(doc_id)
             doc = doc_cache[doc_id]
+            # 检索流水线只返回 completed 文档；按 id 直读时必须保持同一安全
+            # 边界，避免删除/重切片期间的旧 chunk 被冲突工具重新带回答。
+            status = getattr(doc, "status", None)
+            status_value = getattr(status, "value", status)
+            if doc is None or status_value != DocumentStatus.COMPLETED.value:
+                continue
             results.append(
                 {
                     "chunk_id": str(getattr(obj, "uuid", chunk_id)),
@@ -227,13 +251,45 @@ class ChunkConflictService:
             )
         return results
 
+    async def _read_allowed(
+        self,
+        *,
+        user_id: UUID,
+        permissions: frozenset[str],
+        kb_id: str,
+    ) -> bool:
+        """按 KB 的实际权限事实源判断可读性。
+
+        生产注入 ``kb_catalog.can_read``，与检索流水线共用
+        ``knowledge_bases.required_permission_code``；未注入时退回约定码，
+        仅用于离线/单测。权限源异常按拒绝处理（fail-closed）。
+        """
+        if not kb_id:
+            return False
+        checker = getattr(self.kb_catalog, "can_read", None)
+        if not callable(checker):
+            return _can_read(permissions, kb_id)
+        try:
+            return bool(
+                await checker(
+                    user_id=user_id,
+                    permissions=permissions,
+                    kb_id=UUID(kb_id),
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+        except Exception:  # noqa: BLE001 - 权限源失败不能放行
+            logger.warning("知识库权限校验失败，按不可读处理: %s", kb_id, exc_info=True)
+            return False
+
     async def _get_document(self, doc_id: str) -> Any | None:
-        """读取文档元数据；失败不阻断冲突处理。"""
+        """读取未删除文档元数据；失败不阻断冲突处理。"""
         if not doc_id:
             return None
         try:
-            return await self.documents.get(UUID(doc_id), include_deleted=True)
-        except Exception:  # noqa: BLE001 - 元数据缺失不影响正文比较
+            return await self.documents.get(UUID(doc_id), include_deleted=False)
+        except Exception:  # noqa: BLE001 - 元数据缺失按不可用跳过
             return None
 
     async def _fetch_neighbors(self, chunk: dict[str, Any]) -> list[dict[str, str]]:

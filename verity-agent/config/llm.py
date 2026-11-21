@@ -1,12 +1,37 @@
-"""LLM 应用层配置。"""
+"""LLM 应用层配置。
+
+这里只保留**实际被运行期消费**的字段：
+
+- 应用模型白名单/默认模型/fallback；
+- 本地 token 估算编码器。
+
+请求超时由模型配置 ``ModelConfig.timeout_s``（Provider SDK）与
+``AgentPolicy.turn_timeout_s``（回合总预算）共同控制；流式空闲/首包超时
+目前由 Provider SDK 的传输超时覆盖，不再提供第二套无效开关。
+"""
 
 from __future__ import annotations
 
-from pydantic import Field
+from typing import Any
+
+from pydantic import Field, model_validator
 
 from .base import ConfigModel
 
-__all__ = ["LLMConfig", "StructuredOutputConfig", "TokenizerConfig"]
+__all__ = ["LLMConfig", "TokenizerConfig"]
+
+# 已删除、但可能残留在旧部署 .env 里的键；启动时丢弃，避免 extra=forbid
+# 让历史配置直接无法启动。新部署不要再写这些键。
+_LEGACY_ENV_FIELDS = frozenset(
+    {
+        "request_timeout_s",
+        "stream_first_token_timeout_s",
+        "stream_total_timeout_s",
+        "stream_idle_timeout_s",
+        "max_tool_calls_per_response",
+        "structured_output",
+    }
+)
 
 
 class TokenizerConfig(ConfigModel):
@@ -14,19 +39,6 @@ class TokenizerConfig(ConfigModel):
 
     # tiktoken 编码器名；默认 o200k_base 更适合中英文混合
     encoding: str = Field(default="o200k_base", min_length=1, max_length=64)
-
-
-class StructuredOutputConfig(ConfigModel):
-    """结构化输出的默认策略（D-44）。"""
-
-    # 优先使用模型原生 JSON Schema；不支持时由 LLM 层决定降级
-    prefer_native_schema: bool = True
-    # 原生 schema 不可用时是否允许退到 JSON object mode
-    allow_json_object_fallback: bool = True
-    # 连 JSON mode 都没有时是否允许纯提示词约束（解析失败风险高）
-    allow_text_fallback: bool = False
-    # 结构化输出解析失败后的最多修复次数
-    max_repair_attempts: int = Field(default=1, ge=0, le=3)
 
 
 class LLMConfig(ConfigModel):
@@ -40,19 +52,17 @@ class LLMConfig(ConfigModel):
     fallback_model_ids: list[str] = Field(default_factory=list)
     # 是否启用模型级 fallback；仅首 token 前允许
     enable_model_fallback: bool = True
-    # 非流式请求总超时（秒）
-    request_timeout_s: float = Field(default=120.0, gt=0)
-    # 流式首 token 超时（秒）；超时可 fallback
-    stream_first_token_timeout_s: float = Field(default=60.0, gt=0)
-    # 流式总时长上限（秒）
-    stream_total_timeout_s: float = Field(default=600.0, gt=0)
-    # 流式两个事件之间的最大空闲（秒）
-    stream_idle_timeout_s: float = Field(default=60.0, gt=0)
-    # 单次模型响应允许的最大工具调用数
-    max_tool_calls_per_response: int = Field(default=16, ge=1)
-    # 结构化输出策略
-    structured_output: StructuredOutputConfig = Field(
-        default_factory=StructuredOutputConfig
-    )
     # 本地 token 估算
     tokenizer: TokenizerConfig = Field(default_factory=TokenizerConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_fields(cls, data: Any) -> Any:
+        """丢弃旧的、未实现的 env 字段；只做启动兼容，不再参与行为。"""
+        if not isinstance(data, dict):
+            return data
+        return {
+            key: value
+            for key, value in data.items()
+            if key not in _LEGACY_ENV_FIELDS
+        }

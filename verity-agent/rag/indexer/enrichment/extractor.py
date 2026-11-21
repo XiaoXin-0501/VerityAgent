@@ -218,7 +218,11 @@ class LLMGraphExtractor:
                 metrics["cache_hits"] += 1
                 metrics["entities"] += len(cached.keywords)
                 metrics["relations"] += len(cached.relations)
-                results[chunk.chunk_id] = cached
+                # 缓存 key 只含正文/画像/Prompt；同一正文出现在不同 chunk 时
+                # 必须把结果 id 归到当前 chunk，避免下游拿到别的 chunk_id。
+                results[chunk.chunk_id] = cached.model_copy(
+                    update={"chunk_id": chunk.chunk_id}
+                )
                 continue
             pending.append((chunk, prompt_text, key))
         if not pending:

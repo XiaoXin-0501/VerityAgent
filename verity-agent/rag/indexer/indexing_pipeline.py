@@ -25,6 +25,7 @@ from uuid import UUID, uuid4
 from config.rag import IndexerConfig
 from exception import (
     MinioObjectNotFoundError,
+    NotFoundError,
     RagError,
     RagErrorCode,
 )
@@ -178,6 +179,22 @@ class DefaultIndexingPipeline:
                 "文档正在删除，不能提交入库",
                 details={"doc_id": str(request.doc_id)},
             )
+        # 同一文档在本进程只允许一个在途入库任务：否则两个任务会并发写
+        # 向量/图，且删除时只能取消最后登记的那个 job，另一个会继续写。
+        existing_job_id = self._index_jobs_by_doc.get(request.doc_id)
+        if existing_job_id is not None:
+            existing_job = await self.job_store.get(existing_job_id)
+            if existing_job is not None and existing_job.status not in TERMINAL_STATUSES:
+                raise RagError(
+                    RagErrorCode.CONFLICT,
+                    "文档已有进行中的入库任务",
+                    details={
+                        "doc_id": str(request.doc_id),
+                        "job_id": existing_job_id,
+                        "status": existing_job.status.value,
+                    },
+                )
+            self._index_jobs_by_doc.pop(request.doc_id, None)
         document = await self._get_document(request.doc_id)
         if document is not None:
             if document.kb_id != request.kb_id:
@@ -1015,11 +1032,20 @@ class DefaultIndexingPipeline:
             )
         acquire = getattr(self.repository, "acquire_index_lease", None)
         if acquire is not None:
-            await acquire(
-                document.id,
-                worker_id=self.worker_id,
-                lease_seconds=self.config.index_lease_seconds,
-            )
+            try:
+                await acquire(
+                    document.id,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.config.index_lease_seconds,
+                )
+            except NotFoundError as exc:
+                # acquire 查不到行有两种含义：文档已删除，或别的 worker
+                # 持有未过期租约。对外统一为冲突，不能伪装成 404。
+                raise RagError(
+                    RagErrorCode.CONFLICT,
+                    "文档已被删除或正在被其他任务处理",
+                    details={"doc_id": str(document.id)},
+                ) from exc
             return
         if value != "processing":
             await self.repository.mark_processing(document.id)
