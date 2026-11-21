@@ -5,6 +5,7 @@
 
 - ``always``：无条件暴露；
 - ``rag_required``：本次查询规划需要 RAG 召回；
+- ``rag_retrieved``：实际召回片段数达到 ``min_chunks``（默认 1）；
 - ``after_compressions``：``compression_count >= min_compressions``；
 - ``all_of`` / ``any_of``：组合子条件（``conditions: [...]``）。
 
@@ -73,6 +74,14 @@ def _rag_required(_rule: ToolExposureRule, ctx: ToolExposureContext) -> bool:
     return bool(ctx.rag_required)
 
 
+def _rag_retrieved(rule: ToolExposureRule, ctx: ToolExposureContext) -> bool:
+    try:
+        minimum = int(rule.params.get("min_chunks") or 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("rag_retrieved.min_chunks 必须是整数") from exc
+    return ctx.rag_chunk_count >= max(1, minimum)
+
+
 def _after_compressions(
     rule: ToolExposureRule,
     ctx: ToolExposureContext,
@@ -96,6 +105,7 @@ def _register_builtins() -> None:
     """注册内置条件；只在模块导入时执行一次。"""
     register_exposure_condition("always", _always)
     register_exposure_condition("rag_required", _rag_required)
+    register_exposure_condition("rag_retrieved", _rag_retrieved)
     register_exposure_condition("after_compressions", _after_compressions)
     register_exposure_condition("all_of", _all_of)
     register_exposure_condition("any_of", _any_of)
@@ -105,6 +115,13 @@ def validate_exposure_rule(rule: ToolExposureRule) -> None:
     """启动期校验条件 kind 与嵌套结构；未知 kind 直接失败。"""
     if rule.kind not in _EVALUATORS:
         raise ValueError(f"未知工具暴露条件: {rule.kind}")
+    if rule.kind == "rag_retrieved":
+        try:
+            minimum = int(rule.params.get("min_chunks") or 1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("rag_retrieved.min_chunks 必须是整数") from exc
+        if minimum < 1:
+            raise ValueError("rag_retrieved.min_chunks 不能小于 1")
     if rule.kind == "after_compressions":
         try:
             threshold = int(rule.params.get("min_compressions") or 0)

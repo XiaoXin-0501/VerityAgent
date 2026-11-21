@@ -378,6 +378,8 @@ class ToolExposureContext:
     rag_required: bool = False
     # 当前会话成功压缩次数；用于 after_compressions 条件
     compression_count: int = 0
+    # 本次请求实际召回并注入/返回的 chunk 数；用于 rag_retrieved 条件
+    rag_chunk_count: int = 0
     # 预留扩展信号；新条件可从这里读取任意请求期信息
     signals: dict[str, Any] = field(default_factory=dict)
 

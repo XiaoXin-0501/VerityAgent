@@ -592,15 +592,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:  # noqa: BLE001 - 权限表不可读时保留全部工具
             logger.warning("读取权限码失败，跳过工具注册权限过滤", exc_info=True)
             registered_permissions = None
+        # 轮次召回等工具通过 app.state 共享 PG 仓库；先挂载再装配注册表，
+        # 保证 required_services 检查与运行期读取看到同一个服务实例。
+        app.state.conversation_messages = ConversationMessageRepository()
         tool_registry = build_tool_registry(
-            retriever=rag_retriever,
-            chunk_conflict_service=chunk_conflict_service,
+            # 通用依赖包：工厂自行按 key 取 retriever/chunk_conflict_service 等；
+            # 新增工具不再需要修改 bootstrap 签名。
+            services=app.state,
             available_permissions=registered_permissions,
             tools_config=settings.tools,
         )
         app.state.tool_registry = tool_registry
-        # 轮次召回工具通过 app.state 共享 PG 仓库，不 import 全局单例。
-        app.state.conversation_messages = ConversationMessageRepository()
         tool_pipeline = build_tool_pipeline(tool_registry, settings.tools)
         app.state.tool_pipeline = tool_pipeline
         agent = await build_default_agent(

@@ -4,16 +4,24 @@
 ``agent.tools.manifest`` 声明，由 tools bootstrap 装配。
 """
 
-from .conflict import ResolveConflictArgs, execute_conflict_tool
-from .recall_round import RecallRoundArgs, RecallRoundExecutor
-from .search_kb import SearchKbArgs, build_search_kb_executor, search_kb_executor
+from .conflict import ChunkConflictFactory, ResolveConflictArgs, execute_conflict_tool
+from .recall_round import RecallRoundArgs, RecallRoundExecutor, RecallRoundFactory
+from .search_kb import (
+    SearchKbArgs,
+    SearchKbFactory,
+    build_search_kb_executor,
+    search_kb_executor,
+)
 
 __all__ = [
     "SearchKbArgs",
     "build_search_kb_executor",
     "search_kb_executor",
     "ResolveConflictArgs",
+    "ChunkConflictFactory",
     "execute_conflict_tool",
     "RecallRoundArgs",
     "RecallRoundExecutor",
+    "RecallRoundFactory",
+    "SearchKbFactory",
 ]

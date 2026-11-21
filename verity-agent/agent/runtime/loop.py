@@ -345,7 +345,14 @@ class AgentLoop:
             limits = self._limits(request)
             # 权限只来自登录态；工具注册/暴露过滤不再动态追加权限码。
             effective_permissions = request.permissions
-            llm_messages, query_plan, plan_result, tool_selection, tools = (
+            (
+                llm_messages,
+                query_plan,
+                plan_result,
+                tool_selection,
+                tools,
+                rag_chunk_count,
+            ) = (
                 await self._assemble_context(
                     request,
                     user_stored,
@@ -740,6 +747,7 @@ class AgentLoop:
                         cancel_event=cancel_event,
                         query_plan=query_plan,
                         tool_history=tool_history,
+                        exposed_tool_names={item.name for item in tools},
                         flow=flow,
                     )
                     for tool_message in tool_messages:
@@ -765,6 +773,19 @@ class AgentLoop:
                             run_id=run_id,
                             turn_id=turn_id,
                             call_id=tool_call_id,
+                        )
+                    # search_kb 实际返回片段后，冲突工具才有可用的 chunk_id；
+                    # 累计片段数后刷新 ToolSelection。不能只记一个 bool：
+                    # 第一次只召回 1 条时冲突阈值未满足，后续召回更多片段
+                    # 仍需要重新评估暴露条件。
+                    retrieved_chunks = _rag_chunk_count(tool_messages)
+                    if retrieved_chunks:
+                        rag_chunk_count += retrieved_chunks
+                        tool_selection, tools = await self._select_tools(
+                            request,
+                            query_plan=query_plan,
+                            rag_chunk_count=rag_chunk_count,
+                            flow=flow,
                         )
                     if tool_selection is not None and self.deps.tools is not None:
                         # router 工具调用后展开组内工具；非 router 调用是 no-op。
@@ -1396,6 +1417,8 @@ class AgentLoop:
             content="\n\n".join(lines),
             priority=90,
             token_estimate=0,
+            # 暴露策略需要知道“实际召回了几条”，而不是只看规划 needs_rag。
+            metadata={"chunk_count": len(chunks)},
         )
 
     async def _plan_query(
@@ -1466,13 +1489,14 @@ class AgentLoop:
         QueryPlanResult | None,
         ToolSelection | None,
         list[LLMToolDescriptor],
+        int,
     ]:
         """加载 memory/history、规划查询、选择暴露工具并组装 Prompt。
 
         历史只加载会话摘要 ``covered_through_seq`` 之后的未摘要消息；
         ContextBudgetPlanner 再按 token 预算选择完整轮次，避免固定条数
-        与摘要重叠。工具选择放在查询规划之后，以便按“是否需要 RAG”
-        决定 chunk 冲突工具是否暴露。
+        与摘要重叠。INJECTED RAG 先实际召回，再按召回片段数选择工具：
+        chunk 冲突工具只在拿到足够 chunk 后才暴露。
         """
         # 画像最多占上下文的 1/4，避免长期记忆挤占当前对话与工具结果。
         context_max_tokens = int(
@@ -1590,17 +1614,19 @@ class AgentLoop:
                 ),
             )
 
-        tool_selection, tools = await self._select_tools(
-            request,
-            query_plan=query_plan,
-            flow=flow,
-        )
-        tool_tokens = _tool_descriptors_tokens(tools)
         if self.deps.context is None:
+            # 无 ContextAssembler 时不会做注入式 RAG；只暴露规划允许的
+            # search_kb，冲突工具等待工具调用实际返回 chunks 后再刷新。
+            tool_selection, tools = await self._select_tools(
+                request,
+                query_plan=query_plan,
+                rag_chunk_count=0,
+                flow=flow,
+            )
             budget_plan = self.budget_planner.plan(
                 history,
                 system_prompt=self.deps.system_prompt,
-                tool_tokens=tool_tokens,
+                tool_tokens=_tool_descriptors_tokens(tools),
             )
             return (
                 await self._llm_messages(budget_plan.messages, request),
@@ -1608,6 +1634,7 @@ class AgentLoop:
                 plan_result,
                 tool_selection,
                 tools,
+                0,
             )
 
         sections: list[ContextSection] = []
@@ -1671,6 +1698,17 @@ class AgentLoop:
                         token_estimate=0,
                     )
                 )
+
+        rag_chunk_count = int(
+            (rag_section.metadata.get("chunk_count", 0) if rag_section else 0)
+        )
+        tool_selection, tools = await self._select_tools(
+            request,
+            query_plan=query_plan,
+            rag_chunk_count=rag_chunk_count,
+            flow=flow,
+        )
+        tool_tokens = _tool_descriptors_tokens(tools)
 
         # 预算规划：system/sections/tools 扣除后，只保留放得下的完整轮次；
         # 历史已从摘要水位线之后加载，避免与 session_summary 重叠。
@@ -1753,6 +1791,7 @@ class AgentLoop:
             plan_result,
             tool_selection,
             tools,
+            rag_chunk_count,
         )
 
     def _should_reflect(
@@ -1920,14 +1959,16 @@ class AgentLoop:
         request: AgentRequest,
         *,
         query_plan: QueryPlan,
+        rag_chunk_count: int = 0,
         flow: RunFlowLog | None = None,
     ) -> tuple[ToolSelection | None, list[LLMToolDescriptor]]:
         """每轮请求扫描工具表，按用户权限 + 暴露策略生成工具集合。
 
         - 权限：过滤用户无权使用的工具；
-        - ``rag_required``：chunk 冲突工具只在需要 RAG 召回时暴露；
+        - ``rag_required``：``search_kb`` 只在查询规划需要 RAG 时暴露；
+        - ``rag_chunk_count``：冲突工具只在真实召回片段数达到阈值后暴露；
         - ``compression_count``：recall_round 只在摘要压缩达到阈值后暴露。
-        注册表本身不因单次请求变化。
+        注册表本身不因单次请求变化；工具执行期还会复核 exposure 投影。
         """
         if self.deps.tools is None:
             return None, []
@@ -1944,6 +1985,7 @@ class AgentLoop:
         exposure = ToolExposureContext(
             rag_required=bool(query_plan.needs_rag),
             compression_count=max(0, compression_count),
+            rag_chunk_count=max(0, int(rag_chunk_count)),
         )
         selection = self.deps.tools.select(
             request.permissions,
@@ -1955,6 +1997,7 @@ class AgentLoop:
                 "tools.select",
                 rag_required=exposure.rag_required,
                 compression_count=exposure.compression_count,
+                rag_chunk_count=exposure.rag_chunk_count,
                 mode=getattr(selection.mode, "value", selection.mode),
                 tools=[item.name for item in tools],
             )
@@ -2192,9 +2235,14 @@ class AgentLoop:
         cancel_event: asyncio.Event,
         query_plan: QueryPlan,
         tool_history: list[dict[str, Any]],
+        exposed_tool_names: set[str] | None,
         flow: RunFlowLog | None,
     ) -> list[ToolMessage]:
-        """执行一轮工具并转换成 ToolMessage；失败也返回占位消息。"""
+        """执行一轮工具并转换成 ToolMessage；失败也返回占位消息。
+
+        ``exposed_tool_names`` 是本次请求的 ToolSelection 投影；执行期再校验
+        一次，避免模型调用未被暴露的动态工具（如未达到阈值的冲突/回溯工具）。
+        """
         if self.deps.tools is None:
             raise AgentRuntimeError(
                 agent_error(
@@ -2246,7 +2294,11 @@ class AgentLoop:
             services=self.deps.services,
             # 工具执行器通过 metadata 读取本次查询规划；search_kb 用它补充
             # 用户原话/改写 query/召回意图，不改变工具自身选择的 query。
-            metadata={"query_plan": query_plan},
+            # exposed_tool_names 供流水线执行前复核动态暴露条件。
+            metadata={
+                "query_plan": query_plan,
+                "exposed_tool_names": exposed_tool_names,
+            },
         )
         try:
             results = await self.deps.tools.execute_batch(
@@ -2368,6 +2420,25 @@ def _flow_truncate(
     if not isinstance(limit, int) or limit <= 0 or len(value) <= limit:
         return value
     return value[:limit] + f"…[truncated {len(value) - limit} chars]"
+
+
+def _rag_chunk_count(messages: Sequence[ToolMessage]) -> int:
+    """统计本轮 search_kb 实际返回的 chunk 数。
+
+    优先读结构化 data；结果被截断时退回扫描 content 中的 chunk_id 标记。
+    """
+    total = 0
+    for message in messages:
+        if getattr(message, "name", "") != "search_kb":
+            continue
+        data = getattr(message, "json_data", None)
+        if isinstance(data, dict):
+            chunks = data.get("chunks")
+            if isinstance(chunks, list):
+                total += len(chunks)
+                continue
+        total += (getattr(message, "content", "") or "").count("chunk_id=")
+    return total
 
 
 def _ensure_current_user_message(

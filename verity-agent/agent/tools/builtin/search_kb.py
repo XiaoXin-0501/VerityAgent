@@ -12,12 +12,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from agent.tools.declaration import ToolBuildContext, ToolDeclaration
+from agent.tools.factory import SimpleToolFactory
 from agent.tools.models import ToolContext, ToolError, ToolResult
+from agent.tools.services import ToolServiceKey, get_tool_service
 from config.tools import SearchKbToolConfig
 from exception.tool import ToolErrorCode
 from rag.shared.models import RetrievalRequest
 
-__all__ = ["SearchKbArgs", "build_search_kb_executor", "search_kb_executor"]
+__all__ = ["SearchKbArgs", "SearchKbFactory", "build_search_kb_executor", "search_kb_executor"]
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +113,9 @@ async def search_kb_executor(
     config: SearchKbToolConfig | None = None,
 ) -> ToolResult:
     """执行知识库检索；失败转 ToolResult，不把底层异常抛给主循环。"""
-    retriever = getattr(context.services, "rag_retriever", None)
+    retriever = get_tool_service(
+        context.services, ToolServiceKey.RAG_RETRIEVER
+    )
     if retriever is None:
         return ToolResult.failure(
             call_id=context.call_id,
@@ -181,10 +186,22 @@ def build_search_kb_executor(config: SearchKbToolConfig | None = None):
     ) -> ToolResult:
         """适配 ToolExecutor 协议：校验参数后调用业务执行器。"""
         parsed = SearchKbArgs.model_validate(arguments)
-        # 让执行器拿到实际的 call_id/tool_name；ToolPipeline 会再归一化一次。
-        bound = context.model_copy(
-            update={"call_id": context.call_id, "tool_name": "search_kb"}
-        )
-        return await search_kb_executor(parsed, bound, config=policy)
+        # call_id/tool_name 由 ToolPipeline 在调用前写入 ToolContext，
+        # 执行器不再复制或覆盖，避免工具名与注册声明漂移。
+        return await search_kb_executor(parsed, context, config=policy)
 
     return _executor
+
+
+class SearchKbFactory(SimpleToolFactory):
+    """``search_kb`` 工厂：依赖 Retriever，执行器封装在实现模块内。"""
+
+    argument_model = SearchKbArgs
+
+    def create_executor(
+        self,
+        declaration: ToolDeclaration,
+        ctx: ToolBuildContext,
+    ):
+        """按运行配置构造检索执行器。"""
+        return build_search_kb_executor(ctx.tools_config.search_kb)

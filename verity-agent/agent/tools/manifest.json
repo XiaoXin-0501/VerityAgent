@@ -14,7 +14,7 @@
         "rag",
         "knowledge"
       ],
-      "implementation": "search_kb",
+      "implementation": "agent.tools.builtin.search_kb:SearchKbFactory",
       "cache": {
         "enabled": false
       },
@@ -23,7 +23,10 @@
       },
       "rate_limit": {
         "enabled": true
-      }
+      },
+      "required_services": [
+        "rag_retriever"
+      ]
     },
     {
       "name": "recall_round",
@@ -39,7 +42,7 @@
         "memory",
         "history"
       ],
-      "implementation": "recall_round",
+      "implementation": "agent.tools.builtin.recall_round:RecallRoundFactory",
       "metadata": {
         "cache_permission_scoped": true
       },
@@ -53,14 +56,18 @@
       "group": "kb",
       "required_permission": null,
       "exposure": {
-        "kind": "rag_required"
+        "kind": "rag_retrieved",
+        "min_chunks": 2
       },
       "side_effect": "READ",
       "tags": [
         "rag",
         "conflict"
       ],
-      "implementation": "chunk_conflict"
+      "implementation": "agent.tools.builtin.conflict:ChunkConflictFactory",
+      "required_services": [
+        "chunk_conflict_service"
+      ]
     }
   ]
 }

@@ -6,10 +6,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from agent.tools.declaration import ToolBuildContext, ToolDeclaration
+from agent.tools.factory import SimpleToolFactory
 from agent.tools.models import ToolContext, ToolError, ToolResult
+from agent.tools.services import ToolServiceKey, get_tool_service
 from exception.tool import ToolErrorCode
 
-__all__ = ["ResolveConflictArgs", "execute_conflict_tool"]
+__all__ = ["ResolveConflictArgs", "ChunkConflictFactory", "execute_conflict_tool"]
 
 
 class ResolveConflictArgs(BaseModel):
@@ -38,11 +41,13 @@ async def execute_conflict_tool(
 ) -> ToolResult:
     """调用冲突服务，返回可直接用于回答的结论。"""
     parsed = ResolveConflictArgs.model_validate(arguments)
-    service = getattr(context.services, "chunk_conflict_service", None)
+    service = get_tool_service(
+        context.services, ToolServiceKey.CHUNK_CONFLICT_SERVICE
+    )
     if service is None:
         return ToolResult.failure(
             call_id=context.call_id,
-            tool_name="resolve_chunk_conflict",
+            tool_name=context.tool_name,
             error=ToolError(
                 code=ToolErrorCode.UPSTREAM_ERROR,
                 message="知识库冲突处理服务未配置",
@@ -61,7 +66,7 @@ async def execute_conflict_tool(
     except Exception as exc:  # noqa: BLE001 - 工具错误统一结构化
         return ToolResult.failure(
             call_id=context.call_id,
-            tool_name="resolve_chunk_conflict",
+            tool_name=context.tool_name,
             error=ToolError(
                 code=ToolErrorCode.UPSTREAM_ERROR,
                 message="知识库冲突处理失败，请稍后重试",
@@ -73,7 +78,7 @@ async def execute_conflict_tool(
     if not answer:
         return ToolResult.failure(
             call_id=context.call_id,
-            tool_name="resolve_chunk_conflict",
+            tool_name=context.tool_name,
             error=ToolError(
                 code=ToolErrorCode.UPSTREAM_ERROR,
                 message="知识库冲突处理未返回结论",
@@ -82,7 +87,7 @@ async def execute_conflict_tool(
         )
     return ToolResult.success(
         call_id=context.call_id,
-        tool_name="resolve_chunk_conflict",
+        tool_name=context.tool_name,
         content=answer,
         data={
             "conflict_type": parsed.conflict_type,
@@ -92,3 +97,17 @@ async def execute_conflict_tool(
             "chunk_ids": chunk_ids,
         },
     )
+
+
+class ChunkConflictFactory(SimpleToolFactory):
+    """``resolve_chunk_conflict`` 工厂：依赖冲突服务。"""
+
+    argument_model = ResolveConflictArgs
+
+    def create_executor(
+        self,
+        declaration: ToolDeclaration,
+        ctx: ToolBuildContext,
+    ):
+        """冲突执行器是无状态函数。"""
+        return execute_conflict_tool

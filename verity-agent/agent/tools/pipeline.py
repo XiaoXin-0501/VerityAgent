@@ -191,6 +191,23 @@ class ToolPipeline:
                 tool_name=spec.name,
                 details={"required_permission": spec.required_permission},
             )
+        # ToolSelection 只是下发给 LLM 的投影；模型仍可能调用未暴露的动态
+        # 工具（例如 chunk 数未达阈值的冲突工具）。执行前复核一次，避免
+        # 动态暴露条件被绕过。调用方不提供集合时保持旧行为（不做暴露校验）。
+        exposed_tool_names = context.metadata.get("exposed_tool_names")
+        if (
+            exposed_tool_names is not None
+            and call.name not in exposed_tool_names
+        ):
+            return self._failure(
+                call,
+                started,
+                started_at,
+                ToolErrorCode.TOOL_DISABLED,
+                f"工具当前未开放: {spec.name}",
+                tool_name=spec.name,
+                details={"reason": "not_exposed"},
+            )
         # raw_arguments 是模型原始输出；空对象 "{}" 也是合法参数，不能因为
         # 解析后是空 dict 就误判为非法 JSON。
         if call.raw_arguments:
@@ -401,6 +418,21 @@ class ToolPipeline:
                 ToolErrorCode.PERMISSION_DENIED,
                 f"没有调用路由工具 {call.name} 的权限",
                 tool_name=call.name,
+            )
+            return result, selection
+        exposed_tool_names = context.metadata.get("exposed_tool_names")
+        if (
+            exposed_tool_names is not None
+            and call.name not in exposed_tool_names
+        ):
+            result = self._failure(
+                call,
+                started,
+                started_at,
+                ToolErrorCode.TOOL_DISABLED,
+                f"路由工具当前未开放: {call.name}",
+                tool_name=call.name,
+                details={"reason": "not_exposed"},
             )
             return result, selection
 

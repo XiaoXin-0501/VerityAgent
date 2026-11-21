@@ -95,11 +95,21 @@ def build_default_agent_dependencies(
                 f"(kind={getattr(spec.kind, 'value', spec.kind)})"
             )
 
-    registry = tool_registry or build_tool_registry(
-        search_kb=settings.tools.search_kb,
-        recall_round=settings.tools.recall_round,
+    # 不能用 ``tool_registry or ...``：ToolRegistry 定义了 __len__，空注册表
+    # 会被判为假值，导致调用方显式注入的空注册表被意外替换。
+    registry = (
+        tool_registry
+        if tool_registry is not None
+        else build_tool_registry(
+            services=services,
+            tools_config=settings.tools,
+        )
     )
-    pipeline = tool_pipeline or build_tool_pipeline(registry, settings.tools)
+    pipeline = (
+        tool_pipeline
+        if tool_pipeline is not None
+        else build_tool_pipeline(registry, settings.tools)
+    )
     capabilities = getattr(spec, "capabilities", None)
     max_context_tokens = int(
         getattr(capabilities, "max_context_tokens", 8192) or 8192

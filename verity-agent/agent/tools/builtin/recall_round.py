@@ -16,7 +16,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from agent.tools.declaration import ToolBuildContext, ToolDeclaration
+from agent.tools.factory import SimpleToolFactory, with_exposure_param
 from agent.tools.models import ToolContext, ToolError, ToolResult
+from agent.tools.services import ToolServiceKey, get_tool_service
 from config.tools import RecallRoundToolConfig
 from exception.tool import ToolErrorCode
 from store.pg.repositories import ConversationMessageRepository
@@ -25,6 +28,7 @@ from utils.text import extract_content_text, truncate
 __all__ = [
     "RecallRoundArgs",
     "RecallRoundExecutor",
+    "RecallRoundFactory",
 ]
 
 logger = logging.getLogger(__name__)
@@ -57,7 +61,9 @@ class RecallRoundExecutor:
         """优先使用应用共享的仓库；测试可注入内存实现。"""
         if self.repository is not None:
             return self.repository
-        shared = getattr(context.services, "conversation_messages", None)
+        shared = get_tool_service(
+            context.services, ToolServiceKey.CONVERSATION_MESSAGES
+        )
         if shared is not None:
             return shared
         return ConversationMessageRepository()
@@ -168,3 +174,39 @@ class RecallRoundExecutor:
             if text:
                 answer = text
         return truncate(answer, _ITEM_MAX_CHARS)
+
+
+class RecallRoundFactory(SimpleToolFactory):
+    """``recall_round`` 工厂：可用性、执行器与阈值覆盖都封装在此。"""
+
+    argument_model = RecallRoundArgs
+
+    def available(
+        self,
+        declaration: ToolDeclaration,
+        ctx: ToolBuildContext,
+    ) -> bool:
+        """配置关闭时不注册。"""
+        return ctx.tools_config.recall_round.enabled
+
+    def create_executor(
+        self,
+        declaration: ToolDeclaration,
+        ctx: ToolBuildContext,
+    ):
+        """构造轮次召回执行器。"""
+        return RecallRoundExecutor(ctx.tools_config.recall_round)
+
+    def spec_overrides(
+        self,
+        declaration: ToolDeclaration,
+        ctx: ToolBuildContext,
+    ):
+        """运行配置覆盖 JSON 的 min_compressions 默认值。"""
+        return {
+            "exposure": with_exposure_param(
+                declaration.exposure,
+                "min_compressions",
+                ctx.tools_config.recall_round.min_compressions,
+            )
+        }

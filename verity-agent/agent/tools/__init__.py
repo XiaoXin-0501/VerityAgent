@@ -53,6 +53,8 @@ from .models import (
     ToolSpec,
     classify_batch_status,
 )
+from .declaration import ToolBuildContext, ToolDeclaration
+from .factory import SimpleToolFactory, ToolFactory
 from .pipeline import ToolPipeline
 from .policies import (
     CachePolicy,
@@ -66,6 +68,7 @@ from .policies import (
 )
 from .registry import ToolRegistry
 from .selection import activate_group, build_selection, is_router_tool
+from .services import ToolServiceKey, get_tool_service
 from .state import (
     CircuitBreakerBackend,
     IdempotencyBackend,
@@ -86,6 +89,12 @@ __all__ = [
     # definition
     "ToolSpec",
     "ToolDescriptor",
+    "ToolDeclaration",
+    "ToolBuildContext",
+    "ToolFactory",
+    "SimpleToolFactory",
+    "ToolServiceKey",
+    "get_tool_service",
     "ToolExposureContext",
     "ToolExposureRule",
     "ToolGroup",

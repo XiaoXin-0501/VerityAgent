@@ -1,103 +1,53 @@
-"""内置工具清单：JSON 声明 + 代码实现映射。
+"""JSON 工具 manifest 加载与工厂解析。
 
-- ``manifest.json`` 集中声明名称、描述、分组、静态权限、暴露条件、单工具
-  横切能力差异与实现 id；
-- 本模块把实现 id 映射到 ``builtin`` 的参数模型/执行器，构造 ``ToolSpec``；
-- 注册表启动后常驻所有已装配工具；每次请求由 Agent 扫描注册表，结合用户
-  权限 + ``ToolExposureContext`` 生成实际暴露的 ToolSelection；
-- ``required_permission`` 为空表示登录用户即可使用；权限只用于注册/暴露前
-  的过滤，不是运行期动态注册条件。
+manifest.json 负责声明工具；具体工厂通过 ``implementation`` 的
+``module:FactoryClass`` 路径动态解析。新增工具不需要修改本文件或
+bootstrap，只需要新增实现模块并在 JSON 增加声明。
 """
 
 from __future__ import annotations
 
+import importlib
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from config.tools import (
-    RecallRoundToolConfig,
-    SearchKbToolConfig,
-    ToolPolicyDefaults,
-)
-
-from .builtin import (
-    RecallRoundArgs,
-    RecallRoundExecutor,
-    ResolveConflictArgs,
-    SearchKbArgs,
-    build_search_kb_executor,
-    execute_conflict_tool,
-)
-from .enums import ToolKind, ToolSideEffect
+from .declaration import ToolBuildContext, ToolDeclaration, ToolManifestFile
 from .exposure import validate_exposure_rule
-from .models import RegisteredTool, ToolExposureRule, ToolSpec
-from .policies import ToolPolicy
+from .factory import ToolFactory
+from .models import RegisteredTool
+from .services import ToolServiceKey
 
-__all__ = [
-    "TOOL_MANIFEST",
-    "ToolBuildContext",
-    "ToolDeclaration",
-    "build_declared_tool",
-]
+__all__ = ["TOOL_MANIFEST", "build_declared_tool"]
 
 _MANIFEST_PATH = Path(__file__).with_name("manifest.json")
+_FACTORY_BY_NAME: dict[str, ToolFactory] = {}
 
 
-class _Model(BaseModel):
-    """manifest 模型基类：拒绝未知字段，加载期即失败。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class ToolDeclaration(_Model):
-    """manifest.json 中的单个工具声明。"""
-
-    name: str = Field(min_length=1, max_length=64)
-    description: str = Field(min_length=1)
-    group: str | None = None
-    # 静态权限码；None 表示登录用户可用
-    required_permission: str | None = None
-    # 暴露条件：kind + 参数；具体解释器见 agent.tools.exposure
-    exposure: ToolExposureRule = Field(
-        default_factory=lambda: ToolExposureRule(kind="always")
-    )
-    side_effect: ToolSideEffect = ToolSideEffect.READ
-    tags: list[str] = Field(default_factory=list)
-    # 实现 id；必须在本模块 _IMPLEMENTATIONS 中存在
-    implementation: str = Field(min_length=1, max_length=64)
-    # 横切能力全部铺开；只写需要修改的字段，装配时与顶层默认值深合并。
-    # 未提供的字段继承 ToolsConfig.policy；显式 null 可用 model_fields_set 区分。
-    timeout_s: float | None = Field(default=None, gt=0)
-    retry: dict[str, Any] | None = None
-    cache: dict[str, Any] | None = None
-    circuit_breaker: dict[str, Any] | None = None
-    rate_limit: dict[str, Any] | None = None
-    idempotency: dict[str, Any] | None = None
-    result_limit: dict[str, Any] | None = None
-    max_concurrency: int | None = Field(default=None, ge=1)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class ToolManifestFile(_Model):
-    """manifest.json 顶层结构。"""
-
-    version: Literal[1] = 1
-    tools: list[ToolDeclaration] = Field(default_factory=list)
-
-
-@dataclass(frozen=True, slots=True)
-class ToolBuildContext:
-    """启动期装配依赖；只包含具体实现需要的外部对象/配置。"""
-
-    retriever: Any | None
-    chunk_conflict_service: Any | None
-    search_kb: SearchKbToolConfig
-    recall_round: RecallRoundToolConfig
-    policy_defaults: ToolPolicyDefaults
+def _resolve_factory(implementation: str) -> ToolFactory:
+    """解析 ``module:FactoryClass``；实例化并校验 build 协议。"""
+    module_name, separator, factory_name = implementation.partition(":")
+    if not separator or not module_name or not factory_name:
+        raise ValueError(
+            f"工具 implementation 必须是 module:FactoryClass: {implementation!r}"
+        )
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:  # noqa: BLE001 - 包装成启动期配置错误
+        raise ValueError(
+            f"工具实现模块导入失败: {module_name}: {exc}"
+        ) from exc
+    factory_obj = getattr(module, factory_name, None)
+    if factory_obj is None:
+        raise ValueError(f"工具实现类不存在: {implementation}")
+    try:
+        factory = factory_obj() if isinstance(factory_obj, type) else factory_obj
+    except Exception as exc:  # noqa: BLE001 - 启动期工厂构造失败
+        raise ValueError(
+            f"工具工厂实例化失败: {implementation}: {exc}"
+        ) from exc
+    if not callable(getattr(factory, "build", None)):
+        raise ValueError(f"工具实现不是合法工厂: {implementation}")
+    return factory
 
 
 def _load_manifest() -> tuple[ToolDeclaration, ...]:
@@ -108,144 +58,22 @@ def _load_manifest() -> tuple[ToolDeclaration, ...]:
     if len(names) != len(set(names)):
         raise ValueError(f"manifest 工具名重复: {names}")
     for item in manifest.tools:
-        if item.implementation not in _IMPLEMENTATIONS:
-            raise ValueError(
-                f"manifest 工具 {item.name} 引用了未知实现: {item.implementation}"
-            )
+        # 暴露条件是运行期解释的；未知 kind/参数必须在启动期失败，
+        # 不能等到请求期才按“不暴露”静默降级。
+        validate_exposure_rule(item.exposure)
+        # required_services 与运行期读取共用 ToolServiceKey，启动期拦截
+        # 拼写漂移，避免工具再次因服务名不一致被跳过。
+        for service_name in item.required_services:
+            try:
+                ToolServiceKey(service_name)
+            except ValueError as exc:
+                raise ValueError(
+                    f"工具 {item.name} 声明了未知服务: {service_name}"
+                ) from exc
+        _FACTORY_BY_NAME[item.name] = _resolve_factory(item.implementation)
     return tuple(manifest.tools)
 
 
-def _spec_for(
-    declaration: ToolDeclaration,
-    *,
-    policy: ToolPolicy,
-    exposure: ToolExposureRule | None = None,
-) -> ToolSpec:
-    """把 JSON 声明投影为运行期 ToolSpec。"""
-    return ToolSpec(
-        name=declaration.name,
-        description=declaration.description,
-        group=declaration.group,
-        kind=ToolKind.EXECUTABLE,
-        side_effect=declaration.side_effect,
-        exposure=exposure or declaration.exposure,
-        required_permission=declaration.required_permission,
-        policy=policy,
-        tags=list(declaration.tags),
-        metadata=dict(declaration.metadata),
-    )
-
-
-def _with_param(
-    rule: ToolExposureRule,
-    key: str,
-    value: Any,
-) -> ToolExposureRule:
-    """覆盖条件参数，保持 kind 与其它参数不变。"""
-    params = dict(rule.params)
-    params[key] = value
-    return ToolExposureRule(kind=rule.kind, **params)
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """递归合并 policy 覆盖；工具只写差异字段。"""
-    merged = dict(base)
-    for key, value in override.items():
-        current = merged.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(current, value)
-        else:
-            merged[key] = value
-    return merged
-
-
-_POLICY_FIELDS = (
-    "timeout_s",
-    "retry",
-    "cache",
-    "circuit_breaker",
-    "rate_limit",
-    "idempotency",
-    "result_limit",
-    "max_concurrency",
-)
-
-
-def _policy_for(declaration: ToolDeclaration, ctx: ToolBuildContext) -> ToolPolicy:
-    """顶层默认策略 + 单工具差异字段 -> ToolPolicy。"""
-    base = ctx.policy_defaults.model_dump(mode="python")
-    overrides = {
-        key: getattr(declaration, key)
-        for key in _POLICY_FIELDS
-        if key in declaration.model_fields_set
-    }
-    return ToolPolicy.model_validate(_deep_merge(base, overrides))
-
-
-def _build_search_kb(
-    declaration: ToolDeclaration,
-    ctx: ToolBuildContext,
-) -> RegisteredTool | None:
-    """装配 ``search_kb``：RAG 工具模式入口。"""
-    if ctx.retriever is None:
-        return None
-    return RegisteredTool(
-        spec=_spec_for(declaration, policy=_policy_for(declaration, ctx)),
-        executor=build_search_kb_executor(ctx.search_kb),
-        argument_model=SearchKbArgs,
-        source="builtin",
-    )
-
-
-def _build_recall_round(
-    declaration: ToolDeclaration,
-    ctx: ToolBuildContext,
-) -> RegisteredTool | None:
-    """装配 ``recall_round``：摘要压缩达到阈值后才暴露。"""
-    if not ctx.recall_round.enabled:
-        return None
-    return RegisteredTool(
-        spec=_spec_for(
-            declaration,
-            policy=_policy_for(declaration, ctx),
-            # JSON 中的 min_compressions 是部署默认值；运行配置可覆盖。
-            exposure=_with_param(
-                declaration.exposure,
-                "min_compressions",
-                ctx.recall_round.min_compressions,
-            ),
-        ),
-        executor=RecallRoundExecutor(ctx.recall_round),
-        argument_model=RecallRoundArgs,
-        source="builtin",
-    )
-
-
-def _build_chunk_conflict(
-    declaration: ToolDeclaration,
-    ctx: ToolBuildContext,
-) -> RegisteredTool | None:
-    """装配 ``resolve_chunk_conflict``：仅 RAG 召回请求中暴露。"""
-    if ctx.chunk_conflict_service is None:
-        return None
-    return RegisteredTool(
-        spec=_spec_for(declaration, policy=_policy_for(declaration, ctx)),
-        executor=execute_conflict_tool,
-        argument_model=ResolveConflictArgs,
-        source="builtin",
-    )
-
-
-_IMPLEMENTATIONS: dict[
-    str, Callable[[ToolDeclaration, ToolBuildContext], RegisteredTool | None]
-] = {
-    "search_kb": _build_search_kb,
-    "recall_round": _build_recall_round,
-    "chunk_conflict": _build_chunk_conflict,
-}
-
-
-# 启动期统一工具表；新增工具：改 manifest.json + 在这里注册实现 id。
 TOOL_MANIFEST: tuple[ToolDeclaration, ...] = _load_manifest()
 
 
@@ -253,12 +81,13 @@ def build_declared_tool(
     declaration: ToolDeclaration,
     ctx: ToolBuildContext,
 ) -> RegisteredTool | None:
-    """按实现 id 装配单个工具；实现缺失在加载期已校验。"""
-    builder = _IMPLEMENTATIONS.get(declaration.implementation)
-    if builder is None:
+    """按 manifest 声明调用工厂装配工具。"""
+    factory = _FACTORY_BY_NAME.get(declaration.name)
+    if factory is None:
+        raise ValueError(f"工具没有已解析工厂: {declaration.name}")
+    tool = factory.build(declaration, ctx)
+    if tool is not None and not isinstance(tool, RegisteredTool):
         raise ValueError(
-            f"工具 {declaration.name} 引用了未知实现: {declaration.implementation}"
+            f"工具工厂返回类型非法: {declaration.name} -> {type(tool).__name__}"
         )
-    # 暴露条件在装配期校验，允许实现模块在 import 时先注册自定义 evaluator。
-    validate_exposure_rule(declaration.exposure)
-    return builder(declaration, ctx)
+    return tool
