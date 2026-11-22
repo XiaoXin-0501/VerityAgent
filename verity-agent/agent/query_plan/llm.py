@@ -216,22 +216,41 @@ def _parse_plan(
     original_query: str,
     normalized_query: str,
 ) -> QueryPlan | None:
-    """解析规划 JSON；字段缺失时按保守默认值补齐。"""
+    """解析规划 JSON；字段缺失时按保守默认值补齐。
+
+    ``rewritten_query_zh/en`` 是新增的双语检索变体；兼容旧模型只输出单个
+    ``rewritten_query`` 的情况：把它作为主改写，并补到缺失的语言变体。
+    """
     payload = extract_json_object(raw)
     if payload is None:
         return None
     needs_rag = _as_bool(payload.get("needs_rag"))
     if needs_rag is None:
         return None
-    rewritten = str(payload.get("rewritten_query") or "").strip()
+    legacy = str(payload.get("rewritten_query") or "").strip()
+    zh = str(payload.get("rewritten_query_zh") or "").strip()
+    en = str(payload.get("rewritten_query_en") or "").strip()
     intent = parse_rag_intent(payload.get("rag_intent"))
     entities = _parse_entities(payload.get("entities"))
     if not needs_rag:
         rewritten = None
+        zh = None
+        en = None
         intent = None
         entities = []
     else:
-        rewritten = rewritten or normalized_query
+        if not zh and not en:
+            # 旧输出/模型漏字段：至少保留规范化原话，不能空召回。
+            legacy = legacy or normalized_query
+            zh, en = _split_legacy_query(legacy)
+        else:
+            # 只给单语时优先把它放到对应语言；另一语言保持为空，
+            # 不复制伪翻译，避免把中文 query 当英文 BM25 输入。
+            if not zh and _has_cjk(legacy):
+                zh = legacy
+            if not en and legacy and not _has_cjk(legacy):
+                en = legacy
+        rewritten = _primary_rewrite(normalized_query, zh, en)
         intent = intent or RagRecallIntent.LOOKUP
     user_intent = str(payload.get("user_intent") or "").strip() or normalized_query
     reason = str(payload.get("reason") or "").strip()
@@ -240,6 +259,8 @@ def _parse_plan(
         normalized_query=normalized_query,
         needs_rag=needs_rag,
         rewritten_query=rewritten,
+        rewritten_query_zh=zh or None,
+        rewritten_query_en=en or None,
         rag_intent=intent,
         user_intent=user_intent,
         entities=entities,
@@ -247,6 +268,29 @@ def _parse_plan(
         confidence=0.85,
         reason=reason or "LLM 规划",
     )
+
+
+def _has_cjk(text: str) -> bool:
+    """判断文本是否包含 CJK 字符；用于选择主改写语言。"""
+    return any("一" <= char <= "鿿" for char in text)
+
+
+def _split_legacy_query(legacy: str) -> tuple[str, str]:
+    """旧单 query 兼容：按语言放到 zh/en，另一语言留空。
+
+    旧模型没有翻译能力时，不能把中文原文同时当英文 query；宁可少一条，
+    也不要让 BM25 用错误语言召回。
+    """
+    if _has_cjk(legacy):
+        return legacy, ""
+    return "", legacy
+
+
+def _primary_rewrite(normalized: str, zh: str, en: str) -> str:
+    """主改写与用户原话同语言；原话语言无法判断时优先中文变体。"""
+    if _has_cjk(normalized):
+        return zh or en or normalized
+    return en or zh or normalized
 
 
 def _parse_entities(value: Any) -> list[str]:

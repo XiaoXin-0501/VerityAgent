@@ -2,7 +2,11 @@
 
 规划产物只描述“这次请求要做什么”，不包含答案：
 
-- ``rewritten_query``：需要 RAG 时给检索使用的改写 query；
+- ``rewritten_query``：需要 RAG 时给检索使用的改写 query（主改写，
+  与用户原话同语言，用于展示/兼容）；
+- ``rewritten_query_zh`` / ``rewritten_query_en``：同一语义的中英文检索
+  变体；RAG 会分别召回，避免中文问句只能命中中文文档、英文问句只能
+  命中英文文档；
 - ``rag_intent``：需要 RAG 时给 rerank 使用的召回意图；
 - ``user_intent``：用户真正想完成的事，用于召回长期记忆事实；
 - ``needs_rag``：是否进行知识库召回。
@@ -58,6 +62,10 @@ class QueryPlan(_Model):
     needs_rag: bool = False
     # 需要 RAG 时才非空；不需要时为 None
     rewritten_query: str | None = None
+    # 同一语义的中英文检索变体；LLM 规划时尽量都产出，规则路径可为空。
+    # 分别召回后再融合，避免单一语言 query 漏掉另一语言文档。
+    rewritten_query_zh: str | None = None
+    rewritten_query_en: str | None = None
     # 需要 RAG 时才非空；不需要时为 None
     rag_intent: RagRecallIntent | None = None
     # 用户真正想完成的事；用于长期事实 BM25 召回
@@ -73,8 +81,26 @@ class QueryPlan(_Model):
 
     @property
     def retrieval_query(self) -> str:
-        """召回消费的 query：改写优先，其次规范化原话。"""
+        """召回消费的主 query：改写优先，其次规范化原话。"""
         return (self.rewritten_query or "").strip() or self.normalized_query
+
+    @property
+    def retrieval_queries(self) -> list[str]:
+        """返回本次检索要并发召回的全部 query。
+
+        顺序固定为“主改写 → 中文变体 → 英文变体”，去空、去重；
+        没有改写时退化为规范化原话，保证调用方总能拿到至少一条。
+        """
+        queries: list[str] = []
+        for value in (
+            self.rewritten_query,
+            self.rewritten_query_zh,
+            self.rewritten_query_en,
+        ):
+            text = (value or "").strip()
+            if text and text not in queries:
+                queries.append(text)
+        return queries or [self.normalized_query]
 
     @property
     def fact_query(self) -> str:

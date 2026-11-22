@@ -57,6 +57,11 @@ class SearchKbToolConfig(ConfigModel):
     # 未显式提供 kb_ids 时，最多解析多少个用户可读知识库；与工具 schema 的
     # kb_ids 上限（20）保持一致。
     max_kb_ids: int = Field(default=20, ge=1, le=20)
+    # 单次 run（一个用户回合）最多调用 search_kb 的次数。提示词已经要求
+    # “补查不超过 2 次”，但模型可能在一批里并行发多个子查询；硬上限防止
+    # 单回合检索次数和 token 失控。达到上限后返回明确错误，让模型用已有
+    # 片段回答。
+    max_calls_per_run: int = Field(default=6, ge=1, le=20)
 
     @model_validator(mode="after")
     def _check_top_k(self) -> "SearchKbToolConfig":

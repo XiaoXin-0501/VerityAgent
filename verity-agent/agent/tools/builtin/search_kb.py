@@ -65,6 +65,9 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
         return content, {
             "query": getattr(result, "query", None),
             "rewritten_query": getattr(result, "rewritten_query", None),
+            "rewritten_queries": list(
+                getattr(result, "rewritten_queries", []) or []
+            ),
             "rag_intent": getattr(result, "rag_intent", None),
             "chunks": [],
             "documents": {},
@@ -95,6 +98,7 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
     data = {
         "query": getattr(result, "query", None),
         "rewritten_query": getattr(result, "rewritten_query", None),
+        "rewritten_queries": list(getattr(result, "rewritten_queries", []) or []),
         "rag_intent": getattr(result, "rag_intent", None),
         "warnings": warnings,
         "chunks": [
@@ -105,6 +109,13 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
                 "heading": getattr(chunk, "heading", None),
                 "content": chunk.content,
                 "score": getattr(chunk, "score", None),
+                # 观测字段：图 next-hop 召回与邻居扩展片段，便于排障/评估。
+                "graph_recalled": bool(
+                    (getattr(chunk, "metadata", {}) or {}).get("graph_recalled")
+                ),
+                "neighbor_of": (getattr(chunk, "metadata", {}) or {}).get(
+                    "neighbor_of"
+                ),
                 "citation": (
                     chunk.citation.model_dump(mode="json")
                     if getattr(chunk, "citation", None) is not None
@@ -154,6 +165,27 @@ async def search_kb_executor(
             ),
         )
     policy = config or SearchKbToolConfig()
+    # 单回合检索硬预算：提示词约束之外再兜底，防止模型在一批里并行发大量
+    # 子查询导致 token/耗时失控。计数放在 run 级 metadata，由主循环注入。
+    counts = context.metadata.get("tool_call_counts")
+    if isinstance(counts, dict):
+        used = int(counts.get("search_kb", 0))
+        if used >= policy.max_calls_per_run:
+            return ToolResult.failure(
+                call_id=context.call_id,
+                tool_name=context.tool_name,
+                error=ToolError(
+                    code=ToolErrorCode.RATE_LIMITED,
+                    message=(
+                        f"本次回答的检索次数已达上限（{policy.max_calls_per_run} 次），"
+                        "请基于已返回的片段作答；如仍缺少关键信息，请明确说明缺口，"
+                        "不要再调用检索工具。"
+                    ),
+                    retryable=False,
+                    details={"used": used, "limit": policy.max_calls_per_run},
+                ),
+            )
+        counts["search_kb"] = used + 1
     # 未显式指定时使用运维配置的默认值，并统一收紧到允许上限。
     top_k = arguments.top_k if arguments.top_k is not None else policy.default_top_k
     top_k = min(top_k, policy.max_top_k)
@@ -210,6 +242,8 @@ async def search_kb_executor(
     plan = context.metadata.get("query_plan")
     original_query = getattr(plan, "original_query", None) or arguments.query
     rewritten_query = getattr(plan, "rewritten_query", None)
+    # 中英文双语改写由 QueryPlan.retrieval_queries 统一给出；老 plan/无规划时为空。
+    rewritten_queries = list(getattr(plan, "retrieval_queries", []) or [])
     rag_intent = (
         getattr(plan, "rag_intent_label", None) if plan is not None else None
     )
@@ -218,6 +252,7 @@ async def search_kb_executor(
         query=arguments.query,
         original_query=original_query,
         rewritten_query=rewritten_query,
+        rewritten_queries=rewritten_queries,
         rag_intent=rag_intent,
         entities=entities,
         kb_ids=kb_ids,

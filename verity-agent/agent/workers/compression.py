@@ -358,40 +358,62 @@ class CompressionService:
         allowed_round_ids: set[UUID],
         existing_topic_ids: set[UUID],
     ) -> SessionSummary:
-        """调用 LLM、过滤非法来源 id 并校验增量 SessionSummary。"""
-        request = ChatModelRequest(
-            model=self.model_id,
-            messages=[
-                ModelMessage(
-                    role=ModelRole.SYSTEM,
-                    content=[ModelTextPart(text=self.system_prompt)],
-                ),
-                ModelMessage(
-                    role=ModelRole.USER,
-                    content=[
-                        ModelTextPart(
-                            text=json.dumps(payload, ensure_ascii=False)
-                        )
-                    ],
-                ),
-            ],
-            options=ModelGenerationOptions(
-                temperature=0.1,
-                max_output_tokens=self.config.compression_max_output_tokens,
+        """调用 LLM、过滤非法来源 id 并校验增量 SessionSummary。
+
+        模型偶尔会把增量 JSON 输出到一半就截断；第二次尝试提高输出预算，
+        比简单重试同一预算更容易恢复。压缩仍是后台 best-effort 任务。
+        """
+        messages = [
+            ModelMessage(
+                role=ModelRole.SYSTEM,
+                content=[ModelTextPart(text=self.system_prompt)],
             ),
-        )
-        response = await asyncio.wait_for(
-            self.model.complete(request),
-            timeout=self.config.compression_timeout_s,
-        )
-        return SessionSummary.model_validate(
-            _sanitize_source_ids(
-                parse_json_object(_response_text(response)),
-                allowed_msg_ids=allowed_msg_ids,
-                allowed_round_ids=allowed_round_ids,
-                existing_topic_ids=existing_topic_ids,
+            ModelMessage(
+                role=ModelRole.USER,
+                content=[
+                    ModelTextPart(text=json.dumps(payload, ensure_ascii=False))
+                ],
+            ),
+        ]
+        base_budget = max(128, int(self.config.compression_max_output_tokens))
+        last_error: ValueError | None = None
+        for attempt in range(2):
+            request = ChatModelRequest(
+                model=self.model_id,
+                messages=messages,
+                options=ModelGenerationOptions(
+                    temperature=0.1,
+                    # 第二次最多翻倍到 8192，避免长摘要 JSON 反复截断。
+                    max_output_tokens=min(8192, base_budget * (attempt + 1)),
+                ),
             )
-        )
+            response = await asyncio.wait_for(
+                self.model.complete(request),
+                timeout=self.config.compression_timeout_s,
+            )
+            raw = _response_text(response)
+            try:
+                parsed = parse_json_object(raw)
+            except ValueError as exc:
+                last_error = exc
+                logger.warning(
+                    "会话压缩输出无法解析为 JSON（第 %s 次, chars=%s）: head=%r tail=%r",
+                    attempt + 1,
+                    len(raw),
+                    raw[:600],
+                    raw[-300:],
+                )
+                continue
+            return SessionSummary.model_validate(
+                _sanitize_source_ids(
+                    parsed,
+                    allowed_msg_ids=allowed_msg_ids,
+                    allowed_round_ids=allowed_round_ids,
+                    existing_topic_ids=existing_topic_ids,
+                )
+            )
+        assert last_error is not None
+        raise last_error
 
     def _merge_summary(
         self,

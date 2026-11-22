@@ -568,6 +568,9 @@ class RetrievalRequest(_Model):
     original_query: str | None = None
     # Agent 查询规划的改写 query；非空时与 query 一起召回
     rewritten_query: str | None = None
+    # 中英文双语检索变体；与 rewritten_query 一起去重后并发召回。
+    # 上限 4 条，避免调用方把检索放大成无界 fan-out。
+    rewritten_queries: list[str] = Field(default_factory=list, max_length=4)
     # Agent 查询规划的 RAG 召回意图；rerank 使用，不参与 BM25/向量召回
     rag_intent: str | None = None
     # Agent 查询规划提取的实体；用于图 seed/实体链接。
@@ -683,6 +686,8 @@ class RetrievalResult(_Model):
     # 用户原话 / Agent 改写 / 召回意图；未提供时为空
     original_query: str | None = None
     rewritten_query: str | None = None
+    # 本次实际参与召回的改写变体（含中英文），用于工具结果/排障。
+    rewritten_queries: list[str] = Field(default_factory=list)
     rag_intent: str | None = None
     normalized_query: str
     kb_ids: list[UUID]

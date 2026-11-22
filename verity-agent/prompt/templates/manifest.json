@@ -265,8 +265,8 @@
     },
     "agent.system": {
       "file": "agent/system.md",
-      "version": 4,
-      "description": "Agent 主循环基础 prompt（角色、工具、引用、chunk 冲突处理、跨章节补查、记忆优先级、安全与表达）",
+      "version": 5,
+      "description": "Agent 主循环基础 prompt（角色、工具与检索预算、引用、chunk 冲突处理、跨章节补查、记忆优先级、安全与表达）",
       "purpose": "agent.chat",
       "static": false,
       "cacheable": true,
@@ -299,8 +299,8 @@
     },
     "agent.query_plan.system": {
       "file": "agent/query_plan.system.md",
-      "version": 2,
-      "description": "查询规划 system prompt：意图识别/query 改写/RAG 决策；领域实体类型由画像注入",
+      "version": 3,
+      "description": "查询规划 system prompt：意图识别/中英文 query 改写/RAG 决策；领域实体类型由画像注入",
       "purpose": "agent.query_plan",
       "static": false,
       "cacheable": true,

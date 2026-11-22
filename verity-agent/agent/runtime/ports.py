@@ -274,13 +274,16 @@ class RagPort(Protocol):
         trace_id: str | None = None,
         original_query: str | None = None,
         rewritten_query: str | None = None,
+        rewritten_queries: list[str] | None = None,
         rag_intent: str | None = None,
         entities: list[str] | None = None,
     ) -> Any:
         """执行检索；权限过滤由 RAG 流水线负责。
 
         ``query`` 是主召回 query；``original_query``/``rewritten_query``/
-        ``rag_intent``/``entities`` 由 Agent 查询规划提供，RAG 只消费不识别。
+        ``rewritten_queries``/``rag_intent``/``entities`` 由 Agent 查询规划
+        提供，RAG 只消费不识别。``rewritten_queries`` 用于中英文双语变体，
+        与 ``rewritten_query`` 一起去重后并发召回。
         """
         ...
 

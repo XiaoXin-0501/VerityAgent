@@ -309,6 +309,10 @@ class DefaultRetrievalPipeline:
                         (request.rewritten_query or "").split()
                     )[:80]
                     or None,
+                    "rewritten_queries": [
+                        " ".join(item.split())[:120]
+                        for item in request.rewritten_queries
+                    ],
                     "rag_intent": request.rag_intent,
                     "kb_count": len(request.kb_ids),
                     "top_k": request.top_k or self.config.top_k,
@@ -371,6 +375,7 @@ class DefaultRetrievalPipeline:
                 "entities": analysis.entities,
                 "seed_source": analysis.seed_source,
                 "keywords": analysis.keywords,
+                "variants": analysis.variants,
             },
         )
 
@@ -729,6 +734,7 @@ class DefaultRetrievalPipeline:
             query=request.query,
             original_query=request.original_query,
             rewritten_query=request.rewritten_query,
+            rewritten_queries=list(analysis.variants),
             rag_intent=request.rag_intent,
             normalized_query=normalized,
             kb_ids=authorized_kbs,
@@ -879,15 +885,32 @@ class DefaultRetrievalPipeline:
         if isinstance(extra_entities, (list, tuple, set)):
             requested.extend(str(item) for item in extra_entities)
         entities = canonicalize_entities(requested, domain_profiles)
+        # 画像标准名可能与图中实际节点名不一致（例如画像归一为
+        # “猫杯状病毒”，图抽取节点是“猫杯状病毒感染”）。图 seed 采用
+        # 精确名称匹配，因此同时保留规划器原始实体，避免标准名归一后
+        # 反而漏掉真实关系；去重并限制数量，防止 seed 膨胀。
+        for item in requested:
+            text = " ".join(str(item or "").split()).strip(" ,，、;；。")
+            if text and text not in entities:
+                entities.append(text)
+        entities = entities[:20]
         keywords: list[str] = []
         for match in (*_CJK_TERM.findall(normalized), *_LATIN_TERM.findall(normalized)):
             value = match.strip()
             if value and value.lower() not in {item.lower() for item in keywords}:
                 keywords.append(value)
         variants: list[str] = []
-        rewritten = (request.rewritten_query or "").strip()
-        if rewritten and rewritten != normalized:
-            variants.append(rewritten)
+        # 主改写 + 双语变体统一去重；超过 max_query_chars 的变体按安全阀
+        # 截断，避免调用方传入超长 query 拖垮 embedding/BM25。
+        candidates = [request.rewritten_query, *request.rewritten_queries]
+        for candidate in candidates:
+            text = " ".join((candidate or "").split()).strip()
+            if not text:
+                continue
+            if len(text) > self.max_query_chars:
+                text = text[: self.max_query_chars]
+            if text != normalized and text not in variants:
+                variants.append(text)
         return QueryAnalysis(
             normalized_query=normalized,
             language=detect_language(normalized),
@@ -895,6 +918,7 @@ class DefaultRetrievalPipeline:
             entities=entities,
             seed_source="planner" if entities else None,
             intent=request.rag_intent,
+            variants=variants,
         )
 
     # ——————————————————— 召回 / 图 ———————————————————
@@ -2032,6 +2056,7 @@ class DefaultRetrievalPipeline:
                     "min_score": self._effective_min_score(request),
                     "min_quality_score": self._effective_min_quality(request),
                     "rewritten_query": request.rewritten_query,
+                    "rewritten_queries": list(request.rewritten_queries),
                     "rag_intent": request.rag_intent,
                     "entities": sorted(request.entities),
                 }

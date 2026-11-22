@@ -59,8 +59,9 @@ class MemoryConfig(ConfigModel):
     compression_max_facts: int = Field(default=50, ge=1)
     # 压缩输入消息/摘要的最大 token
     compression_max_input_tokens: int = Field(default=8000, ge=256)
-    # 压缩输出 token 上限
-    compression_max_output_tokens: int = Field(default=2048, ge=128)
+    # 摘要输出上限。长会话的增量 topic/fact 较多，2048 会在 JSON 中途截断；
+    # 端到端长对话实测 4096 可稳定容纳一次增量摘要。
+    compression_max_output_tokens: int = Field(default=4096, ge=128)
     # 压缩 LLM 超时（秒）
     compression_timeout_s: float = Field(default=60.0, gt=0)
     # 摘要 topic/fact 的来源锚点上限；只保留最近证据，避免无限增长

@@ -28,6 +28,7 @@ class RetrieverRagAdapter:
         trace_id: str | None = None,
         original_query: str | None = None,
         rewritten_query: str | None = None,
+        rewritten_queries: list[str] | None = None,
         rag_intent: str | None = None,
         entities: list[str] | None = None,
     ) -> Any:
@@ -37,6 +38,7 @@ class RetrieverRagAdapter:
                 query=query,
                 original_query=original_query,
                 rewritten_query=rewritten_query,
+                rewritten_queries=list(rewritten_queries or []),
                 rag_intent=rag_intent,
                 entities=list(entities or []),
                 kb_ids=list(kb_ids),

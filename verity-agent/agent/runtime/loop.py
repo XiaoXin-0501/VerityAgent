@@ -154,6 +154,9 @@ class AgentLoop:
         final_assistant: AssistantMessage | None = None
         llm_calls = 0
         tool_rounds = 0
+        # 单次 run 的工具调用计数；工具执行器通过 ToolContext.metadata 读取，
+        # 用于 search_kb 等有外部成本的工具做硬预算。
+        tool_call_counts: dict[str, int] = {}
         conversation_id = request.conversation_id
         # 日志上下文：后续所有 LLM/工具/RAG 日志都带同一个 run/conv 短 id。
         log_tokens = bind_run_context(
@@ -757,6 +760,7 @@ class AgentLoop:
                         tool_history=tool_history,
                         exposed_tool_names={item.name for item in tools},
                         tool_selection=tool_selection,
+                        tool_call_counts=tool_call_counts,
                         flow=flow,
                     )
                     for tool_message in tool_messages:
@@ -1400,6 +1404,7 @@ class AgentLoop:
                 query=request.content,
                 original_query=request.content,
                 rewritten_query=query_plan.rewritten_query,
+                rewritten_queries=list(query_plan.retrieval_queries),
                 rag_intent=query_plan.rag_intent_label,
                 entities=list(query_plan.entities),
                 kb_ids=kb_ids,
@@ -1416,6 +1421,7 @@ class AgentLoop:
                     duration_ms=int((perf_counter() - started) * 1000),
                     original_query=request.content,
                     rewritten_query=query_plan.rewritten_query,
+                    rewritten_queries=list(query_plan.retrieval_queries),
                     rag_intent=query_plan.rag_intent_label,
                     entities=list(query_plan.entities),
                 )
@@ -1427,6 +1433,7 @@ class AgentLoop:
                 duration_ms=int((perf_counter() - started) * 1000),
                 original_query=request.content,
                 rewritten_query=query_plan.rewritten_query,
+                rewritten_queries=list(query_plan.retrieval_queries),
                 rag_intent=query_plan.rag_intent_label,
                 entities=list(query_plan.entities),
                 kb_ids=[str(item) for item in kb_ids],
@@ -1597,6 +1604,7 @@ class AgentLoop:
                 "original_query": query_plan.original_query,
                 "needs_rag": query_plan.needs_rag,
                 "rewritten_query": query_plan.rewritten_query,
+                "rewritten_queries": list(query_plan.retrieval_queries),
                 "rag_intent": query_plan.rag_intent_label,
                 "user_intent": query_plan.user_intent,
                 "entities": list(query_plan.entities),
@@ -1618,6 +1626,7 @@ class AgentLoop:
                 normalized_query=query_plan.normalized_query,
                 needs_rag=query_plan.needs_rag,
                 rewritten_query=query_plan.rewritten_query,
+                rewritten_queries=list(query_plan.retrieval_queries),
                 rag_intent=query_plan.rag_intent_label,
                 user_intent=query_plan.user_intent,
                 entities=list(query_plan.entities),
@@ -2298,12 +2307,14 @@ class AgentLoop:
         tool_history: list[dict[str, Any]],
         exposed_tool_names: set[str] | None,
         tool_selection: ToolSelection | None,
+        tool_call_counts: dict[str, int],
         flow: RunFlowLog | None,
     ) -> list[ToolMessage]:
         """执行一轮工具并转换成 ToolMessage；失败也返回占位消息。
 
         ``exposed_tool_names`` 是本次请求的 ToolSelection 投影；执行期再校验
         一次，避免模型调用未被暴露的动态工具（如未达到阈值的冲突/回溯工具）。
+        ``tool_call_counts`` 是 run 级工具调用计数，由 search_kb 等工具做硬预算。
         """
         if self.deps.tools is None:
             raise AgentRuntimeError(
@@ -2361,6 +2372,7 @@ class AgentLoop:
             metadata={
                 "query_plan": query_plan,
                 "exposed_tool_names": exposed_tool_names,
+                "tool_call_counts": tool_call_counts,
             },
         )
         try:

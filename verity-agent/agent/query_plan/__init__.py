@@ -2,7 +2,9 @@
 
 规则只短路“明确不需要 RAG”的请求，其余交给 LLM；产物统一为 ``QueryPlan``：
 
-- ``rewritten_query``：交给 RAG 召回消费；
+- ``rewritten_query``：交给 RAG 召回消费的主改写；
+- ``rewritten_query_zh`` / ``rewritten_query_en``：中英文双语检索变体，
+  RAG 分别召回后融合，避免只命中单语文档；
 - ``rag_intent``：交给 RAG rerank 消费；
 - ``user_intent``：交给长期事实召回消费。
 
