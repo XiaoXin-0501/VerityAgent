@@ -932,6 +932,11 @@ class SectionAwareChunker:
             ).strip()
             if not text or estimate_tokens(text) > self.max_tokens:
                 return False
+            # FAQ/问答或视觉分组必须交给 process_items -> flush_text 处理：
+            # 整节组装会把多个问答压成一个普通 chunk，丢失问答原子性和
+            # 长问答按问题拆分的逻辑。返回 False 让调用方按块处理。
+            if _extract_qa_pairs(text, path=path)[1] or _visual_groups(content):
+                return False
 
             if block_types == {BlockType.LIST}:
                 section_type, block_type = SectionType.LIST, BlockType.LIST

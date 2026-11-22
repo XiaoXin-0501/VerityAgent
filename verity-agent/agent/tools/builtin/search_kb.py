@@ -36,21 +36,40 @@ class SearchKbArgs(BaseModel):
     top_k: int | None = Field(default=None, ge=1, le=50)
 
 
+def _warning_codes(result: Any) -> list[str]:
+    """提取检索告警码；保留顺序并去重。"""
+    codes: list[str] = []
+    for item in getattr(result, "warnings", []) or []:
+        code = getattr(item, "code", None) or item
+        text = str(getattr(code, "value", code) or "").strip()
+        if text and text not in codes:
+            codes.append(text)
+    return codes
+
+
 def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
     """把 RetrievalResult 转成 LLM 文本 + UI 结构化数据。"""
     chunks = list(getattr(result, "chunks", []) or [])
+    warnings = _warning_codes(result)
     if not chunks:
-        return "未检索到与问题相关的知识库片段。", {
+        content = "未检索到与问题相关的知识库片段。"
+        # 告警必须进入 LLM 可见文本：embedding 403/BM25 空结果时，
+        # “没有检索到”不等于“知识库没有内容”，否则模型会错误断言无资料。
+        if "EMBEDDING_FAILED" in warnings:
+            content += (
+                "（检索服务降级：向量通道不可用，且关键词通道未返回候选；"
+                "这不代表知识库一定没有相关内容。可稍后重试，或换用更具体的关键词。）"
+            )
+        elif warnings:
+            content += f"（检索告警: {', '.join(warnings)}；可尝试换关键词或稍后重试。）"
+        return content, {
             "query": getattr(result, "query", None),
             "rewritten_query": getattr(result, "rewritten_query", None),
             "rag_intent": getattr(result, "rag_intent", None),
             "chunks": [],
             "documents": {},
             "citations": [],
-            "warnings": [
-                getattr(item, "code", None) and str(getattr(item, "code"))
-                for item in (getattr(result, "warnings", []) or [])
-            ],
+            "warnings": warnings,
             "trace_id": getattr(getattr(result, "trace", None), "trace_id", None),
             "duration_ms": getattr(result, "duration_ms", None),
         }
@@ -68,10 +87,16 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
             else f"[{index}] {label}"
         )
         lines.append(f"{prefix}\n{chunk.content}".strip())
+    if "EMBEDDING_FAILED" in warnings:
+        lines.append(
+            "> 检索告警：向量通道不可用，本次只返回关键词/图通道候选，"
+            "完整性可能受影响。"
+        )
     data = {
         "query": getattr(result, "query", None),
         "rewritten_query": getattr(result, "rewritten_query", None),
         "rag_intent": getattr(result, "rag_intent", None),
+        "warnings": warnings,
         "chunks": [
             {
                 "chunk_id": chunk.chunk_id,

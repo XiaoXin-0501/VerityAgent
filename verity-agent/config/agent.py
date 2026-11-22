@@ -34,8 +34,9 @@ class QueryPlanConfig(ConfigModel):
     model_id: str | None = None
     # LLM 超时（秒）；超时保留规则结果
     timeout_s: float = Field(default=8.0, gt=0)
-    # LLM 最大输出 token；输出是短 JSON
-    max_output_tokens: int = Field(default=512, ge=64)
+    # LLM 最大输出 token；输出是短 JSON，但推理模型会先消耗 reasoning token，
+    # 512 会在 entities 列表中途截断，导致规划输出无法解析。
+    max_output_tokens: int = Field(default=1024, ge=64)
     # 注入规划提示词的历史消息条数；0 表示不注入历史
     history_messages: int = Field(default=8, ge=0)
     # 用户画像注入上限（token）

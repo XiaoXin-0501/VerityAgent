@@ -18,6 +18,7 @@ PDF 解析是同步阻塞操作，通过 ``asyncio.to_thread`` 隔离，避免�
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 from collections import Counter
@@ -51,12 +52,52 @@ from utils.text import join_wrapped_lines
 
 __all__ = ["PdfParser"]
 
+logger = logging.getLogger(__name__)
+
 # 纯页码行：12 / 12/145 / - 12 - / 第 12 页。
 _PAGE_NUMBER = re.compile(
     r"^\s*(?:[-—–]\s*)?(?:第\s*)?\d{1,4}\s*(?:/\s*\d{1,4})?\s*(?:页)?\s*(?:[-—–])?\s*$"
 )
 # 粗体 flag（PyMuPDF span.flags bit 4）。
 _BOLD_FLAG = 1 << 4
+
+# 句末/分句标点：出现这些标点的块是正文，不参与字体/粗体标题推断。
+# 问号保留：FAQ/面试题标题本身可能就是问句。
+_SENTENCE_PUNCT = re.compile(r"[。！!；;]")
+
+# 页眉/页脚模板：数字通常随页码变化，归一成 # 后再统计重复率。
+_DIGITS_TEMPLATE = re.compile(r"\d+")
+# 目录行：点线/省略号引导 + 页码。目录页对 RAG 没有价值，且会大量命中
+# 文档标题/章节名，必须在解析阶段剔除。
+_TOC_LINE = re.compile(r"(?:\.{4,}|…{3,}|·{3,}|。{4,})\s*\d{1,4}\s*$")
+
+
+def _is_toc_line(text: str) -> bool:
+    """判断一行是否是目录项（点线引导 + 页码）。"""
+    return bool(_TOC_LINE.search(text or ""))
+
+
+def _toc_pages(payloads: list[_PdfPage]) -> set[int]:
+    """识别以目录为主的页面；至少 4 行目录项且占文本行 40% 以上。"""
+    pages: set[int] = set()
+    for payload in payloads:
+        lines = [
+            line.text
+            for block in payload.blocks
+            for line in block.lines
+            if line.text.strip()
+        ]
+        if len(lines) < 4:
+            continue
+        toc_lines = sum(1 for line in lines if _is_toc_line(line))
+        if toc_lines >= 4 and toc_lines / len(lines) >= 0.4:
+            pages.add(payload.page_no)
+    return pages
+
+
+def _boilerplate_key(text: str) -> str:
+    """把页眉/页脚中的数字替换为占位符，用于识别“管理指南93/161”这类模板。"""
+    return _DIGITS_TEMPLATE.sub("#", text or "")
 
 # PDF 常见的分级编号标题：
 #   1.诊断 / 4.讨论      → 一级小节（挂在文档标题下）
@@ -72,6 +113,14 @@ _NUMBERED_SINGLE_HEADING = re.compile(
 # 期刊常见 “1 | Introduction”“2.1 | Histopathology” 编号格式。
 _NUMBERED_PIPE_HEADING = re.compile(
     r"^\s*\d{1,2}(?:\.\d{1,2})*\s*\|\s*[A-Za-z一-鿿]"
+)
+# 标准/技术规范常用 “1 范围”“7.1 样品采集” 的空格编号，而不是 “1.”。
+_NUMBERED_SPACE_HEADING = re.compile(
+    r"^\s*\d{1,2}(?:\.\d{1,2})*\s+([一-鿿A-Za-z].*)$"
+)
+# 空格编号后若是量词/单位开头，通常是编号列表而不是章节标题。
+_NUMBERED_LIST_PREFIX = frozenset(
+    "只个次种类例名头条张份组项天年月日周岁倍号点位页行"
 )
 # 摘要标签常与正文同在一个文本块：ABSTRACT Feline megaesophagus...
 # 英文标签要求词边界，避免把 “ABSTRACTION...” 误判成摘要。
@@ -165,6 +214,8 @@ class _PdfPage:
     tables: list[_PdfTable] = field(default_factory=list)
     image_count: int = 0
     size_chars: Counter = field(default_factory=Counter)
+    # 本页正文主字号；排除表格文本后统计，供本页标题判断使用。
+    body_size: float | None = None
     # 本页是否通过 OCR 获得文本，以及整体置信度。
     ocr_used: bool = False
     ocr_confidence: float | None = None
@@ -251,6 +302,18 @@ def _numbered_heading_level(text: str) -> int | None:
         return min(6, number.count(".") + 2)
     if _NUMBERED_SINGLE_HEADING.match(value):
         return 2
+    # 标准文本 “1 范围”“7.1 样品采集”：编号后是空格。要求标题短、无逗号，
+    # 且不以量词/单位开头，避免把“1 只犬出现呕吐”这类编号列表当标题。
+    space_match = _NUMBERED_SPACE_HEADING.match(value)
+    if space_match:
+        title = space_match.group(1).strip()
+        if (
+            0 < len(title) <= 30
+            and title[0] not in _NUMBERED_LIST_PREFIX
+            and not any(mark in title for mark in ("，", ",", "。", "；", ";"))
+        ):
+            number = value.split()[0].rstrip(".")
+            return min(6, number.count(".") + 2)
     return None
 
 
@@ -470,6 +533,11 @@ class PdfParser:
 
         ocr_pages = 0
         ocr_limited = False
+        ocr_warnings: list[str] = []
+        # OCR 是可选增强：引擎存在但依赖损坏（如 torch DLL 缺失）时，只应
+        # 跳过扫描页并告警，不能让整篇文本 PDF 解析失败。一次失败后本文件
+        # 不再重试，避免每页都重复加载坏依赖导致解析超时。
+        ocr_failed = False
         try:
             payloads: list[_PdfPage] = []
             for page_no, page in enumerate(document, start=1):
@@ -477,10 +545,24 @@ class PdfParser:
                 if self._should_ocr(payload):
                     if (
                         self._ocr_provider is not None
+                        and not ocr_failed
                         and ocr_pages < self._ocr_config.max_pages
                     ):
-                        self._apply_ocr(page, payload)
-                        ocr_pages += 1
+                        try:
+                            self._apply_ocr(page, payload)
+                        except Exception as exc:  # noqa: BLE001 - OCR 可降级
+                            ocr_failed = True
+                            message = (
+                                f"OCR 不可用，已跳过扫描页: {str(exc)[:200]}"
+                            )
+                            ocr_warnings.append(message)
+                            logger.warning(
+                                "PDF OCR 失败，按无 OCR 继续: %s: %s",
+                                source.filename,
+                                exc,
+                            )
+                        else:
+                            ocr_pages += 1
                     elif ocr_pages >= self._ocr_config.max_pages:
                         ocr_limited = True
                 payloads.append(payload)
@@ -526,6 +608,8 @@ class PdfParser:
 
         body_size = self._body_font_size(payloads)
         boilerplate = self._detect_boilerplate(payloads)
+        # 目录页不是正文：剔除后在检索期不会用章节名/页码污染召回。
+        toc_pages = _toc_pages(payloads)
 
         blocks: list[ContentBlock] = []
         pages: list[Page] = []
@@ -538,11 +622,12 @@ class PdfParser:
         for payload in payloads:
             page_blocks, page_tables, page_dropped = self._build_page_blocks(
                 payload,
-                body_size=body_size,
+                body_size=payload.body_size or body_size,
                 boilerplate=boilerplate,
                 doc_id=doc_id,
                 start_order=len(blocks),
                 headings=headings,
+                skip_toc=payload.page_no in toc_pages,
             )
             blocks.extend(page_blocks)
             dropped_lines += page_dropped
@@ -574,7 +659,7 @@ class PdfParser:
         coverage = pages_with_text / page_count if page_count else 0.0
         ocr_ratio = ocr_page_count / page_count if page_count else 0.0
 
-        warnings: list[str] = list(image_pipeline_warnings)
+        warnings: list[str] = [*image_pipeline_warnings, *ocr_warnings]
         if dropped_lines:
             warnings.append(f"已过滤跨页重复的水印/页眉页脚 {dropped_lines} 行")
         if ocr_page_count:
@@ -674,6 +759,20 @@ class PdfParser:
                 payload.blocks.append(block)
 
         payload.tables = self._extract_tables(page, page_no=page_no, data=data)
+        # 页面局部正文字号：同一文档可能混用 8.5pt 表格/10pt 正文/10pt 小标题；
+        # 仅用全局字号会把某些正文整段误判成标题。样本太少时留空，使用全局值。
+        local: Counter = Counter()
+        for block in payload.blocks:
+            if any(
+                _overlap_ratio(block.bbox, table.bbox) >= 0.5
+                for table in payload.tables
+            ):
+                continue
+            for line in block.lines:
+                if not line.ocr:
+                    local[round(line.size, 1)] += len(line.text)
+        if sum(local.values()) >= 200:
+            payload.body_size = float(local.most_common(1)[0][0])
         return payload
 
     @staticmethod
@@ -794,9 +893,15 @@ class PdfParser:
                 if page_no < 1 or page_no > len(document.pages):
                     return []
                 page = document.pages[page_no - 1]
+                # 竖排/旋转 90° 的表格（大型指南的横向表格）在 pdfplumber 中
+                # 会按字符逆序返回；先按字符朝向判断，再逐单元格整体反转修复。
+                vertical = self._pdfplumber_page_is_vertical(page)
                 tables: list[_PdfTable] = []
                 for raw_table in page.find_tables():
-                    rows = self._normalize_table_rows(raw_table.extract())
+                    rows = self._normalize_table_rows(
+                        raw_table.extract(),
+                        reverse_text=vertical,
+                    )
                     if not rows:
                         continue
                     tables.append(
@@ -810,10 +915,38 @@ class PdfParser:
             return []
 
     @staticmethod
-    def _normalize_table_rows(raw_rows) -> list[list[str]]:
-        """把表格二维数据清理成非空行；单行/单列视作非表格。"""
+    def _pdfplumber_page_is_vertical(page) -> bool:
+        """判断 pdfplumber 页面是否以竖排/旋转文本为主。
+
+        ``upright=False`` 的字符是旋转文本；只有占比过半才反转表格单元格，
+        避免普通页面里少量旋转水印/页码被误处理。
+        """
+        chars = getattr(page, "chars", None) or []
+        if len(chars) < 10:
+            return False
+        rotated = sum(1 for item in chars if not item.get("upright", True))
+        return rotated / len(chars) >= 0.5
+
+    @staticmethod
+    def _normalize_table_rows(
+        raw_rows,
+        *,
+        reverse_text: bool = False,
+    ) -> list[list[str]]:
+        """把表格二维数据清理成非空行；单行/单列视作非表格。
+
+        ``reverse_text=True`` 用于 pdfplumber 的竖排表格：它按字符逆序返回，
+        整串反转后再压平换行即可恢复阅读顺序。不能按行反转，否则词序仍错。
+        """
+        def clean(cell) -> str:
+            """单元格转字符串；竖排时整串反转并压成单行。"""
+            value = "" if cell is None else str(cell).strip()
+            if value and reverse_text:
+                return " ".join(value[::-1].split())
+            return value
+
         rows = [
-            ["" if cell is None else str(cell).strip() for cell in row]
+            [clean(cell) for cell in row]
             for row in (raw_rows or [])
             if row
         ]
@@ -876,13 +1009,32 @@ class PdfParser:
 
     @staticmethod
     def _body_font_size(payloads: list[_PdfPage]) -> float:
-        """按字符数加权选择文档正文字号。"""
+        """按字符数加权选择文档正文字号。
+
+        必须排除与表格区域重叠的文本块：大型指南/年报的表格常用 8pt，
+        而正文用 10pt；如果把表格字符计入统计，正文会被误判成“更大字号”
+        并整段变成标题。排除表格后仍无样本时才退回全量统计。
+        """
         counter: Counter = Counter()
         for payload in payloads:
-            counter.update(payload.size_chars)
-        if not counter:
+            for block in payload.blocks:
+                if any(
+                    _overlap_ratio(block.bbox, table.bbox) >= 0.5
+                    for table in payload.tables
+                ):
+                    continue
+                for line in block.lines:
+                    if line.ocr:
+                        continue
+                    counter[round(line.size, 1)] += len(line.text)
+        if counter:
+            return float(counter.most_common(1)[0][0])
+        fallback: Counter = Counter()
+        for payload in payloads:
+            fallback.update(payload.size_chars)
+        if not fallback:
             return 10.0
-        return float(counter.most_common(1)[0][0])
+        return float(fallback.most_common(1)[0][0])
 
     @staticmethod
     def _detect_boilerplate(payloads: list[_PdfPage]) -> set[str]:
@@ -890,8 +1042,11 @@ class PdfParser:
 
         只有同时满足以下条件才丢弃：
         - 归一化后长度 <= 60；
-        - 出现在至少 30% 的页面（且不少于 3 页）；
+        - 数字替换为 ``#`` 后出现在至少 30% 的页面（且不少于 3 页）；
         - 各页的纵坐标差异 <= 12pt。
+
+        数字模板用于识别“管理指南93/161”这类带页码的页眉；否则每页文本
+        都不同，页眉会被误判为标题并切断跨页章节。
         """
         if not payloads:
             return set()
@@ -906,18 +1061,20 @@ class PdfParser:
                     normalized = _normalize_line(line.text)
                     if not normalized or len(normalized) > 60:
                         continue
-                    occurrences.setdefault(normalized, []).append(
+                    # 页码会变化，按“数字模板”统计，才能识别页眉/页脚。
+                    key = _boilerplate_key(normalized)
+                    occurrences.setdefault(key, []).append(
                         (payload.page_no, line.bbox[1])
                     )
 
         result: set[str] = set()
-        for text, items in occurrences.items():
+        for key, items in occurrences.items():
             pages = {page_no for page_no, _ in items}
             if len(pages) < min_pages:
                 continue
             ys = [y for _, y in items]
             if max(ys) - min(ys) <= 12:
-                result.add(text)
+                result.add(key)
         return result
 
     def _build_page_blocks(
@@ -929,6 +1086,7 @@ class PdfParser:
         doc_id: UUID,
         start_order: int,
         headings: HeadingStack,
+        skip_toc: bool = False,
     ) -> tuple[list[ContentBlock], bool, int]:
         """把一页的文本块/表格按阅读顺序转成 ``ContentBlock``。
 
@@ -954,6 +1112,9 @@ class PdfParser:
         has_table = False
 
         for _bbox, kind, item in entries:
+            if skip_toc and kind == "text":
+                # 目录页整页剔除；页码/章节名不是可回答知识。
+                continue
             if kind == "table":
                 table = cast(Any, item)
                 structured = make_table(table.rows[0], table.rows[1:])
@@ -980,7 +1141,7 @@ class PdfParser:
             kept_lines = []
             for line in block.lines:
                 normalized = _normalize_line(line.text)
-                if normalized and normalized in boilerplate:
+                if normalized and _boilerplate_key(normalized) in boilerplate:
                     dropped += 1
                     continue
                 if line.ocr:
@@ -1044,6 +1205,10 @@ class PdfParser:
             level = self._heading_level(
                 text,
                 max_size=max(line.size for line in kept_lines),
+                # 多行块只有“所有行都明显大于正文”才按字号当标题；一行大、
+                # 其余是正文的混合块通常是正文里的强调/上标，不能整块变标题。
+                min_size=min(line.size for line in kept_lines),
+                line_count=len(kept_lines),
                 body_size=body_size,
                 all_bold=all(line.bold for line in kept_lines),
             )
@@ -1091,6 +1256,8 @@ class PdfParser:
         text: str,
         *,
         max_size: float,
+        min_size: float,
+        line_count: int,
         body_size: float,
         all_bold: bool,
     ) -> int | None:
@@ -1098,14 +1265,32 @@ class PdfParser:
 
         编号级别与字号级别同时存在时取较粗的级别（数值更小），避免同一
         文档里标题层级跳变；只有编号、没有字号差异时仍按编号识别标题。
+
+        关键保守规则：
+
+        - 含句末/分句标点（。！；）的块一定是正文，不能因为字号/粗体变标题；
+        - 多行块用 ``min_size`` 判断字号标题，只有所有行都大于正文才成立，
+          避免正文中夹一个上标/强调词就让整段变标题；
+        - 字体/粗体推断额外限制长度，正文长段落即使是粗体也不当标题。
         """
-        if len(text) > 160:
+        value = (text or "").strip()
+        if not value or len(value) > 120:
+            return None
+        # 正文句号/感叹号/分号是强信号；真正的标题偶尔带问号，但很少带这些。
+        if _SENTENCE_PUNCT.search(value):
+            return None
+        # 行尾逗号/顿号是正文被 PDF 分块的典型形态，不是标题。
+        if value.endswith(("，", ",", "、", "：", ":")):
+            return None
+        # 长行即使没有句末标点也更像正文；标题通常短于 80 字符。
+        if len(value) > 80 and ("，" in value or "," in value):
             return None
         # 学术小节标题（References/Funding/…）经常比正文小，优先用白名单兜底。
-        label_level = _section_label_level(text)
+        label_level = _section_label_level(value)
         if label_level is not None:
             return label_level
-        ratio = max_size / body_size if body_size > 0 else 1.0
+        size_for_font = max_size if line_count <= 1 else min_size
+        ratio = size_for_font / body_size if body_size > 0 else 1.0
         font_level: int | None = None
         if ratio >= 2.2:
             font_level = 1
@@ -1116,14 +1301,14 @@ class PdfParser:
         elif ratio >= 1.15:
             font_level = 4
 
-        inferred = _numbered_heading_level(text) or heading_level_from_text(text)
+        inferred = _numbered_heading_level(value) or heading_level_from_text(value)
         if inferred is not None and font_level is not None:
             return min(inferred, font_level)
         if inferred is not None:
             return inferred
-        if font_level is not None:
+        if font_level is not None and len(value) <= 80:
             return font_level
-        if all_bold and ratio >= 1.05 and len(text) <= 80:
+        if all_bold and ratio >= 1.05 and len(value) <= 60:
             return 5
         return None
 

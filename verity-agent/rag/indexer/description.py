@@ -68,6 +68,17 @@ def normalize_heading_key(text: str) -> str:
     return _HEADING_PUNCTUATION.sub("", text or "").lower()
 
 
+# 章节编号前缀：1 / 1.1 / 一、；用于把“1 范围”归一成“范围”。
+_SECTION_NUMBER_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*|[一二三四五六七八九十百]+)\s*[.、|｜]?\s*"
+)
+
+
+def _section_key(text: str) -> str:
+    """去掉章节编号后归一标题；标准/技术规范常用“1 范围”。"""
+    return normalize_heading_key(_SECTION_NUMBER_RE.sub("", text or "", count=1))
+
+
 # 可直接采信为文档描述的“文档级”标题（内置词表）。
 RELIABLE_DESCRIPTION_HEADINGS = frozenset(
     normalize_heading_key(item)
@@ -138,7 +149,10 @@ _PREFACE_KEYS = frozenset(
     normalize_heading_key(item)
     for item in ("前言", "序言", "引言", "导言", "preface", "foreword")
 )
-_INTRODUCTION_KEYS = frozenset({"introduction", "介绍"})
+_INTRODUCTION_KEYS = frozenset(
+    normalize_heading_key(item)
+    for item in ("introduction", "介绍", "范围", "scope")
+)
 
 # 文献首页常见的栏目/元信息标题，不能当作文章大标题。
 _TITLE_REJECT_KEYS = frozenset(
@@ -162,6 +176,26 @@ _TITLE_REJECT_KEYS = frozenset(
         "译者按",
         "摘要",
         "abstract",
+        # 期刊/会议栏目名：不是文章标题，不能替代文件名。
+        "病例报告篇",
+        "病例报告眜",
+        "病例报告",
+        "临床病例",
+        "病例分享",
+        "病例交流",
+        "病例分析",
+        "病例讨论",
+        "论著",
+        "综述",
+        "专论",
+        "临床研究",
+        "实验研究",
+        "调查研究",
+        "技术交流",
+        "经验交流",
+        "团体标准",
+        "中国兽医协会第八届小动物医师大会",
+        "中国兽医协会第八届小动物医师大会病例报告篇",
     )
 )
 # 描述正文遇到这些“标签型”段落应停止，避免把关键词/基金/收稿信息混进描述。
@@ -196,6 +230,17 @@ _CANDIDATE_INLINE_KEYS = frozenset(
 # 章节编号标题（1. / 1.1 / 2 | ...）不是文章大标题。
 _NUMBERED_HEADING_RE = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)\s*[.、|｜]\s*"
+)
+# 标准编号/ICS/CCS/发布信息不是文章标题。
+_STANDARD_CODE_RE = re.compile(
+    r"^\s*(?:"
+    r"ICS\s*\d|CCS\s*[A-Z]|"
+    r"(?:GB|ISO|NY|SN|SC|DB|T)\s*/?\s*[A-Z]{0,5}\s*\d"
+    r")",
+    re.IGNORECASE,
+)
+_STANDARD_PUBLISH_RE = re.compile(
+    r"(发布|实施|中国兽医协会\s*发布)\s*$"
 )
 _TITLE_TOO_LONG = 300
 
@@ -469,7 +514,7 @@ def _find_workbook_description(parsed: ParsedDocument) -> str | None:
 
 def _description_heading_priority(text: str) -> int | None:
     """描述章节标题优先级：摘要 0、前言 1、Introduction 2、候选 3。"""
-    key = normalize_heading_key(text)
+    key = _section_key(text)
     if not key:
         return None
     if key in _ABSTRACT_KEYS:
@@ -489,7 +534,30 @@ def _is_stop_section_text(text: str) -> bool:
     """关键词/基金/作者信息等标签型段落是描述章节的结束边界。"""
     match = _INLINE_LABEL_RE.match(text or "")
     label = match.group(1) if match else (text or "")[:24]
-    return normalize_heading_key(label) in _STOP_SECTION_KEYS
+    return _section_key(label) in _STOP_SECTION_KEYS
+
+
+# 标准/团体标准“前言”里的起草说明，不是文档内容描述。
+_STANDARD_BOILERPLATE_RE = re.compile(
+    r"^\s*(?:"
+    r"本文件(?:按照|由|及其|代替|起草|主要起草|为首次发布)"
+    r"|请注意本文件"
+    r"|与[^。]{0,60}相比"
+    r"|GB/T\s*1\.1"
+    r"|本标准(?:按照|由|起草|主要起草)"
+    r"|本规范(?:按照|由|起草|主要起草)"
+    r"|ICS\s*\d|CCS\s*[A-Z]"
+    r"|(?:GB|ISO|NY|SN|SC|DB|T)\s*/?\s*[A-Z]{0,5}\s*\d{1,6}"
+    r"|[IVX]{1,5}"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_standard_boilerplate(text: str) -> bool:
+    """判断标准文件的起草/归口/专利提示等前言段落。"""
+    value = (text or "").strip()
+    return bool(value) and bool(_STANDARD_BOILERPLATE_RE.match(value))
 
 
 def _split_inline_description(text: str) -> tuple[str, str] | None:
@@ -527,10 +595,69 @@ def _find_document_title(early: list[ContentBlock]) -> str | None:
             continue
         if _NUMBERED_HEADING_RE.match(text):
             continue
+        if _STANDARD_CODE_RE.match(text) or _STANDARD_PUBLISH_RE.search(text):
+            continue
         if block.heading_level is not None and block.heading_level > 3:
             continue
         return text
     return None
+
+
+# 作者/单位/联系方式行：不能作为文档描述的开头。
+_AUTHOR_LINE_RE = re.compile(
+    r"(作者|通信作者|通讯作者|邮箱|e-?mail|@|邮编|地址|"
+    r"动物医院|动物医学院|兽医学院|大学|学院|研究所|研究中心|转诊中心)"
+    r"|^\s*[一-鿿]{2,4}\s*$",
+    re.IGNORECASE,
+)
+# 英文作者列表：1 Sue A. Casale 2 Virginia B. Sinnott-Stutzman ...
+_EN_AUTHOR_LIST_RE = re.compile(
+    r"\d+\s*[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z\-]+)+"
+)
+
+
+def _find_first_body(
+    early: list[ContentBlock],
+    *,
+    min_chars: int,
+    max_chars: int,
+) -> str | None:
+    """没有摘要/前言章节时，取标题后的第一段有效正文作为描述候选。
+
+    用于病例报告等“标题 + 正文”结构；跳过作者、单位、基金、标准起草
+    说明等元信息，连续收集短段落（PDF 常按行/块拆分）直到达到最小长度。
+    """
+    parts: list[str] = []
+    for block in early:
+        if block.block_type is BlockType.HEADING:
+            if parts:
+                break
+            continue
+        if block.block_type not in {
+            BlockType.PARAGRAPH,
+            BlockType.LIST,
+            BlockType.FOOTNOTE,
+        }:
+            if parts:
+                break
+            continue
+        text = _clean_description(block.text or "")
+        if not text:
+            continue
+        if _is_stop_section_text(text) or _is_standard_boilerplate(text):
+            continue
+        if not parts and (
+            len(text) < 12
+            or _AUTHOR_LINE_RE.search(text)
+            or _EN_AUTHOR_LIST_RE.search(text)
+            or _NUMBERED_HEADING_RE.match(text)
+        ):
+            continue
+        parts.append(text)
+        if sum(len(item) for item in parts) >= min_chars:
+            break
+    body = _clean_description("\n".join(parts))
+    return body[: max_chars * 4].strip() if body else None
 
 
 def _compose_description(title: str | None, body: str) -> str:
@@ -593,8 +720,9 @@ def _collect_section_body(
     """
     limit = max(2000, max_chars * 4)
     parts: list[str] = []
-    if prefix.strip():
-        parts.append(_clean_description(prefix))
+    prefix_value = _clean_description(prefix)
+    if prefix_value and not _is_standard_boilerplate(prefix_value):
+        parts.append(prefix_value)
     for block in blocks[start_index:]:
         if block.block_type in {
             BlockType.HEADING,
@@ -615,6 +743,10 @@ def _collect_section_body(
             continue
         if _is_stop_section_text(text):
             break
+        # 标准“前言”的起草/归口说明不是内容描述；继续向后找“范围”等
+        # 有意义章节，而不是把整段前言当描述。
+        if _is_standard_boilerplate(text):
+            continue
         parts.append(text)
         if sum(len(item) for item in parts) >= limit:
             break
@@ -756,7 +888,30 @@ def _extract_from_blocks(
         )
 
     if title:
-        # 没有摘要/前言时，大标题本身比文件名更能表达文档主题。
+        # 没有摘要/前言时，标题本身比文件名更能表达主题；若标题后紧跟
+        # 一段正文（病例报告常见），把首个有效正文作为摘要候选。
+        body = _find_first_body(
+            early,
+            min_chars=config.description_min_chars,
+            max_chars=config.description_max_chars,
+        )
+        if body:
+            combined = _compose_description(title, body)
+            if (
+                len(combined) <= config.description_max_chars
+                and len(body) >= config.description_min_chars
+            ):
+                return _RuleExtraction(
+                    text=combined,
+                    source="title_body_rule",
+                    reliable=True,
+                    title=title,
+                )
+            return _RuleExtraction(
+                candidate=_truncate_description(combined, candidate_cap),
+                candidate_source="title_body_candidate",
+                title=title,
+            )
         return _RuleExtraction(
             text=_truncate_description(title, config.description_max_chars),
             source="title_rule",

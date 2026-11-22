@@ -265,8 +265,8 @@
     },
     "agent.system": {
       "file": "agent/system.md",
-      "version": 3,
-      "description": "Agent 主循环基础 prompt（角色、工具、引用、chunk 冲突处理、记忆优先级、安全与表达）",
+      "version": 4,
+      "description": "Agent 主循环基础 prompt（角色、工具、引用、chunk 冲突处理、跨章节补查、记忆优先级、安全与表达）",
       "purpose": "agent.chat",
       "static": false,
       "cacheable": true,
