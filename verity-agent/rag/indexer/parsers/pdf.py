@@ -73,8 +73,11 @@ _TOC_LINE = re.compile(r"(?:\.{4,}|…{3,}|·{3,}|。{4,})\s*\d{1,4}\s*$")
 
 
 def _is_toc_line(text: str) -> bool:
-    """判断一行是否是目录项（点线引导 + 页码）。"""
-    return bool(_TOC_LINE.search(text or ""))
+    """判断一行是否是目录项（点线引导 + 页码，或 "< 标题 页码" 连续项）。"""
+    value = text or ""
+    if _TOC_LINE.search(value):
+        return True
+    return bool(re.search(r"(?:<[^<>]{1,60}\s+\d{1,3}\s*){2,}", value))
 
 
 def _toc_pages(payloads: list[_PdfPage]) -> set[int]:
@@ -105,10 +108,11 @@ def _boilerplate_key(text: str) -> str:
 #   1.3.1 血常规检查     → 三级小节
 # 要求编号后紧跟中文/英文，避免把 “1. 列表项” 或表格数值误判成标题。
 _NUMBERED_COMPOUND_HEADING = re.compile(
-    r"^\s*\d{1,2}(?:\.\d{1,2})+\s*[一-鿿A-Za-z]"
+    # 编号后必须是空白、汉字或大写英文；避免把 "28.1mg/L" 化验值当标题。
+    r"^\s*\d{1,2}(?:\.\d{1,2})+(?:\s+|[一-鿿]|[A-Z])"
 )
 _NUMBERED_SINGLE_HEADING = re.compile(
-    r"^\s*\d{1,2}\.(?=[一-鿿A-Za-z])\s*"
+    r"^\s*\d{1,2}\.(?=\s*[一-鿿A-Za-z])\s*"
 )
 # 期刊常见 “1 | Introduction”“2.1 | Histopathology” 编号格式。
 _NUMBERED_PIPE_HEADING = re.compile(
@@ -182,6 +186,8 @@ class _PdfLine:
     bbox: tuple[float, float, float, float]
     size: float
     bold: bool
+    # 主要字体名（按字符数加权）；用于区分书宋正文与黑体标题。
+    font: str = ""
     # OCR 生成的文本没有可靠字号/位置，避免被页眉页脚规则误删。
     ocr: bool = False
 
@@ -216,9 +222,12 @@ class _PdfPage:
     size_chars: Counter = field(default_factory=Counter)
     # 本页正文主字号；排除表格文本后统计，供本页标题判断使用。
     body_size: float | None = None
-    # 本页是否通过 OCR 获得文本，以及整体置信度。
+    # 本页通过 OCR 获得文本，以及整体置信度。
     ocr_used: bool = False
     ocr_confidence: float | None = None
+    # 本页过滤掉的作者/单位元数据、图片说明块数，供解析告警统计。
+    dropped_metadata: int = 0
+    dropped_captions: int = 0
 
 
 def _bbox_tuple(value) -> tuple[float, float, float, float]:
@@ -244,6 +253,24 @@ def _overlap_ratio(
     return ((x1 - x0) * (y1 - y0)) / inner_area
 
 
+def _bbox_matches(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+    tolerance: float = 1.5,
+) -> bool:
+    """两个 bbox 是否基本重合（PDF 导出的浮点坐标可能略有差异）。"""
+    return all(abs(left[index] - right[index]) <= tolerance for index in range(4))
+
+
+def _same_row(left: "_PdfLine", right: "_PdfLine") -> bool:
+    """两段文本是否在同一视觉行（用于编号/标题/正文同行的拆分）。"""
+    top = max(left.bbox[1], right.bbox[1])
+    bottom = min(left.bbox[3], right.bbox[3])
+    if bottom >= top:
+        return True
+    return abs(left.bbox[1] - right.bbox[1]) <= max(left.size, right.size) * 0.8
+
+
 def _normalize_line(text: str) -> str:
     """用于重复行统计的归一化：去掉所有空白。"""
     return re.sub(r"\s+", "", text)
@@ -258,8 +285,15 @@ def _section_label_level(text: str) -> int | None:
     value = re.sub(r"\s+", " ", (text or "").strip()).rstrip(":：").lower()
     if not value or len(value) > 60:
         return None
-    if value in _SECTION_LABEL_HEADINGS:
-        return 3
+    compact = re.sub(r"\s+", "", value)
+    if value in _SECTION_LABEL_HEADINGS or compact in _SECTION_LABEL_HEADINGS:
+        # 全小写英文标签（如表格里的 background/abbreviations）不可靠。
+        raw = (text or "").strip().rstrip(":：")
+        letters = [char for char in raw if char.isalpha()]
+        if letters and all(char.isascii() for char in letters) and raw.islower():
+            return None
+        # 文档标题为一级，独立小节标题统一挂在二级。
+        return 2
     return None
 
 
@@ -282,6 +316,522 @@ def _split_inline_abstract(text: str) -> tuple[str, str] | None:
     return label, body
 
 
+# —— 字体族、作者元数据与图片说明识别 ———————————————————
+# 中文 PDF 常以字体族而不是 bold flag 表达层级：
+#   FZSS/SimSun/FZKT = 书宋/宋体/楷体（正文、摘要、图注）
+#   FZLT/FZHT/Hei/Heavy/Black = 兰亭黑/黑体（标题、作者名）
+# PyMuPDF 的 flags 对中文字体经常没有 bold 位，必须结合字体名判断。
+_HEADING_FONT_MARKERS = (
+    "fzlt", "fzht", "hei", "heavy", "bold", "black", "yahei", "黑",
+)
+_BODY_FONT_MARKERS = (
+    "fzss", "simsun", "song", "fzkt", "kaiti", "times", "georgia", "cambria",
+)
+
+
+def _font_is_heading(font: str) -> bool:
+    """字体名是否属于“黑体/标题”族。"""
+    value = (font or "").lower()
+    return any(marker in value for marker in _HEADING_FONT_MARKERS)
+
+
+def _font_is_body(font: str) -> bool:
+    """字体名是否属于“宋体/楷体”正文字体族。"""
+    value = (font or "").lower()
+    return any(marker in value for marker in _BODY_FONT_MARKERS)
+
+
+def _looks_letter_spaced(text: str) -> bool:
+    """识别被 PDF 拆成单字母的标题/页眉，如 "P R A C T I C E"。"""
+    value = (text or "").strip()
+    if not value:
+        return False
+    tokens = [token for token in value.split() if token]
+    if len(tokens) >= 4:
+        singles = sum(1 for token in tokens if len(token) == 1)
+        if singles / len(tokens) >= 0.6:
+            return True
+    compact = re.sub(r"\s+", "", value)
+    return len(value) >= 8 and len(compact) <= len(value) * 0.55
+
+
+def _line_is_bold(spans: list[dict[str, Any]], font: str) -> bool:
+    """综合 bold flag 与字体族判断一行是否加粗/黑体。"""
+    if not spans:
+        return False
+    if _font_is_heading(font):
+        return True
+    total = sum(len(span.get("text", "")) for span in spans)
+    bold_chars = sum(
+        len(span.get("text", ""))
+        for span in spans
+        if int(span.get("flags", 0)) & _BOLD_FLAG
+    )
+    return total > 0 and bold_chars / total >= 0.8
+
+
+def _split_spans_by_gap(
+    spans: list[dict[str, Any]],
+    line_bbox: tuple[float, float, float, float],
+) -> list["_PdfLine"] | None:
+    """把“编号 | 标题 | 正文”同一行按大水平间距拆成多段。
+
+    仅当首段是纯编号、第二段是短标题、第三段是正文时生效；普通正文
+    即使有字间距也不会被拆开，避免破坏正常段落。
+    """
+    items: list[Any] = []
+    for span in spans:
+        text = span.get("text", "")
+        if not text:
+            continue
+        items.append(
+            (
+                text,
+                _bbox_tuple(span.get("bbox", line_bbox)),
+                float(span.get("size", 0.0) or 0.0),
+                int(span.get("flags", 0) or 0),
+                str(span.get("font", "")),
+            )
+        )
+    if not items:
+        return None
+    max_size = max(item[2] for item in items) or 10.0
+    threshold = max(6.0, max_size * 0.8)
+    segments: list[list[Any]] = []
+    current: list[Any] = []
+    prev_x1: float | None = None
+    for item in items:
+        if (
+            prev_x1 is not None
+            and item[1][0] - prev_x1 > threshold
+            and current
+        ):
+            segments.append(current)
+            current = []
+        current.append(item)
+        prev_x1 = max(prev_x1 or item[1][2], item[1][2])
+    if current:
+        segments.append(current)
+    if len(segments) < 3:
+        return None
+    first = "".join(item[0] for item in segments[0]).strip()
+    second = "".join(item[0] for item in segments[1]).strip()
+    third = "".join(item[0] for item in segments[2]).strip()
+    if not re.fullmatch(r"\d{1,3}(?:\.\d{1,3})*[.、]?", first):
+        return None
+    if not re.search(r"[A-Za-z一-鿿]", second):
+        return None
+    if len(second) > 24 or _SENTENCE_PUNCT.search(second):
+        return None
+    if len(third) < 8:
+        return None
+    lines: list[_PdfLine] = []
+    for segment in segments:
+        text = "".join(item[0] for item in segment).strip()
+        if not text:
+            continue
+        bbox = (
+            min(item[1][0] for item in segment),
+            min(item[1][1] for item in segment),
+            max(item[1][2] for item in segment),
+            max(item[1][3] for item in segment),
+        )
+        size = max(item[2] for item in segment)
+        font_counter: Counter[str] = Counter()
+        for item in segment:
+            font_counter[item[4]] += len(item[0])
+        font = font_counter.most_common(1)[0][0] if font_counter else ""
+        bold = _line_is_bold(
+            [
+                {"text": item[0], "flags": item[3], "size": item[2]}
+                for item in segment
+            ],
+            font,
+        )
+        lines.append(
+            _PdfLine(text=text, bbox=bbox, size=size, bold=bold, font=font)
+        )
+    if len(lines) < 3:
+        return None
+    return lines
+
+
+# 作者行：全部由 2-4 字中文姓名 + 上标数字/空白/逗号组成。
+_AUTHOR_LIST_RE = re.compile(
+    r"^[\s　\d,，、;；]*"
+    r"(?:[一-鿿]{2,4})"
+    r"(?:[\s　\d,，、;；]+[一-鿿]{2,4})*"
+    r"[\s　\d,，、;；]*$"
+)
+_AFFILIATION_KEYWORDS = (
+    "大学", "学院", "医院", "研究所", "研究院", "实验室", "动物医学",
+    "兽医学", "邮编", "e-mail", "邮箱", "公司", "中心", "门诊", "诊所",
+    "宠物", "连锁",
+    # 英文期刊的作者单位/学位信息
+    "department", "university", "college", "school of", "institute",
+    "hospital", "clinic", "corresponding author", "author for correspondence",
+    "dvm", "davdc", "msc", "phd", "dabvp", "dacvim",
+)
+_METADATA_LABEL_RE = re.compile(
+    r"^\s*(作者|通信作者|通讯作者|翻译|译者|审校|校对|编辑|收稿日期|"
+    r"基金项目|作者简介|单位|通讯地址|e-?mail|邮箱|"
+    r"corresponding author|author for correspondence|affiliations?)\s*[：:]",
+    re.IGNORECASE,
+)
+# 期刊页眉/版权行的引用格式（Journal of ... / Vol. / DOI）。
+_MASTHEAD_RE = re.compile(
+    r"^\s*(?:journal of|vol\.?\s*\d|volume\s*\d|doi\s*:|https?://doi\.)",
+    re.IGNORECASE,
+)
+_SOURCE_NOTE_RE = re.compile(
+    r"(选自|摘自|转载).{0,30}(杂志|期刊|第\s*\d+\s*卷)"
+)
+# 图/表编号：支持“图1”“图2-1”“图B.2”“Figure S1”这类正文与附录编号，
+# 附录图表常用字母前缀（表B.2、图C.1），不能只认纯数字。
+_CAPTION_NUMBER = (
+    r"(?:[A-Za-z]\s*[.\-·]?\s*)?(?:\d+(?:[.\-]\d+)*|[一二三四五六七八九十]+)"
+)
+# 图片说明：图 2：... / Figure 2. / Fig. 2 / 图B.2；表说明不在此列。
+_FIGURE_CAPTION_RE = re.compile(
+    rf"^\s*(?:图|figure|fig\.?)\s*{_CAPTION_NUMBER}",
+    re.IGNORECASE,
+)
+# 图注前的面板字母：A B C D E F图 1 MRI...
+_PANEL_CAPTION_RE = re.compile(
+    rf"^\s*(?:[A-Za-z]\s*){{2,}}(?:图|figure|fig\.?)\s*{_CAPTION_NUMBER}",
+    re.IGNORECASE,
+)
+# “图1显示/可见/为...” 是正文引用，不是图注。
+_FIGURE_REFERENCE_RE = re.compile(
+    r"^\s*(?:图|figure|fig\.?)\s*[\d一二三四五六七八九十]+\s*"
+    r"(?:显示|可见|所示|为|是|中|的|表明|提示)",
+    re.IGNORECASE,
+)
+# 表说明（表1/表2-1/表B.2/Table S1）保留为文字，但不能更新标题栈。
+# 附录表题若被当成标题，会把表前的“见表B.2。”切成孤立短 chunk。
+_TABLE_CAPTION_RE = re.compile(
+    rf"^\s*(?:附?表|续表|table)\s*{_CAPTION_NUMBER}",
+    re.IGNORECASE,
+)
+# 图片面板字母（A B C D E F）单独成块时是图片标注，不是正文。
+_PANEL_LABEL_RE = re.compile(r"^\s*(?:[A-Za-z]\s*){2,}$")
+# 文末作者简介/通信作者信息；不是知识正文。
+_AUTHOR_BIO_RE = re.compile(
+    r"(作者简介|通信作者|通讯作者|现攻读|专业兴趣方向|"
+    r"国家执业|执业兽医师|本科毕业于|"
+    r"攻读.{0,10}(?:硕士|博士))"
+)
+
+
+def _looks_like_author_list(text: str) -> bool:
+    """整块是否像作者署名行（中文姓名 + 上标数字，或英文姓名列表）。"""
+    value = (text or "").strip()
+    if not value or len(value) > 80:
+        return False
+    if _AUTHOR_LIST_RE.match(value):
+        return True
+    # 英文作者：去掉数字/分隔符后，所有 token 都是首字母大写的姓名/缩写。
+    cleaned = re.sub(r"[\d\s,;，、]+", " ", value).strip()
+    tokens = [token for token in cleaned.split() if token]
+    if len(tokens) < 2:
+        return False
+    name_tokens = [
+        token
+        for token in tokens
+        if re.fullmatch(r"[A-Z][A-Za-z.'\-]*", token)
+    ]
+    return len(name_tokens) == len(tokens) and len(name_tokens) >= 2
+
+
+def _is_figure_caption(text: str, *, image_count: int) -> bool:
+    """判断一段文本是否是图片说明（表说明不在此列）。"""
+    value = (text or "").strip()
+    if not value:
+        return False
+    if _PANEL_CAPTION_RE.match(value):
+        return True
+    match = _FIGURE_CAPTION_RE.match(value)
+    if not match:
+        return False
+    if _FIGURE_REFERENCE_RE.match(value):
+        return False
+    # “图1”“图2”这种只有编号的标签块同样不是知识正文。
+    remainder = value[match.end():].strip(" 　：:.-—_()（）")
+    if not remainder:
+        return True
+    # 图注一般带冒号或明显长于“图1”这种标签。
+    return "：" in value[:12] or ":" in value[:12] or len(value) >= 8
+
+
+def _is_author_metadata(
+    text: str,
+    *,
+    page_no: int,
+    bbox: tuple[float, float, float, float],
+    page_height: float,
+    body_size: float,
+    title_bbox: tuple[float, float, float, float] | None,
+    fonts: set[str],
+    max_size: float,
+) -> bool:
+    """判断页首的作者/单位/来源说明等元数据，避免被当成章节标题。"""
+    value = (text or "").strip()
+    if not value or len(value) > 140:
+        return False
+    # 这些标签在任何页面都属于元数据。
+    if _METADATA_LABEL_RE.match(value):
+        return True
+    if _SOURCE_NOTE_RE.search(value):
+        return True
+    # “—— 《What Is Your Diagnosis？》” 这类副标题/栏目名。
+    if value.startswith(("——", "—", "-")) and "《" in value and "》" in value:
+        return True
+    # 文末作者简介/通信作者信息。
+    if len(value) <= 300 and _AUTHOR_BIO_RE.search(value):
+        return True
+    # 期刊页眉/版权引用行，不是知识正文。
+    if len(value) <= 120 and _MASTHEAD_RE.match(value):
+        return True
+    if _CONTINUED_RE.match(value):
+        return True
+    if page_no != 1 or title_bbox is None:
+        return False
+    # 只处理标题下方、正文开始前的页首区域。
+    if bbox == title_bbox:
+        return False
+    if bbox[1] < title_bbox[1] - 10 or bbox[1] > page_height * 0.45:
+        return False
+    # “前言/病史/讨论”等独立小节标题即使很短也不能当作者名丢掉。
+    normalized = re.sub(r"\s+", "", value).rstrip("：:").lower()
+    if normalized in _SECTION_LABEL_HEADINGS:
+        return False
+    if _looks_like_author_list(value):
+        compact = re.sub(r"[\s　]", "", value)
+        if re.fullmatch(r"[一-鿿]{2,4}", compact):
+            # 单个姓名：只接受作者/黑体字体且不高于正文字号。
+            return (
+                bool(fonts)
+                and all(_font_is_heading(font) or "fzkt" in font.lower() for font in fonts)
+                and max_size <= body_size + 0.6
+            )
+        return True
+    lower_value = value.lower()
+    if len(value) <= 300 and any(
+        key in lower_value for key in _AFFILIATION_KEYWORDS
+    ):
+        return True
+    return False
+
+
+def _caption_continues(
+    lines: list["_PdfLine"],
+    bbox: tuple[float, float, float, float],
+    context: tuple[float, str, tuple[float, float, float, float]],
+) -> bool:
+    """图注被 PDF 拆成多个块时，判断当前块是否仍是同一图注。"""
+    size, font, ctx_bbox = context
+    if any(abs(line.size - size) > 0.8 for line in lines):
+        return False
+    if any((line.font or "") != font for line in lines):
+        return False
+    if bbox[1] - ctx_bbox[3] > 24 or ctx_bbox[1] - bbox[3] > 24:
+        return False
+    overlap = min(bbox[2], ctx_bbox[2]) - max(bbox[0], ctx_bbox[0])
+    narrower = min(bbox[2] - bbox[0], ctx_bbox[2] - ctx_bbox[0])
+    return narrower > 0 and overlap / narrower >= 0.5
+
+
+def _find_document_title(
+    payload: "_PdfPage",
+    *,
+    body_size: float,
+    boilerplate: set[str],
+) -> tuple[
+    tuple[float, int, float], tuple[float, float, float, float], str
+] | None:
+    """在第一页找出文档标题块（最大字号、页首、非页眉/非元数据）。
+
+    返回 ``(权重, bbox, 文本)``；权重用于跨页比较候选。
+    """
+    best: tuple[tuple[float, int, float], tuple[float, float, float, float], str] | None = None
+    for block in payload.blocks:
+        if any(
+            _overlap_ratio(block.bbox, table.bbox) >= 0.5
+            for table in payload.tables
+        ):
+            continue
+        lines = [
+            line
+            for line in block.lines
+            if line.text.strip()
+            and _boilerplate_key(_normalize_line(line.text)) not in boilerplate
+        ]
+        if not lines:
+            continue
+        text = join_wrapped_lines([line.text for line in lines]).strip()
+        if not text or len(text) > 220 or _SENTENCE_PUNCT.search(text):
+            continue
+        # 页眉/页脚区域与正文中段不作为标题候选。
+        if block.bbox[1] < payload.height * 0.06:
+            continue
+        if block.bbox[3] > payload.height * 0.55:
+            continue
+        max_size = max(line.size for line in lines)
+        if max_size < 14 or (body_size > 0 and max_size < body_size * 1.35):
+            continue
+        weight = (
+            round(max_size, 1),
+            1 if any(line.bold for line in lines) else 0,
+            -block.bbox[1],
+        )
+        if best is None or weight > best[0]:
+            best = (weight, block.bbox, text)
+    if best is None:
+        return None
+    return best[0], best[1], best[2]
+
+
+def _title_key(text: str) -> str:
+    """标题比较用的归一化：去掉空白与书名号/标点。"""
+    return re.sub(r"[\s《》〈〉“”\"'·:：、，,.\-—_]", "", text or "").lower()
+
+
+# 段落开头“标签 + 正文”同块的中文小节标题（如“前　言：癫痫是……”）。
+_INLINE_SECTION_CJK = (
+    "影像学发现与判读", "影像学检查征象与判读", "影像学检查", "影像学表现",
+    "病例情况", "病例介绍", "病例报告", "临床检查", "检查过程", "治疗方案",
+    "治疗及转归", "治疗与转归", "诊断结果", "基本信息", "既往史", "现病史",
+    "病史", "主诉", "前言", "引言", "讨论", "结论", "预后", "预防", "康复",
+    "护理", "麻醉", "手术", "诊断", "治疗",
+)
+_INLINE_SECTION_EN = (
+    "case presentation", "case report", "materials and methods", "results",
+    "discussion", "conclusion", "introduction", "background", "methods",
+)
+_SECTION_KEYWORDS = frozenset(
+    {*_INLINE_SECTION_CJK, *_INLINE_SECTION_EN, "摘要", "abstract", "summary",
+     "检查", "影像学", "转归", "病例", "结果", "方法", "references"}
+)
+
+
+def _loose_cjk_pattern(label: str) -> str:
+    """允许汉字之间夹空白，匹配“前　言”这种排版。"""
+    return r"\s*".join(re.escape(char) for char in label)
+
+
+_INLINE_SECTION_RE = re.compile(
+    r"^\s*(?P<label>"
+    + "|".join(
+        sorted(
+            [_loose_cjk_pattern(item) for item in _INLINE_SECTION_CJK],
+            key=len,
+            reverse=True,
+        )
+        + [re.escape(item) for item in _INLINE_SECTION_EN]
+    )
+    + r")\s*[：:]\s*(?P<body>.{10,})$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _split_inline_numbered_heading(
+    lines: list["_PdfLine"],
+) -> tuple[str, str, int] | None:
+    """拆分同一行的“编号 / 标题 / 正文”，返回 (标题, 正文, 级别)。
+
+    药典/标准常见 ``2.2 | 培养特性 | 在CM 改良培养基…``；如果不拆，
+    整块会因为“2.2培养特性…”命中编号规则而变成 heading，正文也跟着
+    进入标题路径，后续 chunk 既丢正文又过小。
+    """
+    if len(lines) < 3:
+        return None
+    first = (lines[0].text or "").strip()
+    if not re.fullmatch(r"\d{1,3}(?:\.\d{1,3})*[.、]?", first):
+        return None
+    if not (_same_row(lines[0], lines[1]) and _same_row(lines[1], lines[2])):
+        return None
+    title = (lines[1].text or "").strip()
+    if not title or len(title) > 24 or _SENTENCE_PUNCT.search(title):
+        return None
+    body = join_wrapped_lines([line.text for line in lines[2:]]).strip()
+    if len(body) < 10:
+        return None
+    number = first.rstrip(".、")
+    heading = f"{number} {title}"
+    level = _numbered_heading_level(heading) or 2
+    return heading, body, level
+
+
+def _split_inline_section_label(text: str) -> tuple[str, str] | None:
+    """拆分“前　言：正文……”同块的小节标题与正文。"""
+    match = _INLINE_SECTION_RE.match(text or "")
+    if not match:
+        return None
+    label = re.sub(r"\s+", "", match.group("label")).strip()
+    body = match.group("body").strip()
+    if not label or len(body) < 10:
+        return None
+    return label, body
+
+
+def _has_section_keyword(text: str) -> bool:
+    """编号标题后是否带常见小节词，用于区分列表项。"""
+    value = (text or "").lower()
+    return any(keyword in value for keyword in _SECTION_KEYWORDS)
+
+
+# 表格表头/化验值的常见词；命中多个时更可能是表格碎片而不是标题。
+_TABLE_HEADER_WORDS = frozenset(
+    {
+        "parameter", "result", "results", "reference", "range", "interval",
+        "exam", "value", "values", "unit", "units", "finding", "findings",
+        "dilution", "marker", "stain", "clone", "catalog", "manufacturer",
+        "antibody", "antibodies", "test", "susceptibility", "sample",
+        "group", "normal", "case", "antigen", "retrieval",
+    }
+)
+_GENERIC_TABLE_WORDS = frozenset(
+    {"case", "sample", "parameter", "result", "value", "range", "marker",
+     "stain", "dilution", "exam"}
+)
+_TIME_PREFIX_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)?\s*"
+    r"(?:days?|weeks?|months?|years?|hours?|minutes?|mg|ml|kg|g|%)\b",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"(?:https?://|www\.|\.com\b|\.org\b|\.edu\b)", re.I)
+_CONTINUED_RE = re.compile(r"^\s*\(?\s*(?:continued|cont['’]?d)\b", re.I)
+
+
+def _numeric_token_ratio(text: str) -> float:
+    """数字 token 占比；化验值/表格行通常很高。"""
+    tokens = re.findall(r"[A-Za-z]+|\d+(?:[.,]\d+)?", text or "")
+    if not tokens:
+        return 0.0
+    return sum(1 for token in tokens if token[0].isdigit()) / len(tokens)
+
+
+def _looks_like_table_fragment(text: str) -> bool:
+    """识别未抽成表格的表头/化验值行，避免变成 heading。"""
+    value = (text or "").strip()
+    if not value:
+        return False
+    tokens = re.findall(r"[A-Za-z]+|\d+(?:[.,]\d+)?", value)
+    if len(tokens) >= 2:
+        numeric = sum(1 for token in tokens if token[0].isdigit())
+        if numeric / len(tokens) >= 0.5:
+            return True
+    words = [word.lower() for word in re.findall(r"[A-Za-z]+", value)]
+    if not words:
+        return False
+    if len(words) == 1 and words[0] in _GENERIC_TABLE_WORDS:
+        return True
+    hits = sum(1 for word in set(words) if word in _TABLE_HEADER_WORDS)
+    if hits >= 2 and len(words) <= 8:
+        return True
+    return False
+
+
 def _numbered_heading_level(text: str) -> int | None:
     """识别 ``1.诊断`` / ``1.1 病例信息`` / ``1.3.1 血常规`` 这类编号标题。
 
@@ -295,7 +845,8 @@ def _numbered_heading_level(text: str) -> int | None:
         # 期刊格式 “1 | Introduction” 放在文档标题下一级（level 3），
         # “2.1 | Histopathology” 再下一级（level 4）。
         number = value.split("|", 1)[0].strip().rstrip(".")
-        return min(6, number.count(".") + 3)
+        # 文档标题为一级；"1 | Introduction" -> 2，"2.1 | ..." -> 3。
+        return min(6, number.count(".") + 2)
     match = _NUMBERED_COMPOUND_HEADING.match(value)
     if match:
         number = value.split()[0].rstrip(".")
@@ -314,6 +865,16 @@ def _numbered_heading_level(text: str) -> int | None:
         ):
             number = value.split()[0].rstrip(".")
             return min(6, number.count(".") + 2)
+    # 药典/标准常见 “2气囊病变记分标准…” 这种编号后直接跟汉字的标题。
+    cjk_match = re.match(r"^\s*(\d{1,2})([一-鿿].*)$", value)
+    if cjk_match:
+        title = cjk_match.group(2)
+        if (
+            0 < len(title) <= 30
+            and title[0] not in _NUMBERED_LIST_PREFIX
+            and not any(mark in title for mark in ("，", ",", "。", "；", ";"))
+        ):
+            return 2
     return None
 
 
@@ -618,6 +1179,20 @@ class PdfParser:
         has_images = any(item.image_count > 0 for item in payloads)
         # 标题栈跨页延续：下一页首段仍能拿到完整的标题路径。
         headings = HeadingStack()
+        # 封面页可能是纯图片；取前 3 页中最早出现的标题候选。
+        document_title: tuple[
+            int, tuple[float, float, float, float], str
+        ] | None = None
+        for candidate_page in payloads[:3]:
+            info = _find_document_title(
+                candidate_page,
+                body_size=candidate_page.body_size or body_size,
+                boilerplate=boilerplate,
+            )
+            if info is not None:
+                _weight, bbox, text = info
+                document_title = (candidate_page.page_no, bbox, text)
+                break
 
         for payload in payloads:
             page_blocks, page_tables, page_dropped = self._build_page_blocks(
@@ -628,6 +1203,7 @@ class PdfParser:
                 start_order=len(blocks),
                 headings=headings,
                 skip_toc=payload.page_no in toc_pages,
+                document_title=document_title,
             )
             blocks.extend(page_blocks)
             dropped_lines += page_dropped
@@ -662,6 +1238,12 @@ class PdfParser:
         warnings: list[str] = [*image_pipeline_warnings, *ocr_warnings]
         if dropped_lines:
             warnings.append(f"已过滤跨页重复的水印/页眉页脚 {dropped_lines} 行")
+        metadata_dropped = sum(item.dropped_metadata for item in payloads)
+        if metadata_dropped:
+            warnings.append(f"已过滤作者/单位等元数据 {metadata_dropped} 块")
+        captions_dropped = sum(item.dropped_captions for item in payloads)
+        if captions_dropped:
+            warnings.append(f"已过滤图片说明 {captions_dropped} 块")
         if ocr_page_count:
             warnings.append(f"已对 {ocr_page_count} 页扫描页执行 OCR")
         if ocr_limited:
@@ -738,18 +1320,36 @@ class PdfParser:
             block = _PdfTextBlock(bbox=_bbox_tuple(raw_block.get("bbox", (0, 0, 0, 0))))
             for raw_line in raw_block.get("lines", []):
                 spans = raw_line.get("spans", [])
+                # 药典/标准常把“2.2 | 培养特性 | 正文…”放在同一行：
+                # 先按大水平间距拆成编号/标题/正文段，避免整块被当成标题。
+                segments = _split_spans_by_gap(
+                    spans,
+                    _bbox_tuple(raw_line.get("bbox", (0, 0, 0, 0))),
+                )
+                if segments is not None:
+                    for segment in segments:
+                        block.lines.append(segment)
+                        payload.size_chars[round(segment.size, 1)] += len(
+                            segment.text
+                        )
+                    continue
                 text = "".join(span.get("text", "") for span in spans)
                 if not text.strip():
                     continue
                 size = max((float(span.get("size", 0.0)) for span in spans), default=0.0)
-                bold = bool(spans) and all(
-                    int(span.get("flags", 0)) & _BOLD_FLAG for span in spans
-                )
+                font_counter: Counter[str] = Counter()
+                for span in spans:
+                    font_counter[str(span.get("font", ""))] += len(
+                        span.get("text", "")
+                    )
+                font = font_counter.most_common(1)[0][0] if font_counter else ""
+                bold = _line_is_bold(spans, font)
                 line = _PdfLine(
                     text=text,
                     bbox=_bbox_tuple(raw_line.get("bbox", (0, 0, 0, 0))),
                     size=size,
                     bold=bold,
+                    font=font,
                 )
                 block.lines.append(line)
                 # 用字符数加权统计字号，后续据此判断文档正文字号。
@@ -1087,6 +1687,9 @@ class PdfParser:
         start_order: int,
         headings: HeadingStack,
         skip_toc: bool = False,
+        document_title: tuple[
+            int, tuple[float, float, float, float], str
+        ] | None = None,
     ) -> tuple[list[ContentBlock], bool, int]:
         """把一页的文本块/表格按阅读顺序转成 ``ContentBlock``。
 
@@ -1106,16 +1709,34 @@ class PdfParser:
             entries.append((table.bbox, "table", table))
         entries = _page_entries_in_reading_order(entries, payload.width)
 
+        # 文档标题由调用方在第一页检测后传入；只有第一页需要识别标题块，
+        # 后续页只需要知道“已有文档标题”以便把章节钳制到二级。
+        title_info = (
+            (document_title[1], document_title[2])
+            if document_title is not None
+            and payload.page_no == document_title[0]
+            else None
+        )
+        title_bbox = title_info[0] if title_info is not None else None
+        if title_info is not None:
+            # 提前入栈，保证标题块之前/之后的正文都能拿到文档标题路径。
+            headings.apply(1, title_info[1])
+
         blocks: list[ContentBlock] = []
         order = start_order
         dropped = 0
         has_table = False
+        # 图片说明常被 PDF 拆成多个文本块；记录上一个图注块用于吸收续行。
+        caption_context: tuple[
+            float, str, tuple[float, float, float, float]
+        ] | None = None
 
         for _bbox, kind, item in entries:
             if skip_toc and kind == "text":
                 # 目录页整页剔除；页码/章节名不是可回答知识。
                 continue
             if kind == "table":
+                caption_context = None
                 table = cast(Any, item)
                 structured = make_table(table.rows[0], table.rows[1:])
                 current_heading, current_path = headings.current()
@@ -1158,16 +1779,175 @@ class PdfParser:
             if not kept_lines:
                 continue
 
+            is_title = title_bbox is not None and _bbox_matches(_bbox, title_bbox)
+            if not is_title:
+                # 图注整块过滤：块首就是“图1/Figure 1”的说明不是知识正文。
+                if _is_figure_caption(
+                    kept_lines[0].text,
+                    image_count=payload.image_count,
+                ):
+                    payload.dropped_captions += 1
+                    caption_context = (
+                        max(line.size for line in kept_lines),
+                        kept_lines[0].font or "",
+                        _bbox,
+                    )
+                    continue
+                if caption_context is not None and _caption_continues(
+                    kept_lines, _bbox, caption_context
+                ):
+                    payload.dropped_captions += 1
+                    caption_context = (
+                        caption_context[0],
+                        caption_context[1],
+                        _bbox,
+                    )
+                    continue
+                caption_context = None
+                # 混合块里的图注行 / 面板字母行单独剔除，保留正文行。
+                filtered_lines = []
+                for line in kept_lines:
+                    if (
+                        _is_figure_caption(
+                            line.text, image_count=payload.image_count
+                        )
+                        or _PANEL_CAPTION_RE.match(line.text)
+                        or (
+                            payload.image_count > 0
+                            and len(line.text.strip()) <= 12
+                            and _PANEL_LABEL_RE.match(line.text)
+                        )
+                    ):
+                        payload.dropped_captions += 1
+                        continue
+                    filtered_lines.append(line)
+                if not filtered_lines:
+                    continue
+                kept_lines = filtered_lines
+
             text = join_wrapped_lines([line.text for line in kept_lines])
             if not text:
                 continue
+            # 目录行/单字母拆分页眉不是知识正文。
+            if _is_toc_line(text) or (
+                len(text) <= 100 and _looks_letter_spaced(text)
+            ):
+                dropped += 1
+                continue
+            # 页眉区域（如“病例报告篇”“小动物病例报告分享”）不是章节标题。
+            if (
+                not is_title
+                and _bbox[3] <= payload.height * 0.12
+                and len(text) <= 30
+            ):
+                dropped += 1
+                continue
+            # 封面/章节扉页重复印刷的文档标题不重复入栈。
+            if (
+                not is_title
+                and document_title is not None
+                and _title_key(text) == _title_key(document_title[2])
+            ):
+                dropped += 1
+                continue
+            if (
+                payload.image_count > 0
+                and len(text) <= 12
+                and _PANEL_LABEL_RE.match(text)
+            ):
+                payload.dropped_captions += 1
+                continue
             is_ocr = any(line.ocr for line in kept_lines)
-            # “ABSTRACT 正文...” 同块：拆出摘要标题，正文作为独立段落，
-            # 后续切片才能形成“文档标题 > ABSTRACT > 摘要正文”的结构。
-            inline_abstract = _split_inline_abstract(text)
-            if inline_abstract is not None:
-                label, body = inline_abstract
-                path_text, path = headings.apply(3, label)
+            fonts = {line.font for line in kept_lines if line.font}
+            all_heading_font = bool(fonts) and all(
+                _font_is_heading(font) for font in fonts
+            )
+            max_size = max(line.size for line in kept_lines)
+            min_size = min(line.size for line in kept_lines)
+            block_meta = {"ocr": True} if is_ocr else {}
+
+            if is_title:
+                path_text, path = headings.apply(1, text)
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.HEADING,
+                        text=text,
+                        parser_id=self.parser_id,
+                        heading_level=1,
+                        heading_text=path_text,
+                        heading_path=path,
+                        bbox=list(_bbox),
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata=block_meta,
+                    )
+                )
+                order += 1
+                continue
+
+            # 页首作者、单位、来源说明、副标题等元数据：不是章节标题，
+            # 也不应进入切片（否则会出现“杨嘉丽”这种 3 token chunk）。
+            if _is_author_metadata(
+                text,
+                page_no=payload.page_no,
+                bbox=_bbox,
+                page_height=payload.height,
+                body_size=body_size,
+                title_bbox=title_bbox,
+                fonts=fonts,
+                max_size=max_size,
+            ):
+                payload.dropped_metadata += 1
+                continue
+
+            # “2.2 培养特性 | 正文……”同块：拆成标题 + 正文，避免正文
+            # 被写进 heading_path、后续 chunk 只剩很短的一句。
+            inline_numbered = _split_inline_numbered_heading(kept_lines)
+            if inline_numbered is not None:
+                heading_text, body_text, numbered_level = inline_numbered
+                path_text, path = headings.apply(numbered_level, heading_text)
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.HEADING,
+                        text=heading_text,
+                        parser_id=self.parser_id,
+                        heading_level=numbered_level,
+                        heading_text=path_text,
+                        heading_path=path,
+                        bbox=list(_bbox),
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata=block_meta,
+                    )
+                )
+                order += 1
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.PARAGRAPH,
+                        text=body_text,
+                        parser_id=self.parser_id,
+                        heading_text=path_text,
+                        heading_path=path,
+                        bbox=list(_bbox),
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata=block_meta,
+                    )
+                )
+                order += 1
+                continue
+
+            # “前　言：正文……”同块：拆成二级标题 + 正文段落。
+            inline_section = _split_inline_section_label(text)
+            if inline_section is not None:
+                label, body = inline_section
+                path_text, path = headings.apply(2, label)
                 blocks.append(
                     make_block(
                         doc_id=doc_id,
@@ -1176,12 +1956,12 @@ class PdfParser:
                         block_type=BlockType.HEADING,
                         text=label,
                         parser_id=self.parser_id,
-                        heading_level=3,
+                        heading_level=2,
                         heading_text=path_text,
                         heading_path=path,
                         bbox=list(_bbox),
                         confidence=payload.ocr_confidence if is_ocr else None,
-                        metadata={"ocr": True} if is_ocr else {},
+                        metadata=block_meta,
                     )
                 )
                 order += 1
@@ -1197,22 +1977,69 @@ class PdfParser:
                         heading_path=path,
                         bbox=list(_bbox),
                         confidence=payload.ocr_confidence if is_ocr else None,
-                        metadata={"ocr": True} if is_ocr else {},
+                        metadata=block_meta,
+                    )
+                )
+                order += 1
+                continue
+
+            # “ABSTRACT 正文...” 同块：拆出摘要标题，正文作为独立段落，
+            # 后续切片才能形成“文档标题 > ABSTRACT > 摘要正文”的结构。
+            inline_abstract = _split_inline_abstract(text)
+            if inline_abstract is not None:
+                label, body = inline_abstract
+                path_text, path = headings.apply(2, label)
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.HEADING,
+                        text=label,
+                        parser_id=self.parser_id,
+                        heading_level=2,
+                        heading_text=path_text,
+                        heading_path=path,
+                        bbox=list(_bbox),
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata=block_meta,
+                    )
+                )
+                order += 1
+                blocks.append(
+                    make_block(
+                        doc_id=doc_id,
+                        page_no=payload.page_no,
+                        order=order,
+                        block_type=BlockType.PARAGRAPH,
+                        text=body,
+                        parser_id=self.parser_id,
+                        heading_text=path_text,
+                        heading_path=path,
+                        bbox=list(_bbox),
+                        confidence=payload.ocr_confidence if is_ocr else None,
+                        metadata=block_meta,
                     )
                 )
                 order += 1
                 continue
             level = self._heading_level(
                 text,
-                max_size=max(line.size for line in kept_lines),
+                max_size=max_size,
                 # 多行块只有“所有行都明显大于正文”才按字号当标题；一行大、
                 # 其余是正文的混合块通常是正文里的强调/上标，不能整块变标题。
-                min_size=min(line.size for line in kept_lines),
+                min_size=min_size,
                 line_count=len(kept_lines),
                 body_size=body_size,
                 all_bold=all(line.bold for line in kept_lines),
+                all_heading_font=all_heading_font,
+                bbox=_bbox,
+                page_width=payload.width,
             )
             if level is not None:
+                # 文档标题占一级；正文中的章节至少从二级开始，避免多个 H1。
+                if document_title is not None:
+                    level = max(level, 2)
                 path_text, path = headings.apply(level, text)
                 blocks.append(
                     make_block(
@@ -1227,7 +2054,7 @@ class PdfParser:
                         heading_path=path,
                         bbox=list(_bbox),
                         confidence=payload.ocr_confidence if is_ocr else None,
-                        metadata={"ocr": True} if is_ocr else {},
+                        metadata=block_meta,
                     )
                 )
             else:
@@ -1244,7 +2071,7 @@ class PdfParser:
                         heading_path=current_path,
                         bbox=list(_bbox),
                         confidence=payload.ocr_confidence if is_ocr else None,
-                        metadata={"ocr": True} if is_ocr else {},
+                        metadata=block_meta,
                     )
                 )
             order += 1
@@ -1260,25 +2087,99 @@ class PdfParser:
         line_count: int,
         body_size: float,
         all_bold: bool,
+        all_heading_font: bool = False,
+        bbox: tuple[float, float, float, float] | None = None,
+        page_width: float | None = None,
     ) -> int | None:
-        """综合字号比例、编号习惯和粗体判断标题级别。
+        """综合字号比例、字体族、编号习惯和粗体判断标题级别。
 
-        编号级别与字号级别同时存在时取较粗的级别（数值更小），避免同一
-        文档里标题层级跳变；只有编号、没有字号差异时仍按编号识别标题。
+        中文 PDF 的标题经常与正文同字号，只靠字号识别不到；这里额外使用
+        字体族（黑体/兰亭黑 vs 书宋/宋体）与编号+小节关键词兜底。
 
         关键保守规则：
 
         - 含句末/分句标点（。！；）的块一定是正文，不能因为字号/粗体变标题；
         - 多行块用 ``min_size`` 判断字号标题，只有所有行都大于正文才成立，
           避免正文中夹一个上标/强调词就让整段变标题；
-        - 字体/粗体推断额外限制长度，正文长段落即使是粗体也不当标题。
+        - 字体/粗体推断额外限制长度，正文长段落即使是粗体也不当标题；
+        - “1. 列表项”与“1. 病史”都带编号，只有标题字体/加粗/更大字号或
+          小节关键词时才按标题处理。
         """
         value = (text or "").strip()
         if not value or len(value) > 120:
             return None
+        # 单字母拆分标题/页眉、目录页标题、列表/续行片段都不是章节标题。
+        if _looks_letter_spaced(value):
+            return None
+        if _URL_RE.search(value) or _CONTINUED_RE.match(value):
+            return None
+        if _TIME_PREFIX_RE.match(value):
+            return None
+        # "It is important" 这类句子片段不是标题。
+        if (
+            not re.search(r"[一-鿿]", value)
+            and re.match(r"^(?:It|This|That|There|These|Those)\b", value, re.I)
+            and re.search(
+                r"\b(?:is|are|was|were|has|have|had|can|could|should|would|"
+                r"may|might|must|will|do|does|did)\b",
+                value,
+                re.I,
+            )
+        ):
+            return None
+        # 表格表头/化验值：含中文的编号标题不参与数字比例判断；
+        # 期刊 "1 | Introduction" 这类 pipe 标题单独保留。
+        if not _NUMBERED_PIPE_HEADING.match(value) and not re.search(
+            r"[一-鿿]", value
+        ):
+            if _numeric_token_ratio(value) >= 0.5:
+                return None
+            if (
+                _looks_like_table_fragment(value)
+                and _numbered_heading_level(value) is None
+            ):
+                return None
+        compact_value = re.sub(r"\s+", "", value)
+        if re.match(r"^\d{0,3}(目录|contents|tableofcontents)$", compact_value, re.I):
+            return None
+        if value.endswith(("-", "–", "—")):
+            return None
+        if value.startswith(("<", ">", "•", "·")):
+            return None
+        # 表说明（表1/Table 1）保留为正文/表格文本，但不能更新标题栈。
+        if _TABLE_CAPTION_RE.match(value):
+            return None
+        # 括号不配对通常是正文句子被 PDF 换行拆开（如“…结果如下（图”
+        # 与下一行“中左侧）”），不能因为行首编号或黑体就当章节标题。
+        if (
+            value.count("（") != value.count("）")
+            or value.count("(") != value.count(")")
+        ):
+            return None
+        # 表头被重复拼成“穴位主治穴位主治”时不是章节标题。
+        if len(value) <= 20 and re.fullmatch(r"(.{2,8})\1", value):
+            return None
         # 正文句号/感叹号/分号是强信号；真正的标题偶尔带问号，但很少带这些。
         if _SENTENCE_PUNCT.search(value):
             return None
+        # 含逗号且不是编号标题的短块更像表格片段/正文（如化验值）。
+        if ("，" in value or "," in value) and len(value) > 10:
+            if _numbered_heading_level(value) is None:
+                return None
+        # 英文正文片段常以句号/冒号结尾；“1. Introduction.”之类保留。
+        if value.endswith(".") and _numbered_heading_level(value) is None:
+            return None
+        # 独立的小节标签（“前　言：”或“前言”）归一化后匹配白名单。
+        bare = re.sub(r"\s+", "", value).rstrip("：:").lower()
+        if len(value) <= 20 and bare in _SECTION_LABEL_HEADINGS:
+            letters = [char for char in value if char.isalpha()]
+            if (
+                letters
+                and all(char.isascii() for char in letters)
+                and value.islower()
+            ):
+                return None
+            return 2
         # 行尾逗号/顿号是正文被 PDF 分块的典型形态，不是标题。
         if value.endswith(("，", ",", "、", "：", ":")):
             return None
@@ -1302,14 +2203,44 @@ class PdfParser:
             font_level = 4
 
         inferred = _numbered_heading_level(value) or heading_level_from_text(value)
+        # 英文标题通常首字母大写；小写开头的短句更可能是正文/图注。
+        if inferred is None and value[0].isascii() and value[0].islower():
+            return None
+        # “1. 病史”与“1. 患犬出现呕吐”都符合编号形态；带空格的单级编号
+        # 需要标题字体/加粗/更大字号/小节关键词之一才接受。
+        space_after_dot = bool(re.match(r"^\s*\d{1,2}\.\s+", value))
+        if (
+            inferred == 2
+            and space_after_dot
+            and not (
+                all_heading_font
+                or all_bold
+                or ratio >= 1.05
+                or _has_section_keyword(value)
+            )
+        ):
+            inferred = None
         if inferred is not None and font_level is not None:
             return min(inferred, font_level)
         if inferred is not None:
             return inferred
+        # 居中、黑体、略大于正文的短行通常是药典里的药品/章节大标题，
+        # 提升到二级，避免被当成更深的小节。
+        centered = False
+        if bbox is not None and page_width:
+            center = (bbox[0] + bbox[2]) / 2
+            centered = abs(center - page_width / 2) <= page_width * 0.12
+        if centered and all_heading_font and ratio >= 1.2 and len(value) <= 40:
+            return 2
         if font_level is not None and len(value) <= 80:
             return font_level
+        # 与正文同字号的黑体/兰亭黑短行：中文报告里最常见的“隐性标题”。
+        # 略小于正文的 9.2–9.5pt 黑体行多是段内强调/小标签（如“红尿（…）”），
+        # 不能当章节标题；要求不小于正文的 98%。
+        if all_heading_font and ratio >= 0.98 and len(value) <= 60:
+            return 2
         if all_bold and ratio >= 1.05 and len(value) <= 60:
-            return 5
+            return 3
         return None
 
     @staticmethod

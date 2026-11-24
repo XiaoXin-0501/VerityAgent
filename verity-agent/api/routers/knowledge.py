@@ -540,6 +540,8 @@ async def upload_document(
             raise _upload_cancelled(kb.id)
 
         # 3) 原子登记：KB 已在并发删除时 INSERT 不会产生行，避免孤儿文档。
+        # 主键沿用前面生成 doc_id：MinIO source key 已按它写入，复用同一个
+        # id 才能保证删除/清理时按 PG doc_id 找到原件。
         document = await DocumentRepository().create(
             kb.id,
             filename,
@@ -551,11 +553,12 @@ async def upload_document(
             description=(description or "").strip() or None,
             status=DocumentStatus.PENDING,
             require_active_kb=True,
+            doc_id=doc_id,
         )
         logger.info(
             "知识库文档上传完成: kb=%s doc=%s size_bytes=%d",
             kb.id,
-            doc_id,
+            document.id,
             size,
         )
     except Exception:

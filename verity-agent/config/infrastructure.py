@@ -195,8 +195,10 @@ class WeaviateConfig(ConfigModel):
     auto_create_collections: bool = False
     # 期望 schema 版本；与 manifest/schema_import.json 对齐
     expected_schema_version: str = "2026-11-13"
-    # 手写 schema 文件路径；为空时使用仓库 doc/weaviate_schema_import.json
-    schema_import_path: str = str(PROJECT_ROOT / "doc" / "weaviate_schema_import.json")
+    # 手写 schema 文件路径；默认使用仓库 deploy/weaviate 下的文件
+    schema_import_path: str = str(
+        PROJECT_ROOT / "deploy" / "weaviate" / "weaviate_schema_import.json"
+    )
     # 启动时是否执行 schema 校验（D-97）
     startup_schema_check: bool = True
     # DocChunk collection 名

@@ -28,7 +28,8 @@ class Environment(StrEnum):
 class LoggingConfig(ConfigModel):
     """本地文件日志配置。
 
-    - 默认落盘到 Windows D 盘；路径可被 ``APP__LOG__DIRECTORY`` 覆盖；
+    - 默认落盘到源码根目录下的 ``logs``；路径可被
+      ``APP__LOG__DIRECTORY`` 覆盖；
     - 使用标准库 ``RotatingFileHandler``，按用途分文件轮转（app/access/error/rag/flow）；
     - 多进程部署时标准库 handler 不保证跨进程安全，生产 worker=1 或改用
       外部日志采集。
@@ -37,7 +38,7 @@ class LoggingConfig(ConfigModel):
     # 是否写本地文件；false 时只保留控制台
     to_file: bool = True
     # 日志目录；相对路径按 verity-agent 源码根目录解析
-    directory: str = "D:/verityAgent日志"
+    directory: str = "logs"
     # 主应用日志文件名（不含 HTTP access / RAG 组件日志）
     file_name: str = Field(default="verity-agent.log", min_length=1)
     # HTTP access 日志；与主应用日志分离，避免轮询请求淹没业务日志

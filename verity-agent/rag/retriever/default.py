@@ -1421,6 +1421,23 @@ class DefaultRetrievalPipeline:
             )
 
         candidates = chunks[: max(1, min(policy.top_n, len(chunks)))]
+        # 图扩展候选在融合分上权重低，常被 top_n 截断在 rerank 之前，导致
+        # “图召回了但从未参与语义排序”。这里为 graph-only 候选预留少量席位，
+        # 让 rerank 决定它们是否真的相关；最终条数仍由 top_k/rerank_top_k 控制。
+        graph_candidates = 0
+        seen_ids = {item.chunk_id for item in candidates}
+        if len(chunks) > len(candidates) and policy.top_n > 0:
+            reserve = max(1, min(4, policy.top_n // 5))
+            for chunk in chunks[len(candidates):]:
+                if graph_candidates >= reserve:
+                    break
+                if chunk.chunk_id in seen_ids:
+                    continue
+                if not (chunk.metadata or {}).get("graph_recalled"):
+                    continue
+                candidates.append(chunk)
+                seen_ids.add(chunk.chunk_id)
+                graph_candidates += 1
         try:
             reranked = await self.reranker.rerank(
                 query, candidates, policy, intent=intent
@@ -1497,6 +1514,7 @@ class DefaultRetrievalPipeline:
                 "enabled": True,
                 "model": self.rerank_model_id,
                 "graph_min_rerank_score": graph_policy.min_rerank_score,
+                "graph_candidates": graph_candidates,
                 "intent": intent,
             },
         )

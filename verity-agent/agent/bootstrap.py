@@ -43,6 +43,26 @@ __all__ = ["build_default_agent_dependencies", "build_default_agent"]
 logger = logging.getLogger(__name__)
 
 
+def _merge_agent_model_ids(
+    configured_ids: list[str],
+    plan_model_id: str | None,
+    reflection_model_id: str | None,
+) -> list[str]:
+    """合并 LLM 白名单与 Agent 辅助模型。
+
+    ``configured_ids`` 为空表示部署未限制模型白名单；此时必须保持为空，
+    不能把辅助模型追加成“唯一白名单”，否则默认 chat 模型（如 chat-main）
+    会被排除。只有显式配置白名单时才把辅助模型并入。
+    """
+    ids = list(configured_ids)
+    if not ids:
+        return ids
+    for model_id in (plan_model_id, reflection_model_id):
+        if model_id and model_id not in ids:
+            ids.append(model_id)
+    return ids
+
+
 def build_default_agent_dependencies(
         *,
         provider_registry: Any,
@@ -120,16 +140,13 @@ def build_default_agent_dependencies(
         reserved_output_tokens=min(2048, max(128, max_context_tokens // 4)),
     )
     # 查询规划/反思可以配置独立小模型；它们同样必须能通过 ModelRegistry
-    # 的白名单，否则请求会在路由层被拒绝并静默退化。这里把显式配置的
-    # agent 辅助模型并入白名单（LLM model_ids 为空时仍不做限制）。
-    agent_model_ids = list(settings.llm.model_ids)
+    # 的白名单，否则请求会在路由层被拒绝并静默退化。
     effective_plan_config = query_plan_config or settings.agent.query_plan
-    for model_id in (
-            effective_plan_config.model_id,
-            reflection_model_id or settings.agent.reflection.model_id,
-    ):
-        if model_id and model_id not in agent_model_ids:
-            agent_model_ids.append(model_id)
+    agent_model_ids = _merge_agent_model_ids(
+        settings.llm.model_ids,
+        effective_plan_config.model_id,
+        reflection_model_id or settings.agent.reflection.model_id,
+    )
     model_registry = ModelRegistry(
         provider_registry,
         default_model_id=target_model_id,

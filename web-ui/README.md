@@ -10,11 +10,10 @@ pnpm dev
 ```
 
 默认地址 `http://localhost:5173`，`/api` 代理到 `http://127.0.0.1:8000`。
-后端需先启动：
+后端需先在仓库根目录启动：
 
 ```sh
-cd ../verity-agent
-uv run python -m api.server
+uv run python main.py
 ```
 
 ## 环境变量

@@ -32,7 +32,7 @@
       "api_key_env": "DEEPSEEK_API_KEY",
       "api_style": "openai_chat",
       "thinking_enabled": false,
-      "thinking_options": {
+      "thinking_disabled_options": {
         "thinking": {
           "type": "disabled"
         }

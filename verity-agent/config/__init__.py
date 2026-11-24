@@ -3,6 +3,15 @@
 所有配置类集中在 ``config`` 包内，按领域拆分文件；业务模块不再各自维护
 配置类，也不再保留兼容性的 ``setting.py``。
 
+配置边界：
+
+- env（``.env`` / ``.env.example``）：运行环境、连接信息、密钥与部署差异；
+- ``config/*.py``：业务主配置与默认值；默认值以当前部署 env 的取值为准；
+- JSON（``config/models.json`` / ``config/domains/*.json`` / 工具 manifest 等）：
+  结构化配置，配置类只做 schema 与加载校验，不维护第二套数据。
+
+env 仍可用 ``GROUP__FIELD`` 覆盖任意字段，但不是业务默认值的维护位置。
+
 - ``config.app``：App / Server / Auth
 - ``config.infrastructure``：PG / Redis / MinIO / Weaviate / Neo4j
 - ``config.provider``：Provider 连接配置与 ProviderKind / ChatApiStyle
@@ -162,10 +171,11 @@ class Settings(EnvSettings):
     # Prompt 模板目录/覆盖/严格渲染
     # 字段名用 prompts，避免与 shell 常见的 PROMPT 环境变量冲突
     prompts: PromptConfig = Field(default_factory=PromptConfig)
-    # 模型目录文件；为空时使用下方 MODELS（JSON 数组）
-    models_file: str = ""
-    # 模型清单：provider + model + capabilities/pricing/defaults；
-    # 文件存在时以文件为准，MODELS 作为 fallback
+    # 结构化模型目录（JSON/JSONC）；默认 config/models.json。
+    # env 只允许覆盖文件路径，不在 env 内联模型数组。
+    models_file: str = "config/models.json"
+    # 运行期加载的模型清单：provider + model + capabilities/pricing/defaults；
+    # 只由 models_file 填充，配置类不再维护第二套模型默认值。
     models: list[ModelConfig] = Field(default_factory=list)
     # 消息协议与附件上限
     message: MessageConfig = Field(default_factory=MessageConfig)

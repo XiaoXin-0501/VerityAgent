@@ -31,7 +31,7 @@ class LoggingHookConfig(ConfigModel):
     # 日志级别：DEBUG / INFO / WARNING / ERROR
     level: str = "INFO"
     # 是否把 payload 摘要附在日志中；默认只记 ID/长度/状态
-    include_payload: bool = False
+    include_payload: bool = True
     # payload 摘要最大字节数；超出截断
     max_payload_bytes: int = Field(default=2048, gt=0)
     # 订阅事件；为空表示使用内置关键事件集合
@@ -84,7 +84,7 @@ class TracingHookConfig(ConfigModel):
     """追踪 Hook；v1 只支持 none / log。"""
 
     # 是否启用 TracingHook
-    enabled: bool = False
+    enabled: bool = True
     # exporter：none / log
     exporter: str = "none"
     # 采样率 0~1

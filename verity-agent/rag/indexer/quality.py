@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
+
 from config.rag import DedupPolicyConfig, QualityPolicyConfig
 from utils.hashing import sha256_text
 from rag.shared.enums import IndexingWarningCode, QualityFlag
@@ -16,6 +19,12 @@ __all__ = [
     "deduplicate_chunks",
     "quality_score",
 ]
+
+# 中文（含扩展 A）与 CJK 标点：这些字符之间的空白只是 PDF 抽字噪声。
+_CJK_RANGE = "㐀-䶿一-鿿"
+_CJK_SPACE_RE = re.compile(
+    rf"(?<=[{_CJK_RANGE}])\s+|\s+(?=[{_CJK_RANGE}])"
+)
 
 # 质量标记 → 扣分（内置表）。
 # 未声明的 flag 按 0 分处理，向前兼容新增枚举。
@@ -82,18 +91,30 @@ class QualityGate:
         return kept, report
 
 
+def _dedup_key(text: str) -> str:
+    """计算判重用的归一化文本，不改变 chunk 正文。
+
+    PDF 抽字常把同一段内容抽成“附录3010 通用要求”和“附录3010通用要求”
+    两种形态；按原始字节哈希会漏掉这类重复。这里做 NFKC + 空白归一，
+    并去掉中文字符两侧的空格，只影响“是否重复”的判断。
+    """
+    value = unicodedata.normalize("NFKC", text or "")
+    value = re.sub(r"\s+", " ", value).strip()
+    return _CJK_SPACE_RE.sub("", value)
+
+
 def deduplicate_chunks(
     chunks: list[ChunkDraft],
     policy: DedupPolicyConfig,
 ) -> tuple[list[ChunkDraft], NoiseReport]:
-    """按正文 SHA256 做 chunk 级精确去重；保留首次出现的 chunk。"""
+    """按归一化正文 SHA256 做 chunk 级精确去重；保留首次出现的 chunk。"""
     if not policy.chunk_hash:
         return chunks, NoiseReport()
     seen: set[str] = set()
     kept: list[ChunkDraft] = []
     report = NoiseReport()
     for chunk in chunks:
-        digest = sha256_text(chunk.text)
+        digest = sha256_text(_dedup_key(chunk.text))
         if digest in seen:
             report.duplicate_chunks += 1
             report.warnings.append(IndexingWarningCode.DUPLICATE_DROPPED)

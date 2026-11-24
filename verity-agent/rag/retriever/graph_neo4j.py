@@ -38,6 +38,9 @@ class Neo4jGraphExpander:
         """保存图存储门面与事件接收端；连接在首次查询时惰性建立。"""
         self.store = graph_store or GraphStore()
         self.event_sink = event_sink
+        # 精确 seed 未命中时最多解析多少个近似节点；过大会把短词扩成
+        # 大量近义节点，反而稀释 next-hop。
+        self._seed_fuzzy_limit = 5
         # 最近一次扩展失败原因；用 ContextVar 隔离并发请求，避免 A 请求的
         # 失败被 B 请求读到。pipeline 读取后写 GRAPH_FAILED 告警。
         self._last_error: ContextVar[str | None] = ContextVar(
@@ -83,6 +86,39 @@ class Neo4jGraphExpander:
                     min_evidence=policy.min_evidence,
                     limit=max(1, policy.max_next_hops),
                     hub_as_intermediate=policy.hub_as_intermediate,
+                )
+                if not rows:
+                    # 规划实体是标准名，图节点可能来自正文原词（如
+                    # “犬细小病毒病” vs “细小病毒”）。精确命中为空时才做
+                    # 一次近似解析，避免正常路径额外查询；近似命中仍需
+                    # 通过同一证据阈值。
+                    names = await self.store.resolve_seed_names(
+                        seed=seed,
+                        kb_ids=ids,
+                        limit=self._seed_fuzzy_limit,
+                    )
+                    matched = [name for name in names if name != seed]
+                    if matched:
+                        logger.info(
+                            "图 seed 未精确命中，使用近似节点: seed=%s matched=%s",
+                            seed,
+                            matched,
+                        )
+                    for name in matched:
+                        rows.extend(
+                            await self.store.expand_next_hops(
+                                seed=name,
+                                kb_ids=ids,
+                                min_evidence=policy.min_evidence,
+                                limit=max(1, policy.max_next_hops),
+                                hub_as_intermediate=policy.hub_as_intermediate,
+                            )
+                        )
+                # 多个 seed/近似节点聚合后统一按证据数排序，保证 next-hop
+                # 截断优先保留证据更强的边。
+                rows.sort(
+                    key=lambda item: int(item.get("evidence_count") or 0),
+                    reverse=True,
                 )
                 for row in rows:
                     name = str(row.get("next_hop_name") or "").strip()

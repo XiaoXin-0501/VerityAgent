@@ -6,7 +6,8 @@
 
 1. 直接前导：紧邻特殊块、同一标题路径、以冒号/“如下/例如/代码”等结尾；
 2. 直接后续：紧邻特殊块、同一标题路径、以“上述/该/其中/注意”等开头；
-3. 弱关联：没有明确提示词，但文本很短（≤ short_tokens）且紧邻特殊块。
+3. 弱关联：没有明确提示词，但整段连续短文本（每段 ≤ short_tokens）
+   紧邻特殊块，且合计不超过描述预算。
 
 只有不超过 ``max_tokens`` 的短文本才会被吸附；长段落仍作为独立正文。
 被吸附的块不再单独切片，其文本和 block_id 交给代码/表格切片器，
@@ -15,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -108,6 +110,28 @@ def _is_prose(block: ContentBlock) -> bool:
 def _is_special(block: ContentBlock) -> bool:
     """判断块是否需要吸附描述。"""
     return block.block_type in _SPECIAL_TYPES
+
+
+# 后续弱关联的边界：形如“2.3 …”“5.3.1 …”“D.1 …”或“表/图 编号”的短段，
+# 说明它属于下一小节/下一个图表，不能当作当前表格的后续说明。
+_SECTION_START_RE = re.compile(
+    r"^\s*(?:[A-Za-z]\.\d+(?:\.\d+)*\s*\S|"
+    r"\d+(?:\.\d+)*[.、]\s*\S|"
+    r"\d+(?:\.\d+)+\s+\S)"
+)
+_CAPTION_START_RE = re.compile(
+    r"^\s*(?:附?表|续表|table|图|figure|fig\.?)\s*"
+    r"[A-Za-z]?\s*[.\-·]?\s*\d",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_next_section(text: str) -> bool:
+    """判断后续文本是否已是下一小节/下一个图表的开头。"""
+    value = (text or "").strip()
+    return bool(
+        _SECTION_START_RE.match(value) or _CAPTION_START_RE.match(value)
+    )
 
 
 def _same_heading(left: ContentBlock, right: ContentBlock) -> bool:
@@ -207,17 +231,46 @@ def associate_special_contexts(
         if _is_prose(prose) and _follow_up_hint(prose.text):
             attach(index, prose_index)
 
-    # 3) 没有明确提示词时，紧邻的短文本仍优先跟随特殊块。
+    # 3) 没有明确提示词时，紧邻的连续短正文整体跟随特殊块。
+    #    “见表1。”+“表1 血常规检查结果”这类题注常被 PDF 拆成多段；
+    #    按整段连续正文判断，不按预算截断，避免把一句话拆成“正文 chunk
+    #    + 半个表格描述”。整段放不进预算时保持正文完整，不做部分吸附。
+    #    只向前成段吸附：表格之后的短段落可能是下一小节的正文，只取紧邻一段。
+    def attach_run(special_index: int, run: list[int]) -> None:
+        """按整段预算吸附一组连续正文；放不下则整段放弃。"""
+        if not run:
+            return
+        tokens = sum(estimate_tokens(blocks[item].text) for item in run)
+        attached = attached_tokens.get(blocks[special_index].block_id, 0)
+        if tokens <= 0 or attached + tokens > max_tokens:
+            return
+        # 弱关联只处理短文本：一段长正文属于章节内容，不是表题/说明。
+        if any(
+            estimate_tokens(blocks[item].text) > short_tokens for item in run
+        ):
+            return
+        for prose_index in run:
+            attach(special_index, prose_index)
+
     for index in special_indexes:
-        for prose_index in (index - 1, index + 1):
-            if 0 <= prose_index < len(blocks):
-                prose = blocks[prose_index]
-                if (
-                    _is_prose(prose)
-                    and prose.block_id not in consumed
-                    and estimate_tokens(prose.text) <= short_tokens
-                ):
-                    attach(index, prose_index)
+        special = blocks[index]
+        # 向前收集连续正文（题注、见X引用），遇到标题/长文/跨标题停止。
+        run: list[int] = []
+        cursor = index - 1
+        while cursor >= 0:
+            prose = blocks[cursor]
+            if not _is_prose(prose) or not _same_heading(special, prose):
+                break
+            if prose.block_id not in consumed:
+                run.append(cursor)
+            cursor -= 1
+        attach_run(index, list(reversed(run)))
+        # 向后只吸附紧邻的一段，且该段不能是下一小节/图表的开头，
+        # 避免把“2.3 …”“D.1 …”这类后续正文当成表题。
+        if index + 1 < len(blocks):
+            follower = blocks[index + 1]
+            if not _looks_like_next_section(follower.text):
+                attach_run(index, [index + 1])
 
     contexts: dict[UUID, SpecialContext] = {}
     for special_id, items in attachments.items():

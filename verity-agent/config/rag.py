@@ -68,13 +68,14 @@ class ImagePdfConfig(ConfigModel):
 class OcrConfig(ConfigModel):
     """扫描件/图片 PDF 的 OCR 配置。
 
-    默认 ``auto``：优先 PaddleOCR，其次 Tesseract；两者都不可用时，
-    文本层 PDF 仍可正常解析，只有真正需要 OCR 的页面才会报错。
+    默认 ``auto``：优先 RapidOCR（ONNXRuntime，无 Paddle/Torch 依赖），
+    其次 PaddleOCR，最后 Tesseract；都不可用时，文本层 PDF 仍可正常解析，
+    只有真正需要 OCR 的页面才会报错。
     """
 
     # 是否允许对无文本层页面执行 OCR
     enabled: bool = True
-    # auto / paddle / tesseract / none
+    # auto / rapid / paddle / tesseract / none
     provider: str = "auto"
     # Tesseract 语言包；需要安装 chi_sim + eng
     language: str = "chi_sim+eng"
@@ -129,7 +130,7 @@ class IndexerConfig(ConfigModel):
     max_source_bytes: int = Field(default=512 * 1024 * 1024, gt=0)
 
     # 用于入库的 embedding 应用模型 id
-    embedding_model_id: str | None = None
+    embedding_model_id: str | None = "embed-default"
     # 向量维度；必须与 Weaviate collection 对齐
     embedding_dimensions: int = Field(default=1024, gt=0)
     # embedding 版本；换模型/维度时递增
@@ -138,11 +139,11 @@ class IndexerConfig(ConfigModel):
     embedding_batch_size: int = Field(default=20, ge=1)
     # 是否缓存 chunk/query 向量；命中后重试/重灌不再调用 embedding 模型
     embedding_cache_enabled: bool = True
-    # 向量缓存 TTL（秒）；默认 30 天，模型/维度变化通过 key 版本失效
-    embedding_cache_ttl_s: int = Field(default=2_592_000, ge=0)
+    # 向量缓存 TTL（秒）；当前部署调优值 150，模型/维度变化通过 key 版本失效
+    embedding_cache_ttl_s: int = Field(default=150, ge=0)
 
     # 文档描述生成模型 id
-    description_model_id: str | None = None
+    description_model_id: str | None = "chat-no-thinking"
     # 是否启用文档描述提取
     description_enabled: bool = True
     # 非可靠“内容提取”候选或“标题+摘要/前言”过长时交给 LLM；
@@ -158,26 +159,26 @@ class IndexerConfig(ConfigModel):
     description_max_early_blocks: int = Field(default=80, ge=1)
     # 是否缓存 LLM 生成的 chunk/文档描述，避免重试重复消耗 token
     description_cache_enabled: bool = True
-    # 描述缓存 TTL（秒）；模型/Prompt 版本变化通过 key 失效
-    description_cache_ttl_s: int = Field(default=2_592_000, ge=0)
+    # 描述缓存 TTL（秒）；当前部署调优值 150，模型/Prompt 版本变化通过 key 失效
+    description_cache_ttl_s: int = Field(default=150, ge=0)
     # 扫描件/图片 PDF 的 OCR 配置
     ocr: OcrConfig = Field(default_factory=OcrConfig)
     # 纯图片/扫描 PDF 的版式解析（MinerU/RapidOCR）
     image_pdf: ImagePdfConfig = Field(default_factory=ImagePdfConfig)
     # 表格 LLM 摘要模型 id
-    table_summary_model_id: str | None = None
+    table_summary_model_id: str | None = "chat-no-thinking"
     # 代码 LLM 摘要模型 id
-    code_summary_model_id: str | None = None
+    code_summary_model_id: str | None = "chat-no-thinking"
     # 图抽取 LLM 模型 id；开启建图时必须可用
-    graph_model_id: str | None = None
+    graph_model_id: str | None = "chat-no-thinking"
     # 是否启用大表/歧义表的 LLM 摘要
-    table_summary_llm_enabled: bool = False
+    table_summary_llm_enabled: bool = True
     # 是否启用代码 LLM 摘要；默认只用签名/docstring
     code_summary_enabled: bool = False
     # 特殊块（表格/代码）向量化策略：只向量化 heading + 描述，避免低语义正文
     semantic_embedding_enabled: bool = True
     # heading 少于该 token 数视为“太少”，无描述时才触发 LLM 兜底
-    semantic_heading_min_tokens: int = Field(default=4, ge=0)
+    semantic_heading_min_tokens: int = Field(default=10, ge=0)
     # 表格/Excel 送入 LLM 的预览行数
     semantic_preview_rows: int = Field(default=3, ge=1)
     # 生成的描述最大字符数
@@ -218,14 +219,14 @@ class IndexerConfig(ConfigModel):
     graph_llm_concurrency: int = Field(default=4, ge=1, le=32)
     # 是否缓存 chunk 级图抽取结果（重试/重灌直接复用）
     graph_llm_cache_enabled: bool = True
-    # 图抽取缓存 TTL（秒）；默认 30 天
-    graph_llm_cache_ttl_s: int = Field(default=2_592_000, ge=0)
+    # 图抽取缓存 TTL（秒）；当前部署调优值 150
+    graph_llm_cache_ttl_s: int = Field(default=150, ge=0)
     # 每个 chunk 最多写入多少实体（Neo4j Keyword 节点）
-    graph_max_keywords_per_chunk: int = Field(default=16, ge=1)
+    graph_max_keywords_per_chunk: int = Field(default=80, ge=1)
     # 关系抽取最低置信度
-    graph_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    graph_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     # 每个 chunk 最多写入多少关系
-    graph_max_relations_per_chunk: int = Field(default=20, ge=1)
+    graph_max_relations_per_chunk: int = Field(default=50, ge=1)
     # 模型给出未声明实体类型时是否允许入库；关闭则丢弃并记录指标
     graph_allow_unknown_types: bool = True
     # 未声明类型的兜底类型（类型名不是合法标识时）
@@ -277,7 +278,7 @@ class IndexerConfig(ConfigModel):
     dedup: DedupPolicyConfig = Field(default_factory=DedupPolicyConfig)
 
     # 入库最大重试次数
-    index_max_attempts: int = Field(default=5, ge=1)
+    index_max_attempts: int = Field(default=3, ge=1)
     # 入库 worker 租约时长（秒）
     index_lease_seconds: int = Field(default=300, ge=30)
     # 入库失败退避基数（秒）
@@ -291,7 +292,7 @@ class RetrieverConfig(ConfigModel):
     """检索配置；字段与《RAG 模块数据结构设计》§12.2 对齐。"""
 
     # 最终返回 chunk 数
-    top_k: int = Field(default=8, ge=1)
+    top_k: int = Field(default=10, ge=1)
     # rerank 后保留数
     rerank_top_k: int = Field(default=8, ge=1)
     # 混合检索向量/BM25 权重（0=纯 BM25，1=纯向量）
@@ -309,9 +310,9 @@ class RetrieverConfig(ConfigModel):
     # 最终 top-k 确定后是否按 doc_id 批量补文档描述（D-103）
     include_doc_meta: bool = True
     # 是否注册/暴露 resolve_chunk_conflict 工具（D-88）
-    chunk_conflict_tool_enabled: bool = False
+    chunk_conflict_tool_enabled: bool = True
     # 冲突处理模型 id；为空使用默认 chat
-    chunk_conflict_model_id: str | None = None
+    chunk_conflict_model_id: str | None = "chat-no-thinking"
     # 冲突处理 LLM 超时（秒）
     chunk_conflict_timeout_s: float = Field(default=20.0, gt=0)
     # 冲突处理 LLM 输出上限；需容纳 500 字 answer + JSON 字段
@@ -321,7 +322,7 @@ class RetrieverConfig(ConfigModel):
     # 是否启用 rerank
     rerank_enabled: bool = True
     # rerank 应用模型 id
-    rerank_model_id: str | None = None
+    rerank_model_id: str | None = "rerank-default"
     # rerank 候选数
     rerank_top_n: int = Field(default=20, ge=1)
     # rerank 批大小
@@ -329,12 +330,12 @@ class RetrieverConfig(ConfigModel):
     # rerank 最低分
     rerank_min_score: float | None = None
 
-    # 是否启用图检索扩展；默认关闭（D-55）
-    graph_expansion_enabled: bool = False
+    # 是否启用图检索扩展；当前部署开启（D-55 允许按 KB/请求开关）
+    graph_expansion_enabled: bool = True
     # 图扩展最大跳数；v1 只允许 1
     graph_max_hops: int = Field(default=1, ge=1)
     # 关系最小证据数
-    graph_min_evidence: int = Field(default=2, ge=1)
+    graph_min_evidence: int = Field(default=1, ge=1)
     # 最多下一跳实体数
     graph_max_next_hops: int = Field(default=5, ge=1)
     # hub 节点是否可作为中间跳
@@ -358,7 +359,7 @@ class RetrieverConfig(ConfigModel):
     # 检索结果缓存 TTL（秒）；0 表示不缓存
     cache_ttl_s: int = Field(default=300, ge=0)
     # query embedding 缓存 TTL（秒）；0 表示不缓存查询向量
-    query_embedding_cache_ttl_s: int = Field(default=2_592_000, ge=0)
+    query_embedding_cache_ttl_s: int = Field(default=150, ge=0)
     # 文档状态缓存 TTL（秒）；按 doc_id 批量缓存 completed 状态
     doc_status_cache_ttl_s: int = Field(default=60, ge=0)
     # 文档描述/meta 缓存 TTL（秒）；按 doc_id + 索引版本缓存

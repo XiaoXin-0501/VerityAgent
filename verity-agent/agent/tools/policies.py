@@ -201,8 +201,8 @@ class ToolRoutingPolicy(_Policy):
 
     # none / single_level / multi_level
     mode: ToolRoutingMode = ToolRoutingMode.NONE
-    # 低于该数量直接全量暴露
-    flat_threshold: int = Field(default=15, ge=1)
+    # 低于该数量直接全量暴露；mode!=none 时 0 表示始终走路由
+    flat_threshold: int = Field(default=0, ge=0)
     # 单次暴露上限
     max_exposed_tools: int = Field(default=30, ge=1)
     # 一级路由组上限

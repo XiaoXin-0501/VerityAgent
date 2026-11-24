@@ -233,3 +233,60 @@ class GraphStore:
                 "hub_as_intermediate": bool(hub_as_intermediate),
             },
         )
+
+    async def resolve_seed_names(
+        self,
+        *,
+        seed: str,
+        kb_ids: Iterable[str],
+        limit: int = 5,
+    ) -> list[str]:
+        """把查询规划实体解析为图中的近似节点名。
+
+        精确名优先；没有精确节点时允许双向子串命中（至少 2 个字符）：
+        - ``犬细小病毒病`` → ``细小病毒``（图中实体是正文里的简短写法）；
+        - ``恩诺沙星`` → ``恩诺沙星片``（图中实体带剂型后缀）。
+
+        排序依次是：精确命中、长度差最小、关系数最多。只返回名字，不在这里
+        决定证据阈值；调用方仍用 ``expand_next_hops`` 做正式过滤。
+        """
+        ids = list(dict.fromkeys(str(item) for item in kb_ids if item))
+        text = (seed or "").strip()
+        if not ids or len(text) < 2:
+            return []
+        rows = await self._read(
+            """
+            MATCH (k:Keyword)
+            WHERE k.kb_id IN $kb_ids
+              AND k.name <> ''
+              AND size(k.name) >= 2
+              AND (
+                    k.name = $seed
+                    OR k.name CONTAINS $seed
+                    OR $seed CONTAINS k.name
+                  )
+            OPTIONAL MATCH (k)-[:SUBJECT_OF|OBJECT_OF]-(rel:Relation)
+            WHERE rel.kb_id IN $kb_ids
+            RETURN k.name AS name,
+                   count(rel) AS relation_count,
+                   CASE
+                       WHEN k.name = $seed THEN 0
+                       WHEN $seed CONTAINS k.name THEN 1
+                       ELSE 2
+                   END AS match_kind,
+                   abs(size($seed) - size(k.name)) AS length_gap
+            ORDER BY match_kind, length_gap, relation_count DESC, name
+            LIMIT $limit
+            """,
+            {
+                "seed": text,
+                "kb_ids": ids,
+                "limit": max(1, int(limit)),
+            },
+        )
+        return [
+            str(row.get("name") or "").strip()
+            for row in rows
+            if str(row.get("name") or "").strip()
+            and int(row.get("relation_count") or 0) > 0
+        ]

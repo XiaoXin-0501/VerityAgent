@@ -20,6 +20,7 @@ __all__ = [
     "BaseChunker",
     "section_type_for",
     "merge_adjacent_chunks",
+    "merge_small_sibling_chunks",
     "coalesce_text_chunks",
     "semantic_embedding_text",
 ]
@@ -194,12 +195,16 @@ class Chunker(Protocol):
 
 
 def _is_grouped_chunk(chunk: ChunkDraft) -> bool:
-    """问答/视觉组 chunk 不参与跨块合并，避免组边界被重新拼掉。"""
+    """问答组 chunk 不参与跨块合并，避免问答边界被重新拼掉。
+
+    视觉分组（``visual_group``）只是 PDF 版面上的“组内紧、组间松”，
+    不是语义边界；同一标题下多个视觉组只要合并后不超过 max_tokens，
+    应允许合并，避免 200+300 token 的两段被拆成两个 chunk。
+    """
     return bool(
         chunk.metadata.get("qa")
         or chunk.metadata.get("qa_prefix")
         or chunk.metadata.get("qa_long")
-        or chunk.metadata.get("visual_group")
     )
 
 
@@ -360,3 +365,262 @@ def coalesce_text_chunks(
         pending[key] = len(result)
         result.append(chunk)
     return result
+
+
+def _prefixed_text(chunk: ChunkDraft) -> str:
+    """给合并后的小节正文补上小节标题，避免 2.1/2.2 标签丢失。"""
+    leaf = chunk.heading_path[-1] if chunk.heading_path else ""
+    if leaf and not chunk.text.lstrip().startswith(leaf):
+        return f"{leaf}\n{chunk.text}"
+    return chunk.text
+
+
+def _can_merge_siblings(
+    previous: ChunkDraft,
+    current: ChunkDraft,
+    *,
+    min_tokens: int,
+    max_tokens: int,
+    min_path_depth: int,
+    parent_counts: dict[tuple[str, ...], int],
+    sibling_min_children: int,
+) -> bool:
+    """同一父标题下的相邻小 chunk 是否应合并。"""
+    if (
+        previous.section_type not in _MERGEABLE_SECTION_TYPES
+        or current.section_type not in _MERGEABLE_SECTION_TYPES
+    ):
+        return False
+    if _is_grouped_chunk(previous) or _is_grouped_chunk(current):
+        return False
+    if previous.doc_id != current.doc_id or previous.kb_id != current.kb_id:
+        return False
+    a_path = previous.heading_path
+    b_path = current.heading_path
+    if not a_path or not b_path:
+        return False
+    if a_path[:-1] != b_path[:-1] or a_path[-1] == b_path[-1]:
+        return False
+    deep = len(a_path) >= min_path_depth and len(b_path) >= min_path_depth
+    many_siblings = (
+        parent_counts.get(tuple(a_path[:-1]), 0) >= sibling_min_children
+    )
+    if not (deep or many_siblings):
+        return False
+    if not (
+        previous.token_count < min_tokens or current.token_count < min_tokens
+    ):
+        return False
+    merged_text = f"{_prefixed_text(previous)}\n{_prefixed_text(current)}"
+    return estimate_tokens(merged_text) <= max_tokens
+
+
+def _merge_siblings(
+    previous: ChunkDraft,
+    current: ChunkDraft,
+    *,
+    chunking_version: str,
+    chunk_id_namespace: str,
+) -> ChunkDraft:
+    """合并两个同父小节的 chunk，标题路径回退到公共父标题。"""
+    merged = _merge_two(
+        previous.model_copy(update={"text": _prefixed_text(previous)}),
+        current.model_copy(update={"text": _prefixed_text(current)}),
+        chunking_version=chunking_version,
+        chunk_id_namespace=chunk_id_namespace,
+    )
+    parent = list(previous.heading_path[:-1])
+    leaves = list(dict.fromkeys(
+        [previous.heading_path[-1], current.heading_path[-1]]
+    ))
+    heading = " / ".join(leaves)[:120]
+    metadata = dict(merged.metadata)
+    metadata["merged_sections"] = leaves
+    return merged.model_copy(
+        update={
+            "heading_path": parent,
+            "heading": heading or (parent[-1] if parent else None),
+            "metadata": metadata,
+            "embedding_text": (
+                f"{heading}\n{merged.text}" if heading else merged.text
+            ),
+            "token_count": estimate_tokens(merged.text),
+        }
+    )
+
+
+def _is_eligible_tiny(
+    chunk: ChunkDraft,
+    *,
+    min_tokens: int,
+    min_path_depth: int,
+    parent_counts: dict[tuple[str, ...], int],
+    sibling_min_children: int,
+) -> bool:
+    """是否可以为了消除过小 chunk 而与相邻 chunk 合并。"""
+    if chunk.section_type not in _MERGEABLE_SECTION_TYPES:
+        return False
+    if _is_grouped_chunk(chunk) or chunk.token_count >= min_tokens:
+        return False
+    path = chunk.heading_path
+    if not path:
+        return False
+    deep = len(path) >= min_path_depth
+    many_siblings = (
+        parent_counts.get(tuple(path[:-1]), 0) >= sibling_min_children
+    )
+    return deep or many_siblings
+
+
+def _absorb_tiny_neighbors(
+    chunks: list[ChunkDraft],
+    *,
+    min_tokens: int,
+    max_tokens: int,
+    min_path_depth: int,
+    parent_counts: dict[tuple[str, ...], int],
+    sibling_min_children: int,
+    chunking_version: str,
+    chunk_id_namespace: str,
+) -> list[ChunkDraft]:
+    """最后兜底：把仍过小的 chunk 吸到相邻正文 chunk，避免碎片。"""
+    result: list[ChunkDraft] = []
+    pending: ChunkDraft | None = None
+    for chunk in chunks:
+        if pending is not None:
+            combined = estimate_tokens(
+                f"{_prefixed_text(pending)}\n{chunk.text}"
+            )
+            if (
+                chunk.section_type in _MERGEABLE_SECTION_TYPES
+                and not _is_grouped_chunk(chunk)
+                and combined <= max_tokens
+            ):
+                merged = _merge_two(
+                    pending.model_copy(update={"text": _prefixed_text(pending)}),
+                    chunk,
+                    chunking_version=chunking_version,
+                    chunk_id_namespace=chunk_id_namespace,
+                )
+                merged = merged.model_copy(
+                    update={
+                        "heading_path": chunk.heading_path or merged.heading_path,
+                        "heading": chunk.heading or merged.heading,
+                        "embedding_text": (
+                            f"{chunk.heading}\n{merged.text}"
+                            if chunk.heading
+                            else merged.text
+                        ),
+                        "token_count": estimate_tokens(merged.text),
+                    }
+                )
+                result.append(merged)
+                pending = None
+                continue
+            result.append(pending)
+            pending = None
+        eligible = _is_eligible_tiny(
+            chunk,
+            min_tokens=min_tokens,
+            min_path_depth=min_path_depth,
+            parent_counts=parent_counts,
+            sibling_min_children=sibling_min_children,
+        )
+        if eligible and result:
+            previous = result[-1]
+            if (
+                previous.section_type in _MERGEABLE_SECTION_TYPES
+                and not _is_grouped_chunk(previous)
+            ):
+                merged_text = (
+                    f"{previous.text.rstrip()}\n{_prefixed_text(chunk)}"
+                )
+                if estimate_tokens(merged_text) <= max_tokens:
+                    merged = _merge_two(
+                        previous,
+                        chunk.model_copy(
+                            update={"text": _prefixed_text(chunk)}
+                        ),
+                        chunking_version=chunking_version,
+                        chunk_id_namespace=chunk_id_namespace,
+                    )
+                    metadata = dict(merged.metadata)
+                    absorbed = list(metadata.get("absorbed_sections") or [])
+                    if chunk.heading_path:
+                        absorbed.append(chunk.heading_path[-1])
+                    metadata["absorbed_sections"] = absorbed
+                    result[-1] = merged.model_copy(
+                        update={"metadata": metadata}
+                    )
+                    continue
+        if eligible and not result:
+            pending = chunk
+            continue
+        result.append(chunk)
+    if pending is not None:
+        result.append(pending)
+    return result
+
+
+def merge_small_sibling_chunks(
+    chunks: list[ChunkDraft],
+    *,
+    min_tokens: int,
+    max_tokens: int,
+    min_path_depth: int,
+    sibling_min_children: int = 10,
+    chunking_version: str,
+    chunk_id_namespace: str = "verity:chunk",
+) -> list[ChunkDraft]:
+    """把同一父标题下过小的相邻小节合并，避免 2.1/2.2 各成碎片。
+
+    - 深度达到 ``min_path_depth`` 的小节可合并；父标题下小节数量
+      达到 ``sibling_min_children`` 的长文档也允许合并浅层小节点，
+      但病例报告这类一级章节很少的文档保持原粒度；
+    - 只在其中一个 chunk 小于 ``min_tokens`` 时触发；
+    - 合并后不超过 ``max_tokens``；
+    - 标题路径回退到公共父标题，两个小节名写入 ``metadata.merged_sections``，
+      并把小节名补进正文/embedding，保留最小粒度信息。
+    """
+    if not chunks:
+        return []
+    # 父标题下的小节数量：数量很多的长文档允许合并浅层小节点；
+    # 病例报告这类只有几个一级章节的文档保持原粒度。
+    parent_counts: dict[tuple[str, ...], int] = {}
+    for item in chunks:
+        if (
+            item.section_type in _MERGEABLE_SECTION_TYPES
+            and not _is_grouped_chunk(item)
+            and item.heading_path
+        ):
+            key = tuple(item.heading_path[:-1])
+            parent_counts[key] = parent_counts.get(key, 0) + 1
+    merged: list[ChunkDraft] = []
+    for chunk in chunks:
+        if merged and _can_merge_siblings(
+            merged[-1],
+            chunk,
+            min_tokens=min_tokens,
+            max_tokens=max_tokens,
+            min_path_depth=min_path_depth,
+            parent_counts=parent_counts,
+            sibling_min_children=sibling_min_children,
+        ):
+            merged[-1] = _merge_siblings(
+                merged[-1],
+                chunk,
+                chunking_version=chunking_version,
+                chunk_id_namespace=chunk_id_namespace,
+            )
+            continue
+        merged.append(chunk)
+    return _absorb_tiny_neighbors(
+        merged,
+        min_tokens=min_tokens,
+        max_tokens=max_tokens,
+        min_path_depth=min_path_depth,
+        parent_counts=parent_counts,
+        sibling_min_children=sibling_min_children,
+        chunking_version=chunking_version,
+        chunk_id_namespace=chunk_id_namespace,
+    )

@@ -76,7 +76,7 @@ async def get_run(
     return view.model_dump(mode="json")
 
 
-@router.post("/{run_id}/cancel")
+@router.post("/{run_id}/cancel", status_code=202)
 async def cancel_run(
     run_id: str,
     payload: CancelRequest,

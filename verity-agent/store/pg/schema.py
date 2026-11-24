@@ -30,6 +30,33 @@ DEFAULT_USERS: tuple[tuple[str, str, UserRole], ...] = (
     ("xiaobai", "123456", UserRole.USER),
 )
 
+# 默认权限码目录；开发库首启/升级时写入 permissions。
+# 资源级权限码（kb:read:<id> / doc:read:<id>）由业务创建资源时按需补；
+# kb:read:* / doc:read:* 是部署级通配，避免每个资源都逐条授权。
+DEFAULT_PERMISSIONS: tuple[tuple[str, str], ...] = (
+    ("kb:read", "读取使用默认权限码的知识库"),
+    ("kb:read:*", "读取所有知识库（部署级通配）"),
+    ("kb:write:*", "创建、更新、删除所有知识库"),
+    ("doc:read:*", "读取所有文档"),
+    ("doc:write:*", "上传、更新、删除所有文档"),
+    ("tool:kb:search", "使用知识库检索工具 search_kb"),
+    ("tool:kb:conflict", "使用片段冲突处理工具 resolve_chunk_conflict"),
+    ("tool:memory:recall", "使用轮次回溯工具 recall_round"),
+    ("admin:users", "管理用户与权限"),
+    ("admin:kb", "管理知识库与索引"),
+)
+
+# 普通默认用户只授予只读能力；管理员 xiaoxin 在 seed 时授予 permissions
+# 表中的全部权限，确保新增默认权限后无需手工补授权。
+DEFAULT_USER_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "xiaobai": (
+        "kb:read",
+        "doc:read:*",
+        "tool:kb:search",
+        "tool:memory:recall",
+    ),
+}
+
 _hasher = PasswordHasher()
 
 # 旧库升级用的加列/约束迁移。必须在 SCHEMA_SQL 之前执行：
@@ -444,6 +471,7 @@ async def init_schema(db: PGConnectionManager | None = None) -> None:
         await conn.execute(MIGRATIONS_SQL)
         await conn.execute(SCHEMA_SQL)
         await seed_default_users(conn)
+        await seed_default_permissions(conn)
 
 
 async def seed_default_users(conn: AsyncConnection[Row]) -> None:
@@ -461,6 +489,51 @@ async def seed_default_users(conn: AsyncConnection[Row]) -> None:
             SET role = EXCLUDED.role
             """,
             (username, _hasher.hash(password), role.value),
+        )
+
+
+async def seed_default_permissions(conn: AsyncConnection[Row]) -> None:
+    """写入默认权限码，并同步默认用户的授权。
+
+    - ``permissions`` 按 ``permission_code`` 幂等 upsert；
+    - ``xiaoxin`` 获得当前 permissions 表中的全部权限（管理员种子）；
+    - ``xiaobai`` 只获得只读基础权限；
+    - 资源级权限码仍由业务创建资源时按需写入，不在种子中伪造 id。
+    """
+    for permission_code, description in DEFAULT_PERMISSIONS:
+        await conn.execute(
+            """
+            INSERT INTO permissions (permission_code, description)
+            VALUES (%s, %s)
+            ON CONFLICT (permission_code) DO UPDATE
+            SET description = EXCLUDED.description
+            """,
+            (permission_code, description),
+        )
+    # 管理员：授权当前权限表中的全部权限，包括后续管理面新增的权限。
+    await conn.execute(
+        """
+        INSERT INTO user_permissions (user_id, permission_id, permission_code)
+        SELECT u.id, p.id, p.permission_code
+        FROM users u
+        CROSS JOIN permissions p
+        WHERE u.username = %s
+        ON CONFLICT (user_id, permission_id) DO NOTHING
+        """,
+        ("xiaoxin",),
+    )
+    for username, permission_codes in DEFAULT_USER_PERMISSIONS.items():
+        await conn.execute(
+            """
+            INSERT INTO user_permissions (user_id, permission_id, permission_code)
+            SELECT u.id, p.id, p.permission_code
+            FROM users u
+            CROSS JOIN permissions p
+            WHERE u.username = %s
+              AND p.permission_code = ANY(%s)
+            ON CONFLICT (user_id, permission_id) DO NOTHING
+            """,
+            (username, list(permission_codes)),
         )
 
 

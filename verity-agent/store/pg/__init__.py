@@ -38,11 +38,14 @@ from .repositories import (
     UserRepository,
 )
 from .schema import (
+    DEFAULT_PERMISSIONS,
+    DEFAULT_USER_PERMISSIONS,
     DEFAULT_USERS,
     MIGRATIONS_SQL,
     SCHEMA_SQL,
     init_schema,
     schema_statements,
+    seed_default_permissions,
     seed_default_users,
 )
 
@@ -57,8 +60,11 @@ __all__ = [
     "SCHEMA_SQL",
     "MIGRATIONS_SQL",
     "DEFAULT_USERS",
+    "DEFAULT_PERMISSIONS",
+    "DEFAULT_USER_PERMISSIONS",
     "init_schema",
     "seed_default_users",
+    "seed_default_permissions",
     "schema_statements",
     # 仓库
     "BaseRepository",

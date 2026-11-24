@@ -423,8 +423,13 @@ class DocumentRepository(BaseRepository):
         status: DocumentStatus = DocumentStatus.PENDING,
         require_active_kb: bool = False,
         conn: AsyncConnection[Row] | None = None,
+        doc_id: UUID | str | None = None,
     ) -> Document:
         """登记文档元数据；索引前状态为 pending。
+
+        ``doc_id`` 允许调用方预生成主键。上传链路先用它拼 MinIO source key，
+        登记时必须复用同一个 id，否则删除文档会按 PG id 找错原件路径，留下
+        孤儿对象；不传时由数据库 ``gen_random_uuid()`` 生成。
 
         ``require_active_kb=True`` 时用 ``INSERT ... SELECT ... WHERE EXISTS``
         原子校验知识库仍为 active 且未删除；删除知识库与上传并发时，晚到的
@@ -439,9 +444,10 @@ class DocumentRepository(BaseRepository):
                 c,
                 """
                 INSERT INTO documents
-                    (kb_id, original_filename, description, extension, size_bytes,
+                    (id, kb_id, original_filename, description, extension, size_bytes,
                      sha256, source_object_key, parse_manifest_key, uploaded_by, status)
-                SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                SELECT coalesce(%s::uuid, gen_random_uuid()), %s, %s, %s, %s, %s, %s, %s, %s,
+                       %s, %s
                 WHERE NOT %s
                    OR EXISTS (
                        SELECT 1 FROM knowledge_bases
@@ -452,6 +458,7 @@ class DocumentRepository(BaseRepository):
                 RETURNING *
                 """,
                 (
+                    as_uuid(doc_id) if doc_id is not None else None,
                     as_uuid(kb_id),
                     original_filename,
                     description,

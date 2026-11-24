@@ -34,7 +34,12 @@ from utils.text import smart_join, split_sentences
 from utils.tokens import estimate_tokens
 
 from .association import SpecialContext, associate_special_contexts
-from .base import BaseChunker, coalesce_text_chunks, section_type_for
+from .base import (
+    BaseChunker,
+    coalesce_text_chunks,
+    merge_small_sibling_chunks,
+    section_type_for,
+)
 from .packing import Unit, build_group_chunk, pack_units
 
 __all__ = ["SectionNode", "SectionAwareChunker", "build_section_tree"]
@@ -118,9 +123,19 @@ def _extract_qa_pairs(
             raw = text[marker.start() : end].strip()
             answer_match = _QA_ANSWER_RE.search(raw)
             if answer_match:
-                question = _clean_question(raw[: answer_match.start()])
+                question_raw = _clean_question(raw[: answer_match.start()])
+                # “问：…？补充说明。答：…” 中问号后的补充说明属于答案，
+                # 不应进入 heading_path；问句只取到第一个问号。
+                qmark = re.search(r"[？?]", question_raw)
+                answer_prefix = ""
+                if qmark:
+                    answer_prefix = question_raw[qmark.end() :].strip()
+                    question_raw = question_raw[: qmark.end()].strip()
+                question = question_raw
                 answer_text = _QA_ANSWER_RE.sub("", raw[answer_match.start() :], count=1)
                 answer_text = answer_text.strip()
+                if answer_prefix:
+                    answer_text = f"{answer_prefix} {answer_text}".strip()
             else:
                 question = _clean_question(raw)
                 answer_text = ""
@@ -316,6 +331,91 @@ def _collect_content_blocks(node: SectionNode) -> list[ContentBlock]:
     return blocks
 
 
+def _text_starts_with_title(
+    segments: list[tuple[str, BlockType]],
+    title: str,
+) -> bool:
+    """小节标题是否已出现在紧随其后的正文开头，避免重复写标签。"""
+    compact_title = re.sub(r"\s+", "", title)
+    if not compact_title:
+        return False
+    for value, block_type in segments:
+        if block_type is BlockType.HEADING:
+            return False
+        return re.sub(r"\s+", "", value).startswith(compact_title)
+    return False
+
+
+def _assembly_segments(node: SectionNode) -> list[tuple[str, BlockType]]:
+    """按阅读顺序收集整节组装用的文本段。
+
+    小节标题以 ``HEADING`` 段插入，便于父节点吞下 2.1/2.2 等子节后仍保留
+    最小语义标签；标题若已在首段正文开头出现则不重复插入。
+    """
+    segments: list[tuple[str, BlockType]] = []
+    for item in node.items:
+        if isinstance(item, SectionNode):
+            if item.total_tokens <= 0:
+                continue
+            child_segments = _assembly_segments(item)
+            title = (item.title or "").strip()
+            if title and not _text_starts_with_title(child_segments, title):
+                segments.append((title, BlockType.HEADING))
+            segments.extend(child_segments)
+        elif isinstance(item, ContentBlock) and item.block_type in _TEXT_BLOCK_TYPES:
+            value = (item.text or "").strip()
+            if value:
+                segments.append((value, item.block_type))
+    return segments
+
+
+def _join_assembly_segments(
+    segments: list[tuple[str, BlockType]],
+) -> str:
+    """拼接组装文本段：标题独立成行，连续正文按块类型拼接。"""
+    lines: list[str] = []
+    buffer: list[str] = []
+    buffer_types: set[BlockType] = set()
+
+    def flush() -> None:
+        """输出当前连续正文段。"""
+        if not buffer:
+            return
+        joined = (
+            smart_join(buffer)
+            if buffer_types <= {BlockType.PARAGRAPH, BlockType.FOOTNOTE}
+            else "\n".join(buffer)
+        ).strip()
+        if joined:
+            lines.append(joined)
+        buffer.clear()
+        buffer_types.clear()
+
+    for value, block_type in segments:
+        if block_type is BlockType.HEADING:
+            flush()
+            lines.append(value)
+            continue
+        buffer.append(value)
+        buffer_types.add(block_type)
+    flush()
+    return "\n".join(lines).strip()
+
+
+def _subtree_has_qa_section(node: SectionNode) -> bool:
+    """子树中是否存在 FAQ/问答小节。
+
+    父节点整节组装会把多个问答压成普通文本，因此只要子树里有 FAQ 小节，
+    就回退到逐节处理，由 ``flush_text`` 保留问答原子性。
+    """
+    for item in node.items:
+        if not isinstance(item, SectionNode):
+            continue
+        if _is_qa_section(item.path) or _subtree_has_qa_section(item):
+            return True
+    return False
+
+
 def _base_heading_level(blocks: list[ContentBlock]) -> int:
     """选择默认切片层级：文档中“第二浅”的标题级别。
 
@@ -347,6 +447,7 @@ class SectionAwareChunker:
         self.chunkers = chunkers
         # 唯一硬上限来源：IndexerConfig.max_chunk_tokens。
         self.max_tokens = config.max_chunk_tokens
+        self.min_tokens = config.min_chunk_tokens
         self.target_tokens = min(config.chunk_size_tokens, self.max_tokens)
         self.packer = BaseChunker(
             target_tokens=self.target_tokens,
@@ -873,16 +974,23 @@ class SectionAwareChunker:
             chunks.extend(produced)
             index += len(produced)
 
-        async def assemble(node: SectionNode, path: list[str]) -> bool:
+        async def assemble(
+            node: SectionNode,
+            path: list[str],
+            *,
+            allow_visual_groups: bool = True,
+        ) -> bool:
             """把“纯正文/列表”章节整体组装成一个语义完整的 chunk。
+
+            优先让父节点吞下子树：只要整棵子树放得进 ``max_tokens``，就把
+            2.1/2.2 等子节连标题一起组装；放不下时返回 ``False``，由调用方
+            回退到逐节/按块处理（父级无法吞下才划分子集）。
 
             硬规则（《RAG 模块数据结构设计》§5.4 / §15）：表格、代码等特殊块
             必须各自独立切片，不能与正文混进同一个 chunk。因此本函数只处理
             ``_TEXT_BLOCK_TYPES``；章节里只要出现特殊块，调用方会回退到
             ``process_items``，由 TableChunker / CodeChunker 保留结构、表头
             和语义描述。
-
-            组装后超过 ``max_tokens`` 时返回 ``False``，由调用方回退到按块处理。
             """
             nonlocal index
             content = _collect_content_blocks(node)
@@ -892,17 +1000,11 @@ class SectionAwareChunker:
             ):
                 return False
 
-            parts: list[str] = []
             block_ids: list[UUID] = []
             flags: set[QualityFlag] = set()
             block_types: set[BlockType] = set()
             page_no: int | None = None
             language: str | None = None
-
-            def add_part(value: str | None) -> None:
-                """追加非空文本片段。"""
-                if value and value.strip():
-                    parts.append(value.strip())
 
             def add_ids(ids: list[UUID]) -> None:
                 """按首次出现顺序合并来源 block id。"""
@@ -912,7 +1014,6 @@ class SectionAwareChunker:
 
             for block in content:
                 block_types.add(block.block_type)
-                add_part(block.text)
                 add_ids([block.block_id])
                 if (
                     block.metadata.get("ocr")
@@ -925,17 +1026,19 @@ class SectionAwareChunker:
                 if language is None and block.language:
                     language = block.language
 
-            text = (
-                smart_join(parts)
-                if block_types <= {BlockType.PARAGRAPH, BlockType.FOOTNOTE}
-                else "\n".join(parts)
-            ).strip()
+            # 子节标题作为独立文本段保留，父节点吞下子树时仍能看到 2.1/2.2。
+            segments = _assembly_segments(node)
+            text = _join_assembly_segments(segments)
             if not text or estimate_tokens(text) > self.max_tokens:
                 return False
             # FAQ/问答或视觉分组必须交给 process_items -> flush_text 处理：
             # 整节组装会把多个问答压成一个普通 chunk，丢失问答原子性和
             # 长问答按问题拆分的逻辑。返回 False 让调用方按块处理。
-            if _extract_qa_pairs(text, path=path)[1] or _visual_groups(content):
+            if _extract_qa_pairs(text, path=path)[1] or _subtree_has_qa_section(
+                node
+            ):
+                return False
+            if allow_visual_groups and _visual_groups(content):
                 return False
 
             if block_types == {BlockType.LIST}:
@@ -956,6 +1059,14 @@ class SectionAwareChunker:
                 "mixed": len(block_types) > 1,
                 "block_types": sorted(item.value for item in block_types),
             }
+            # 记录被父节点吞下的子节标题，便于审计“哪些小节合并成了一个 chunk”。
+            subsection_titles = [
+                value
+                for value, kind in segments
+                if kind is BlockType.HEADING
+            ]
+            if subsection_titles:
+                metadata["subsections"] = subsection_titles
             if document_description:
                 metadata["document_description"] = document_description
             chunks.append(
@@ -1003,10 +1114,21 @@ class SectionAwareChunker:
 
             - 比默认层级更浅的节点（如一级标题）：按文档顺序处理自身正文和子标题；
             - 默认层级及更深的节点：整棵子树不超过 max_tokens 时，只有“纯正文/
-              列表”章节才整体组装成一个 chunk；含表格/代码的章节必须回退到按
-              块处理，保证特殊块独立切片（§5.4 不变量）；
+              列表”章节才整体组装成一个 chunk（子节标题一并写入正文）；
+              含表格/代码的章节必须回退到按块处理，保证特殊块独立切片
+              （§5.4 不变量）；
             - 超限时按文档顺序处理自身正文，并逐个递归子标题。
             """
+            # 有内容的子小节：父节点放得下时一并吞下；放不下时逐个递归，
+            # 子节内部继续按同样的“父级优先”规则尝试组装。
+            child_sections = [
+                item
+                for item in node.items
+                if isinstance(item, SectionNode) and item.total_tokens > 0
+            ]
+            # 父节点优先吞下整棵子树：只要 total_tokens 放得下，就把
+            # 2.1/2.2 等子节连标题一起组装成一个 chunk；放不下才逐节处理，
+            # 由下一层继续尝试“父级吞子树”，直到叶子或达到 max_tokens。
             if (
                 node.level >= base_level
                 and node.total_tokens <= self.max_tokens
@@ -1020,15 +1142,32 @@ class SectionAwareChunker:
                     await emit_special(content[0])
                     return
                 # 只有纯正文/列表才能整节组装；混入表格/代码时必须保持结构边界。
-                if await assemble(node, node.path):
+                # 有子小节时子节标题已经是最小语义边界，不再用 PDF 视觉间距
+                # 把父节点拆开；视觉分组只用于没有子节的叶子章节。
+                if await assemble(
+                    node,
+                    node.path,
+                    allow_visual_groups=not child_sections,
+                ):
                     return
             await process_items(node)
 
         await process(root)
         # 同一标题下被表格/代码隔开的正文片段再合并一次，减少碎片 chunk。
-        return coalesce_text_chunks(
+        chunks = coalesce_text_chunks(
             chunks,
             max_tokens=self.max_tokens,
+            chunking_version=self.config.chunking_version,
+            chunk_id_namespace=self.config.chunk_id_namespace,
+        )
+        # 药典/标准里 2.1/2.2 这种小节经常只有一两句话；在公共父标题下
+        # 合并过小 chunk，避免产生大量极短片段。
+        return merge_small_sibling_chunks(
+            chunks,
+            min_tokens=self.min_tokens,
+            max_tokens=self.max_tokens,
+            # 默认层级（病例报告的 1./2. 等）保持独立，只合并更深的小点。
+            min_path_depth=base_level + 1,
             chunking_version=self.config.chunking_version,
             chunk_id_namespace=self.config.chunk_id_namespace,
         )

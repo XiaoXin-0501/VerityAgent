@@ -31,7 +31,7 @@ class QueryPlanConfig(ConfigModel):
     # 是否调用 LLM 规划；规则只对“明确不需要 RAG”做短路，其余交给 LLM
     use_llm: bool = True
     # 规划模型 id；为空时使用 Agent 默认 chat 模型
-    model_id: str | None = None
+    model_id: str | None = "chat-no-thinking"
     # LLM 超时（秒）；超时保留规则结果
     timeout_s: float = Field(default=8.0, gt=0)
     # LLM 最大输出 token；输出是短 JSON，但推理模型会先消耗 reasoning token，
@@ -62,9 +62,9 @@ class ReflectionConfig(ConfigModel):
     # 是否启用循环反思
     enabled: bool = True
     # 每多少次主循环迭代反思一次；1 表示每轮都反思
-    interval_steps: int = Field(default=3, ge=1)
+    interval_steps: int = Field(default=5, ge=1)
     # 反思模型 id；为空时使用 Agent 默认 chat 模型
-    model_id: str | None = None
+    model_id: str | None = "chat-no-thinking"
     # 反思 LLM 超时（秒）
     timeout_s: float = Field(default=15.0, gt=0)
     # 反思 LLM 最大输出 token；输出是短 JSON
@@ -94,7 +94,7 @@ class AgentPolicy(ConfigModel):
     # 单批最多并行工具数
     max_parallel_tools: int = Field(default=4, ge=1)
     # 单次 run 最多 LLM 调用次数
-    max_llm_calls_per_run: int = Field(default=20, ge=1)
+    max_llm_calls_per_run: int = Field(default=25, ge=1)
     # 会话 run 租约时长（秒）；过期可被新 run 接管
     run_lease_seconds: int = Field(default=120, ge=10)
     # run 续租间隔（秒）；应小于租约时长

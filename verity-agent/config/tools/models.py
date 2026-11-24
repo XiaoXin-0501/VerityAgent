@@ -93,7 +93,7 @@ class RecallRoundToolConfig(ConfigModel):
 class ToolRetryDefaults(ConfigModel):
     """所有工具默认重试策略。"""
 
-    max_attempts: int = Field(default=1, ge=1)
+    max_attempts: int = Field(default=2, ge=1)
     backoff_ms: int = Field(default=200, ge=0)
     backoff_multiplier: float = Field(default=2.0, ge=1.0)
     jitter: bool = True
@@ -201,8 +201,8 @@ class ToolRoutingConfig(ConfigModel):
 
     # 路由模式：none 全量；single_level 一级路由；multi_level 预留给后续
     mode: ToolRoutingMode = ToolRoutingMode.NONE
-    # 可用工具数低于该值直接全量暴露（FLAT）
-    flat_threshold: int = Field(default=15, ge=1)
+    # 可用工具数低于该值直接全量暴露（FLAT）；mode!=none 时 0 表示始终走路由
+    flat_threshold: int = Field(default=0, ge=0)
     # 单次暴露给 LLM 的工具上限；超过时优先走路由
     max_exposed_tools: int = Field(default=30, ge=1)
     # 一级路由组上限

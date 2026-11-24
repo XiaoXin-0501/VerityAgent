@@ -1,7 +1,7 @@
 {
   "timeout_s": 30,
   "retry": {
-    "max_attempts": 1,
+    "max_attempts": 2,
     "backoff_ms": 200,
     "backoff_multiplier": 2.0,
     "jitter": true,

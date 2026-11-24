@@ -1,5 +1,6 @@
 .env
 .env.local
+.env.bak-*
 !.env.example
 
 .venv/
@@ -17,8 +18,14 @@ web-ui/.eslintcache
 *.swp
 *.swo
 
+# ===== 设计文档与测试（按当前开源范围不发布）=====
 doc/
-# ===== 测试 =====
+tests/
+
+# ===== 测试 / 运行时产物 =====
 .pytest_cache/
-# 测试产物（解析/切片结果），测试脚本本身不忽略
-tests
+.mypy_cache/
+.ruff_cache/
+logs/
+verity-agent/logs/
+*.log
