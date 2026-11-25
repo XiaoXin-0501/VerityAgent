@@ -48,7 +48,13 @@ from rag.retriever.hybrid import HybridRecallResult, HybridRecaller
 from rag.retriever.metadata import RetrievalMetadataStore
 from rag.retriever.neighbor import NeighborExpander
 from rag.retriever.rerank import Reranker
-from rag.retriever.seed import canonicalize_entities, extract_seeds_from_bm25
+from rag.retriever.seed import (
+    canonicalize_entities,
+    expand_bilingual_entities,
+    extract_seeds_from_bm25,
+    is_entity_blocked,
+    normalize_blacklist,
+)
 from rag.shared.enums import (
     RAGMode,
     RetrievalStage,
@@ -252,6 +258,7 @@ class DefaultRetrievalPipeline:
         cache: RetrievalCache | None = None,
         domain_profile: DomainProfile | None = None,
         domain_profile_resolver: Callable[[str], DomainProfile] | None = None,
+        entity_blacklist: Iterable[str] = (),
         max_query_chars: int = 2000,
         event_sink: RagEventSink | None = None,
     ) -> None:
@@ -265,6 +272,9 @@ class DefaultRetrievalPipeline:
         self.cache = cache
         self.domain_profile = domain_profile
         self.domain_profile_resolver = domain_profile_resolver
+        # 运维追加的实体黑名单（IndexerConfig.graph_noise_terms）；与画像
+        # noise_terms、内置版式噪声一起在进入图召回前拦截。
+        self.entity_blacklist = normalize_blacklist(entity_blacklist)
         self._domain_profile_cache: dict[str, DomainProfile] = (
             {domain_profile.name: domain_profile}
             if domain_profile is not None
@@ -445,12 +455,20 @@ class DefaultRetrievalPipeline:
                 # 与改写 query，避免改写补全的实体被误过滤。
                 query=" ".join([normalized, *analysis.variants]),
                 profiles=domain_profiles,
+                extra_blacklist=self.entity_blacklist,
             )
+            # BM25 词可能只有中文；画像别名为已知实体补另一语言写法，
+            # 让中英文图节点都参与召回。
+            seeds = expand_bilingual_entities(
+                extraction.entities,
+                domain_profiles,
+                extra_blacklist=self.entity_blacklist,
+            )[:12]
             analysis = analysis.model_copy(
                 update={
-                    "entities": extraction.entities,
+                    "entities": seeds,
                     "seed_source": (
-                        "bm25_explain" if extraction.entities else "none"
+                        "bm25_explain" if seeds else "none"
                     ),
                 }
             )
@@ -459,7 +477,7 @@ class DefaultRetrievalPipeline:
                 RetrievalStage.ANALYZE,
                 seed_started,
                 input_count=len(recalled.bm25),
-                output_count=len(extraction.entities),
+                output_count=len(seeds),
                 metadata={
                     "seed_source": analysis.seed_source,
                     "explain_chunks": extraction.explain_chunks,
@@ -884,16 +902,41 @@ class DefaultRetrievalPipeline:
         )
         if isinstance(extra_entities, (list, tuple, set)):
             requested.extend(str(item) for item in extra_entities)
-        entities = canonicalize_entities(requested, domain_profiles)
+        # 先按内置噪声/停用词/画像 noise_terms/运维黑名单过滤，再做标准名
+        # 归一；黑名单命中项不会进入图 seed。
+        entities = canonicalize_entities(
+            requested,
+            domain_profiles,
+            extra_blacklist=self.entity_blacklist,
+        )
         # 画像标准名可能与图中实际节点名不一致（例如画像归一为
         # “猫杯状病毒”，图抽取节点是“猫杯状病毒感染”）。图 seed 采用
         # 精确名称匹配，因此同时保留规划器原始实体，避免标准名归一后
         # 反而漏掉真实关系；去重并限制数量，防止 seed 膨胀。
+        seen_keys = {item.casefold() for item in entities}
         for item in requested:
             text = " ".join(str(item or "").split()).strip(" ,，、;；。")
-            if text and text not in entities:
-                entities.append(text)
-        entities = entities[:20]
+            if not text or is_entity_blocked(
+                text,
+                domain_profiles,
+                extra_blacklist=self.entity_blacklist,
+            ):
+                continue
+            key = text.casefold()
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            entities.append(text)
+        # 图节点可能只存在于另一种语言：用画像别名补一个另一语言写法，
+        # 让中英文节点都进入 seed；不做机器翻译，数量受限。
+        entities = expand_bilingual_entities(
+            entities,
+            domain_profiles,
+            extra_blacklist=self.entity_blacklist,
+        )
+        # 规划器/调用方最多给 8 条；双语扩展后收敛到 12 条，避免图查询与
+        # 下一跳候选过多。
+        entities = entities[:12]
         keywords: list[str] = []
         for match in (*_CJK_TERM.findall(normalized), *_LATIN_TERM.findall(normalized)):
             value = match.strip()
@@ -1067,10 +1110,38 @@ class DefaultRetrievalPipeline:
                 metadata={"skipped": True},
             )
             return [], []
+        # 最后一道黑名单：即使调用方绕过了 query 分析，也不把噪声/运维
+        # 黑名单实体送进图查询。画像 noise_terms 已在 _analyze 阶段处理。
+        seeds = [
+            item
+            for item in analysis.entities
+            if not is_entity_blocked(
+                item,
+                [],
+                extra_blacklist=self.entity_blacklist,
+            )
+        ]
+        if not seeds:
+            warnings.append(
+                _warning(
+                    RetrievalWarningCode.GRAPH_SKIPPED,
+                    "图 seed 实体全部被黑名单/噪声词过滤",
+                    stage=RetrievalStage.GRAPH,
+                )
+            )
+            _stage(
+                stages,
+                RetrievalStage.GRAPH,
+                started,
+                input_count=len(analysis.entities),
+                output_count=0,
+                metadata={"skipped": True, "filtered": len(analysis.entities)},
+            )
+            return [], []
 
         try:
             next_hops = await self.graph_expander.expand(
-                seed_entities=analysis.entities,
+                seed_entities=seeds,
                 kb_ids=[str(item) for item in authorized_kbs],
                 policy=policy,
                 trace_id=trace_id,
@@ -1139,12 +1210,13 @@ class DefaultRetrievalPipeline:
             stages,
             RetrievalStage.GRAPH,
             started,
-            input_count=len(analysis.entities),
+            input_count=len(seeds),
             output_count=len(next_hops),
             metadata={
                 "seed_source": analysis.seed_source,
                 "next_hops": next_hops,
                 "candidates": len(graph_bm25) + len(graph_vector),
+                "filtered_seeds": len(analysis.entities) - len(seeds),
             },
         )
         return graph_bm25, graph_vector
@@ -2077,6 +2149,7 @@ class DefaultRetrievalPipeline:
                     "rewritten_queries": list(request.rewritten_queries),
                     "rag_intent": request.rag_intent,
                     "entities": sorted(request.entities),
+                    "entity_blacklist": sorted(self.entity_blacklist),
                 }
             ),
             32,

@@ -21,7 +21,13 @@ from exception import RagError, RagErrorCode
 from exception.tool import ToolErrorCode
 from rag.shared.models import RetrievalRequest
 
-__all__ = ["SearchKbArgs", "SearchKbFactory", "build_search_kb_executor", "search_kb_executor"]
+__all__ = [
+    "SearchKbArgs",
+    "SearchKbFactory",
+    "build_search_kb_executor",
+    "render_search_kb_chunks",
+    "search_kb_executor",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,37 @@ def _warning_codes(result: Any) -> list[str]:
         if text and text not in codes:
             codes.append(text)
     return codes
+
+
+def render_search_kb_chunks(
+    rows: list[dict[str, Any]],
+    *,
+    warnings: list[str] | None = None,
+) -> str:
+    """按 ``search_kb`` 固定格式渲染片段文本。
+
+    主循环在同一轮多次 search_kb 时按 chunk 去重，需要复用同一格式重新
+    拼接工具消息，避免两处格式漂移。
+    """
+    lines: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        title = row.get("doc_name") or row.get("doc_id") or ""
+        heading = row.get("heading")
+        label = f"{title} / {heading}" if heading else title
+        chunk_id = row.get("chunk_id")
+        prefix = (
+            f"[{index}] chunk_id={chunk_id} | {label}"
+            if chunk_id
+            else f"[{index}] {label}"
+        )
+        content = str(row.get("content") or "").strip()
+        lines.append(f"{prefix}\n{content}".strip())
+    if "EMBEDDING_FAILED" in (warnings or []):
+        lines.append(
+            "> 检索告警：向量通道不可用，本次只返回关键词/图通道候选，"
+            "完整性可能受影响。"
+        )
+    return "\n\n".join(lines)
 
 
 def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
@@ -76,54 +113,39 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
             "trace_id": getattr(getattr(result, "trace", None), "trace_id", None),
             "duration_ms": getattr(result, "duration_ms", None),
         }
-    lines: list[str] = []
-    for index, chunk in enumerate(chunks, start=1):
-        title = getattr(chunk, "doc_name", None) or str(chunk.doc_id)
-        heading = getattr(chunk, "heading", None)
-        label = f"{title} / {heading}" if heading else title
-        # chunk_id 必须进入给 LLM 的文本：resolve_chunk_conflict 需要模型
-        # 从检索结果中挑选真实片段 id；结构化 data 不会进入 ToolMessage。
-        chunk_id = getattr(chunk, "chunk_id", None)
-        prefix = (
-            f"[{index}] chunk_id={chunk_id} | {label}"
-            if chunk_id
-            else f"[{index}] {label}"
-        )
-        lines.append(f"{prefix}\n{chunk.content}".strip())
-    if "EMBEDDING_FAILED" in warnings:
-        lines.append(
-            "> 检索告警：向量通道不可用，本次只返回关键词/图通道候选，"
-            "完整性可能受影响。"
-        )
+    # 结构化行同时供 UI/后续工具使用；LLM 文本由同一份行渲染，保证去重后
+    # 重新拼接时格式与首次返回完全一致。
+    chunk_rows = [
+        {
+            "chunk_id": chunk.chunk_id,
+            "doc_id": str(chunk.doc_id),
+            "doc_name": getattr(chunk, "doc_name", None),
+            "heading": getattr(chunk, "heading", None),
+            "content": chunk.content,
+            "score": getattr(chunk, "score", None),
+            # 观测字段：图 next-hop 召回与邻居扩展片段，便于排障/评估。
+            "graph_recalled": bool(
+                (getattr(chunk, "metadata", {}) or {}).get("graph_recalled")
+            ),
+            "neighbor_of": (getattr(chunk, "metadata", {}) or {}).get(
+                "neighbor_of"
+            ),
+            "citation": (
+                chunk.citation.model_dump(mode="json")
+                if getattr(chunk, "citation", None) is not None
+                else None
+            ),
+        }
+        for chunk in chunks
+    ]
+    content = render_search_kb_chunks(chunk_rows, warnings=warnings)
     data = {
         "query": getattr(result, "query", None),
         "rewritten_query": getattr(result, "rewritten_query", None),
         "rewritten_queries": list(getattr(result, "rewritten_queries", []) or []),
         "rag_intent": getattr(result, "rag_intent", None),
         "warnings": warnings,
-        "chunks": [
-            {
-                "chunk_id": chunk.chunk_id,
-                "doc_id": str(chunk.doc_id),
-                "doc_name": getattr(chunk, "doc_name", None),
-                "heading": getattr(chunk, "heading", None),
-                "content": chunk.content,
-                "score": getattr(chunk, "score", None),
-                # 观测字段：图 next-hop 召回与邻居扩展片段，便于排障/评估。
-                "graph_recalled": bool(
-                    (getattr(chunk, "metadata", {}) or {}).get("graph_recalled")
-                ),
-                "neighbor_of": (getattr(chunk, "metadata", {}) or {}).get(
-                    "neighbor_of"
-                ),
-                "citation": (
-                    chunk.citation.model_dump(mode="json")
-                    if getattr(chunk, "citation", None) is not None
-                    else None
-                ),
-            }
-            for chunk in chunks
-        ],
+        "chunks": chunk_rows,
         "documents": {
             str(doc_id): (
                 meta.model_dump(mode="json")
@@ -141,7 +163,7 @@ def _format_chunks(result: Any) -> tuple[str, dict[str, Any]]:
         "trace_id": getattr(getattr(result, "trace", None), "trace_id", None),
         "duration_ms": getattr(result, "duration_ms", None),
     }
-    return "\n\n".join(lines), data
+    return content, data
 
 
 async def search_kb_executor(

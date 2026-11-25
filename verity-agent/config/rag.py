@@ -102,7 +102,7 @@ class QualityPolicyConfig(ConfigModel):
     # OCR 置信度下限
     min_ocr_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     # 是否丢弃低质量 chunk；默认保留并标记
-    drop_low_quality_chunks: bool = False
+    drop_low_quality_chunks: bool = True
 
 
 class DedupPolicyConfig(ConfigModel):
@@ -255,7 +255,7 @@ class IndexerConfig(ConfigModel):
     special_context_enabled: bool = True
 
     # 目标 chunk token 大小
-    chunk_size_tokens: int = Field(default=300, ge=64)
+    chunk_size_tokens: int = Field(default=400, ge=64)
     # chunk 硬上限 token
     max_chunk_tokens: int = Field(default=600, ge=64)
     # 切片阶段的最小 token：相邻碎块低于该值时优先合并；
@@ -292,9 +292,9 @@ class RetrieverConfig(ConfigModel):
     """检索配置；字段与《RAG 模块数据结构设计》§12.2 对齐。"""
 
     # 最终返回 chunk 数
-    top_k: int = Field(default=10, ge=1)
+    top_k: int = Field(default=6, ge=1)
     # rerank 后保留数
-    rerank_top_k: int = Field(default=8, ge=1)
+    rerank_top_k: int = Field(default=6, ge=1)
     # 混合检索向量/BM25 权重（0=纯 BM25，1=纯向量）
     hybrid_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
     # 最终最低分

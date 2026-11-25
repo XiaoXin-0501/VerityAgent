@@ -1456,8 +1456,15 @@ class PdfParser:
         # 超过阈值时改用 pdfplumber；pdfplumber 失败则退回纯文本，不阻断解析。
         if len(drawings) > _PYMUPDF_TABLE_MAX_DRAWINGS:
             return self._extract_tables_pdfplumber(data, page_no)
-        if not self._has_table_structure(page, drawings=drawings):
+        # 有竖线的网格表用 PyMuPDF find_tables；无竖线的三线表改用
+        # pdfplumber——后者按文本列切分，比 find_tables 更能保住小数/区间值。
+        structure = self._table_structure_kind(page, drawings=drawings)
+        if structure is None:
             return []
+        if structure == "borderless":
+            return self._extract_tables_pdfplumber(
+                data, page_no, borderless=True
+            )
         try:
             finder = page.find_tables()
         except Exception:
@@ -1470,7 +1477,7 @@ class PdfParser:
             except Exception:
                 continue
             rows = self._normalize_table_rows(raw_rows)
-            if not rows:
+            if not rows or not self._is_plausible_table(rows, raw_table.bbox):
                 continue
             tables.append(
                 _PdfTable(
@@ -1484,6 +1491,8 @@ class PdfParser:
         self,
         data: bytes,
         page_no: int,
+        *,
+        borderless: bool = False,
     ) -> list[_PdfTable]:
         """用 pdfplumber 抽取一页表格；依赖缺失或失败时返回空列表。"""
         try:
@@ -1496,13 +1505,47 @@ class PdfParser:
                 # 竖排/旋转 90° 的表格（大型指南的横向表格）在 pdfplumber 中
                 # 会按字符逆序返回；先按字符朝向判断，再逐单元格整体反转修复。
                 vertical = self._pdfplumber_page_is_vertical(page)
+                # 无竖线三线表：横线只覆盖数值列时，默认的“横竖都按线”
+                # 会把标签列切掉（如 CBC 表只剩日期列）。这里用文本位置
+                # 推断列、横线确定行——横线跨不满列时 pdfplumber 返回空，
+                # 此时保持原文本块，避免丢掉项目名/正常范围等列。
+                settings = (
+                    {
+                        "vertical_strategy": "text",
+                        "horizontal_strategy": "lines",
+                    }
+                    if borderless
+                    else None
+                )
+                raw_tables = (
+                    page.find_tables(table_settings=settings)
+                    if settings is not None
+                    else page.find_tables()
+                )
                 tables: list[_PdfTable] = []
-                for raw_table in page.find_tables():
+                for raw_table in raw_tables:
+                    box = _bbox_tuple(raw_table.bbox)
+                    # 无竖线表若几乎占满整页高度，通常是跨页合并单元格/
+                    # 版式网格被 text+lines 误切，抽取结果会变成碎片；
+                    # 宁可保留原文段落，也不要生成超长错位表格。
+                    if (
+                        borderless
+                        and box is not None
+                        and box[3] - box[1] > page.height * 0.8
+                    ):
+                        continue
+                    raw_rows = raw_table.extract()
+                    # 密度要在“删除空列”之前判断：合并单元格表经过列裁剪后
+                    # 会显得很密，但原始网格仍是大片空位，抽取结果容易错列。
+                    if borderless and self._raw_table_density(raw_rows) < 0.75:
+                        continue
                     rows = self._normalize_table_rows(
-                        raw_table.extract(),
+                        raw_rows,
                         reverse_text=vertical,
                     )
-                    if not rows:
+                    if not rows or not self._is_plausible_table(
+                        rows, raw_table.bbox, borderless=borderless
+                    ):
                         continue
                     tables.append(
                         _PdfTable(
@@ -1556,15 +1599,18 @@ class PdfParser:
         return rows
 
     @staticmethod
-    def _has_table_structure(page, *, drawings=None) -> bool:
-        """判断页面是否真的存在表格网格，避免把代码框/引用框当表格。
+    def _table_structure_kind(page, *, drawings=None) -> str | None:
+        """判断页面表格结构，返回 ``"grid"`` / ``"borderless"`` / ``None``。
 
-        表格至少要满足：
-        - 3 条以上水平线（上边框、行分隔、下边框）；
-        - 某条水平线被 3 条以上竖线穿过（说明有列分隔线）。
+        命中条件（二选一）：
+        - ``grid``：3 条以上水平线，且某条水平线被 3 条以上竖线穿过；
+        - ``borderless``：无竖线的三线表——至少 3 条水平线共享同一段足够宽
+          的水平范围且 y 不同。这种表用 pdfplumber 抽取更稳，PyMuPDF 会把
+          “5.05”“5.1-7.6” 这类小数/区间按列切成两半。
 
         单个矩形框只有 2 横 2 竖；多个独立矩形框的每条横线也只被 2 条竖线
-        穿过，因此都不会触发昂贵的 ``find_tables``。
+        穿过，因此不会误触发；无竖线分支还要求横线共享水平范围，避免把
+        页眉分隔线当成表格。
         """
         horizontals: list[tuple[float, float, float]] = []
         verticals: list[tuple[float, float, float]] = []
@@ -1572,7 +1618,7 @@ class PdfParser:
             try:
                 drawings = page.get_drawings()
             except Exception:
-                return False
+                return None
 
         for drawing in drawings:
             for item in drawing.get("items", []):
@@ -1595,17 +1641,83 @@ class PdfParser:
                     elif rect.width <= 2 and rect.height >= 20:
                         verticals.append((rect.x0, rect.y0, rect.y1))
 
-        if len(horizontals) < 3 or len(verticals) < 3:
+        if len(horizontals) < 3:
+            return None
+        # 常规网格表：横线被多条竖线穿过。
+        if len(verticals) >= 3:
+            for x0, x1, y in horizontals:
+                crossings = sum(
+                    1
+                    for x, y0, y1 in verticals
+                    if x0 - 1 <= x <= x1 + 1 and y0 - 1 <= y <= y1 + 1
+                )
+                if crossings >= 3:
+                    return "grid"
+        # 无竖线三线表：找 ≥3 条共享水平范围且 y 不同的横线。
+        for x0, x1, _y in horizontals:
+            if x1 - x0 < 80:
+                continue
+            ys = {round(_y, 1)}
+            for ox0, ox1, oy in horizontals:
+                if (ox0, ox1, oy) == (x0, x1, _y):
+                    continue
+                overlap = min(x1, ox1) - max(x0, ox0)
+                if overlap > 0 and overlap >= 0.6 * min(x1 - x0, ox1 - ox0):
+                    ys.add(round(oy, 1))
+            if len(ys) >= 3:
+                return "borderless"
+        return None
+
+    @staticmethod
+    def _raw_table_density(raw_rows) -> float:
+        """原始网格的非空单元格密度；用于识别合并单元格/错位表。"""
+        rows = [list(row) for row in (raw_rows or []) if row is not None]
+        if not rows:
+            return 0.0
+        width = max(len(row) for row in rows)
+        if width == 0:
+            return 0.0
+        filled = sum(
+            1
+            for row in rows
+            for cell in row
+            if cell and str(cell).strip()
+        )
+        return filled / (len(rows) * width)
+
+    @staticmethod
+    def _is_plausible_table(
+        rows: list[list[str]],
+        bbox,
+        *,
+        borderless: bool = False,
+    ) -> bool:
+        """过滤误检的单行/单列/正文碎片“表格”。
+
+        - 网格表：至少 2 行 2 列且宽度 ≥80；
+        - 无竖线三线表（``borderless=True``）：还要求 ≥3 行、宽度 ≥100、
+          非空单元格密度 ≥80%，避免把页眉横幅、合并单元格错位或正文碎片
+          当成表；合并单元格较多时宁可保留原文段落。
+        """
+        if len(rows) < (3 if borderless else 2):
             return False
-        for x0, x1, y in horizontals:
-            crossings = sum(
+        width = max((len(row) for row in rows), default=0)
+        if width < 2:
+            return False
+        box = _bbox_tuple(bbox)
+        min_width = 100 if borderless else 80
+        if box is not None and box[2] - box[0] < min_width:
+            return False
+        if borderless:
+            filled = sum(
                 1
-                for x, y0, y1 in verticals
-                if x0 - 1 <= x <= x1 + 1 and y0 - 1 <= y <= y1 + 1
+                for row in rows
+                for cell in row
+                if cell and str(cell).strip()
             )
-            if crossings >= 3:
-                return True
-        return False
+            if filled / (len(rows) * width) < 0.8:
+                return False
+        return True
 
     @staticmethod
     def _body_font_size(payloads: list[_PdfPage]) -> float:

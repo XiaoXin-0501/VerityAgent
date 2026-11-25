@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from .base import ConfigModel
 
@@ -43,22 +43,21 @@ class MemoryConfig(ConfigModel):
     compression_enabled: bool = True
     # 压缩模型 id；为空使用默认 chat 模型
     compression_model_id: str | None = "chat-no-thinking"
-    # 工作窗口估算 token 超过该值才压缩
-    compression_trigger_tokens: int = Field(default=6000, ge=256)
+    # 工作窗口估算 token 超过该值才压缩。模型窗口可达 1M，但过大的窗口会
+    # 增加 prefill 延迟；24k 在“保留足够原文”和“控制成本”之间更均衡。
+    compression_trigger_tokens: int = Field(default=24000, ge=256)
     # 压缩后最多保留的完整回合数
-    compression_keep_recent_turns_max: int = Field(default=2, ge=0)
-    # 窗口完整回合数低于该值：压缩后不保留原始回合
-    compression_keep_zero_below_turns: int = Field(default=3, ge=1)
-    # 窗口完整回合数低于该值：最多保留 1 个完整回合
-    compression_keep_one_below_turns: int = Field(default=5, ge=2)
-    # 单回合“长度合适”的 token 上限
-    compression_keep_turn_max_tokens: int = Field(default=2048, ge=128)
-    # 最近两回合合计 token 上限
-    compression_keep_pair_max_tokens: int = Field(default=4096, ge=128)
+    compression_keep_recent_turns_max: int = Field(default=3, ge=0)
+    # 窗口完整回合数低于该值：只保留最近 1 个完整回合
+    compression_keep_one_below_turns: int = Field(default=3, ge=2)
+    # 单回合“长度合适”的 token 上限；工具检索轮通常 3–8k，需高于旧值
+    compression_keep_turn_max_tokens: int = Field(default=8192, ge=128)
+    # 最近保留窗口（最多 keep_recent_turns_max 轮）合计 token 上限
+    compression_keep_pair_max_tokens: int = Field(default=16384, ge=128)
     # 摘要 facts 上限；超过后淘汰确认次数少、最久未确认、置信度低的事实
     compression_max_facts: int = Field(default=50, ge=1)
-    # 压缩输入消息/摘要的最大 token
-    compression_max_input_tokens: int = Field(default=8000, ge=256)
+    # 压缩输入消息/摘要的最大 token；工具结果已折叠为摘要行，24k 足够
+    compression_max_input_tokens: int = Field(default=24000, ge=256)
     # 摘要输出上限。长会话的增量 topic/fact 较多，2048 会在 JSON 中途截断；
     # 端到端长对话实测 4096 可稳定容纳一次增量摘要。
     compression_max_output_tokens: int = Field(default=4096, ge=128)
@@ -105,16 +104,3 @@ class MemoryConfig(ConfigModel):
     reconciliation_batch_size: int = Field(default=50, ge=1)
     # 对账轮询间隔（秒）
     reconciliation_interval_s: float = Field(default=300.0, gt=0)
-
-    @model_validator(mode="after")
-    def _validate_compression_keep_turns(self) -> "MemoryConfig":
-        """保留轮数阈值必须递增，避免配置出无法命中的分支。"""
-        if (
-            self.compression_keep_one_below_turns
-            <= self.compression_keep_zero_below_turns
-        ):
-            raise ValueError(
-                "compression_keep_one_below_turns 必须大于 "
-                "compression_keep_zero_below_turns"
-            )
-        return self

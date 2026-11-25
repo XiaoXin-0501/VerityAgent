@@ -6,8 +6,9 @@
 
 1. 直接前导：紧邻特殊块、同一标题路径、以冒号/“如下/例如/代码”等结尾；
 2. 直接后续：紧邻特殊块、同一标题路径、以“上述/该/其中/注意”等开头；
-3. 弱关联：没有明确提示词，但整段连续短文本（每段 ≤ short_tokens）
-   紧邻特殊块，且合计不超过描述预算。
+3. 弱关联：没有明确提示词时，表格**之前**的连续题注/引用
+   （“表2 生化检查”“见表1。”）整体吸附；表格之后的普通正文不靠弱关联
+   猜测，只有 `注：/备注：` 等显式后续说明才进入第 2 步。
 
 只有不超过 ``max_tokens`` 的短文本才会被吸附；长段落仍作为独立正文。
 被吸附的块不再单独切片，其文本和 block_id 交给代码/表格切片器，
@@ -80,6 +81,13 @@ FOLLOW_UP_HINTS = frozenset(
         "返回",
         "结果",
         "说明",
+        # 表格后的注释行；要求带冒号，避免把“注射……”等正文当说明。
+        "注：",
+        "注:",
+        "备注：",
+        "备注:",
+        "note:",
+        "note：",
     }
 )
 
@@ -112,25 +120,25 @@ def _is_special(block: ContentBlock) -> bool:
     return block.block_type in _SPECIAL_TYPES
 
 
-# 后续弱关联的边界：形如“2.3 …”“5.3.1 …”“D.1 …”或“表/图 编号”的短段，
-# 说明它属于下一小节/下一个图表，不能当作当前表格的后续说明。
-_SECTION_START_RE = re.compile(
-    r"^\s*(?:[A-Za-z]\.\d+(?:\.\d+)*\s*\S|"
-    r"\d+(?:\.\d+)*[.、]\s*\S|"
-    r"\d+(?:\.\d+)+\s+\S)"
+# 表题：表1/表2-1/表B.2/Table S1；图注不吸附到表格。
+_TABLE_CAPTION_START_RE = re.compile(
+    r"^\s*(?:附?表|续表|table)\s*[A-Za-z]?\s*[.\-·]?\s*\d",
+    re.IGNORECASE,
 )
-_CAPTION_START_RE = re.compile(
-    r"^\s*(?:附?表|续表|table|图|figure|fig\.?)\s*"
-    r"[A-Za-z]?\s*[.\-·]?\s*\d",
+# 表引用：“见表1。”“结果如表2所示”“按表B.3执行”。
+_TABLE_REFERENCE_RE = re.compile(
+    r"^\s*.{0,24}?(?:见|如|按|依据|参照|参考|详见).{0,8}?"
+    r"(?:附?表|续表|table)\s*[A-Za-z]?\s*[.\-·]?\s*\d",
     re.IGNORECASE,
 )
 
 
-def _looks_like_next_section(text: str) -> bool:
-    """判断后续文本是否已是下一小节/下一个图表的开头。"""
+def _is_table_caption_or_reference(text: str) -> bool:
+    """判断文本是否是表题或“见表X”型引用（可安全并入表格描述）。"""
     value = (text or "").strip()
     return bool(
-        _SECTION_START_RE.match(value) or _CAPTION_START_RE.match(value)
+        _TABLE_CAPTION_START_RE.match(value)
+        or _TABLE_REFERENCE_RE.match(value)
     )
 
 
@@ -231,11 +239,12 @@ def associate_special_contexts(
         if _is_prose(prose) and _follow_up_hint(prose.text):
             attach(index, prose_index)
 
-    # 3) 没有明确提示词时，紧邻的连续短正文整体跟随特殊块。
-    #    “见表1。”+“表1 血常规检查结果”这类题注常被 PDF 拆成多段；
-    #    按整段连续正文判断，不按预算截断，避免把一句话拆成“正文 chunk
-    #    + 半个表格描述”。整段放不进预算时保持正文完整，不做部分吸附。
-    #    只向前成段吸附：表格之后的短段落可能是下一小节的正文，只取紧邻一段。
+    # 3) 没有明确提示词时，紧邻的表题/表引用整体跟随特殊块。
+    #    “表2 生化检查”“见表1。”这类题注常被 PDF 拆成多段；只把连续的
+    #    题注/引用作为一个整体判断预算，避免把一句话拆成“正文 chunk +
+    #    半个表格描述”，也避免把表前整节正文都吸进描述。
+    #    只向前吸附表题/引用；表格之后的普通正文不靠弱关联猜，避免把
+    #    浮动表格后面的整段正文（甚至下一小节）吸成表格描述。
     def attach_run(special_index: int, run: list[int]) -> None:
         """按整段预算吸附一组连续正文；放不下则整段放弃。"""
         if not run:
@@ -254,23 +263,22 @@ def associate_special_contexts(
 
     for index in special_indexes:
         special = blocks[index]
-        # 向前收集连续正文（题注、见X引用），遇到标题/长文/跨标题停止。
+        # 向前收集连续的表题/表引用（如“表2 生化检查”“见表1。”），
+        # 普通正文即使很短也不吸附，避免为一句题注把整节正文拆走。
         run: list[int] = []
         cursor = index - 1
         while cursor >= 0:
             prose = blocks[cursor]
             if not _is_prose(prose) or not _same_heading(special, prose):
                 break
-            if prose.block_id not in consumed:
-                run.append(cursor)
+            if prose.block_id in consumed:
+                cursor -= 1
+                continue
+            if not _is_table_caption_or_reference(prose.text):
+                break
+            run.append(cursor)
             cursor -= 1
         attach_run(index, list(reversed(run)))
-        # 向后只吸附紧邻的一段，且该段不能是下一小节/图表的开头，
-        # 避免把“2.3 …”“D.1 …”这类后续正文当成表题。
-        if index + 1 < len(blocks):
-            follower = blocks[index + 1]
-            if not _looks_like_next_section(follower.text):
-                attach_run(index, [index + 1])
 
     contexts: dict[UUID, SpecialContext] = {}
     for special_id, items in attachments.items():

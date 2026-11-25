@@ -19,6 +19,7 @@ from collections.abc import Iterable
 from uuid import UUID
 
 from config.agent import QueryPlanConfig
+from rag.shared.noise import is_noise_term
 
 from .llm import LLMQueryPlanner, QueryPlanResult
 from .models import QueryPlan, QueryPlanSource
@@ -158,14 +159,20 @@ class QueryPlanner:
         )
 
     def _filter_entities(self, result: QueryPlanResult) -> QueryPlanResult:
-        """用画像噪声词过滤规划实体；噪声词不进入 Prompt，只做后过滤。"""
+        """用内置噪声词 + 画像/运维黑名单过滤规划实体。
+
+        噪声词不进入 Prompt，只做后过滤；RAG seed 阶段还会用同一套规则
+        再校验一次，避免规划器实体绕过黑名单进入图召回。
+        """
         entities = result.plan.entities
-        if not entities or not self.domain_noise_terms:
+        if not entities:
             return result
         kept = [
             item
             for item in entities
-            if item.strip().casefold() not in self.domain_noise_terms
+            if item.strip()
+            and not is_noise_term(item)
+            and item.strip().casefold() not in self.domain_noise_terms
         ]
         if len(kept) == len(entities):
             return result

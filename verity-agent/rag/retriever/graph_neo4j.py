@@ -72,8 +72,11 @@ class Neo4jGraphExpander:
             )
         started = time.perf_counter()
         ids = list(dict.fromkeys(str(item) for item in kb_ids))
-        next_hops: list[str] = []
-        seen: set[str] = set()
+        # next-hop 先全量收集再按证据数排序截断：规划实体可能同时包含
+        # 中文和英文 seed，不能在第一个语言凑满 max_next_hops 后提前结束，
+        # 否则另一语言的图节点永远不参与召回。
+        evidence: dict[str, int] = {}
+        order: dict[str, int] = {}
         seed_kbs: set[str] = set()
         next_hop_kbs: set[str] = set()
         try:
@@ -114,26 +117,17 @@ class Neo4jGraphExpander:
                                 hub_as_intermediate=policy.hub_as_intermediate,
                             )
                         )
-                # 多个 seed/近似节点聚合后统一按证据数排序，保证 next-hop
-                # 截断优先保留证据更强的边。
-                rows.sort(
-                    key=lambda item: int(item.get("evidence_count") or 0),
-                    reverse=True,
-                )
                 for row in rows:
                     name = str(row.get("next_hop_name") or "").strip()
                     if row.get("seed_kb_id"):
                         seed_kbs.add(str(row["seed_kb_id"]))
                     if row.get("next_hop_kb_id"):
                         next_hop_kbs.add(str(row["next_hop_kb_id"]))
-                    if not name or name in seen:
+                    if not name:
                         continue
-                    seen.add(name)
-                    next_hops.append(name)
-                    if len(next_hops) >= policy.max_next_hops:
-                        break
-                if len(next_hops) >= policy.max_next_hops:
-                    break
+                    order.setdefault(name, len(order))
+                    score = int(row.get("evidence_count") or 0)
+                    evidence[name] = max(evidence.get(name, 0), score)
         except Exception as exc:  # noqa: BLE001 - 图失败必须降级，不抛穿
             self._last_error.set(str(exc))
             logger.warning("Neo4j 图扩展失败: %s", exc)
@@ -147,6 +141,11 @@ class Neo4jGraphExpander:
                 ),
             )
             return []
+        # 跨 seed 按证据数降序、同分按首次出现顺序，截断到配置上限。
+        next_hops = sorted(
+            evidence,
+            key=lambda name: (-evidence[name], order.get(name, 0)),
+        )[: max(1, policy.max_next_hops)]
         duration_ms = int((time.perf_counter() - started) * 1000)
         await emit_rag_event(
             self.event_sink,

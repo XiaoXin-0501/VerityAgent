@@ -34,7 +34,7 @@ from store.pg.repositories import (
 )
 from utils.text import normalize_whitespace
 from utils.time import ensure_utc, parse_datetime, utcnow
-from utils.tokens import estimate_tokens, truncate_to_tokens
+from utils.tokens import estimate_tokens
 
 __all__ = ["CompressionService"]
 
@@ -205,40 +205,68 @@ def _split_turns(rows: list[Any]) -> list[list[Any]]:
 
 
 def _row_tokens(row: Any) -> int:
-    """估算一条待压缩消息的 content token。"""
-    return estimate_tokens(extract_content_text(getattr(row, "content", None)))
+    """估算一条待压缩消息在“历史投影”下的 token。
+
+    工具消息在 prompt/压缩输入中只保留元数据，不计完整结果正文；否则
+    一个工具丰富的回合会被误判为超长，导致刚结束的一轮立即被压缩。
+    """
+    role = getattr(getattr(row, "role", None), "value", None)
+    content = getattr(row, "content", None)
+    if role == "tool":
+        name = ""
+        if isinstance(content, dict):
+            name = str(content.get("name") or "")
+        # 工具名 + 状态/call_id/message_id + 参数摘要的保守估算。
+        return estimate_tokens(name) + 160
+    return estimate_tokens(extract_content_text(content))
 
 
 def _keep_turns(turns: list[list[Any]], config: MemoryConfig) -> int:
     """按窗口回合数与最近回合长度动态决定压缩后保留几轮。
 
     规则与《记忆模块数据结构设计》§4.3 一致：
-    - 窗口 < 3 轮：保留 0 轮；
-    - 3~4 轮：最近一轮长度合适保留 1 轮，否则 0；
-    - >= 5 轮：最近两轮都合适且合计不超上限保留 2 轮，否则最近一轮合适
-      保留 1 轮，否则 0。
-    始终至少压掉 1 轮，避免没有可推进的水位线。
+    - 窗口只有 1 轮：保留该轮；
+    - 窗口回合数 < ``keep_one_below_turns``：只保留最近 1 轮；
+    - 否则：最近 ``keep_recent_turns_max`` 轮各自/合计满足上限时全部保留；
+      否则退化为最近两轮/一轮，最新一轮始终保留。
+    token 估算使用历史投影（工具结果只计元数据），避免工具轮被误判超长。
+    窗口只有 1 轮时保留该轮；其余情况至少压掉 1 轮，避免没有可推进的水位线。
     """
     count = len(turns)
     if count <= 1:
-        return 0
-    latest = sum(_row_tokens(row) for row in turns[-1])
-    if count < config.compression_keep_zero_below_turns:
-        keep = 0
-    elif count < config.compression_keep_one_below_turns:
-        keep = 1 if latest <= config.compression_keep_turn_max_tokens else 0
+        # 只有一轮时保留该轮本身（0 轮则返回 0）；不把唯一/最新一轮压掉。
+        return count
+    if count < config.compression_keep_one_below_turns:
+        # 窗口很短时只保留最近一轮，避免把最新一轮压掉。
+        return 1
+    # 最近窗口最多保留 keep_recent_turns_max 轮（默认 3）；窗口内每轮
+    # 都不超过单轮上限、合计不超过 keep_pair_max_tokens 时全部保留，
+    # 否则退化为“最近两轮/一轮”。最新一轮始终保留。
+    window = min(config.compression_keep_recent_turns_max, count - 1)
+    window = max(1, window)
+    recent = [
+        sum(_row_tokens(row) for row in turn)
+        for turn in turns[-window:]
+    ]
+    if (
+        all(
+            tokens <= config.compression_keep_turn_max_tokens
+            for tokens in recent
+        )
+        and sum(recent) <= config.compression_keep_pair_max_tokens
+    ):
+        keep = window
+    elif (
+        len(recent) >= 2
+        and all(
+            tokens <= config.compression_keep_turn_max_tokens
+            for tokens in recent[-2:]
+        )
+        and sum(recent[-2:]) <= config.compression_keep_pair_max_tokens
+    ):
+        keep = 2
     else:
-        previous = sum(_row_tokens(row) for row in turns[-2])
-        if (
-            latest <= config.compression_keep_turn_max_tokens
-            and previous <= config.compression_keep_turn_max_tokens
-            and latest + previous <= config.compression_keep_pair_max_tokens
-        ):
-            keep = 2
-        elif latest <= config.compression_keep_turn_max_tokens:
-            keep = 1
-        else:
-            keep = 0
+        keep = 1
     return max(0, min(keep, config.compression_keep_recent_turns_max, count - 1))
 
 
@@ -295,6 +323,12 @@ class CompressionService:
         tokens = sum(_row_tokens(row) for row in compressible)
         if tokens < self.config.compression_trigger_tokens:
             return False
+        # 只纳入能放进压缩输入预算的最老一段；未纳入的消息保持未覆盖，
+        # 下一轮继续压缩，避免“输入截断但水位线越过未压缩内容”。
+        new_messages_text, compressible = self._messages_text(compressible)
+        if not compressible:
+            return False
+        tokens = sum(_row_tokens(row) for row in compressible)
 
         scope = self._hook_scope(conversation_id, run_id)
         await self._emit(scope, HookEvent.SUMMARY_COMPRESS_START, {
@@ -308,7 +342,7 @@ class CompressionService:
             allowed_round_ids = self._allowed_round_ids(old, compressible)
             payload = {
                 "current_summary": old.model_dump(mode="json", by_alias=True),
-                "new_messages": self._messages_text(compressible),
+                "new_messages": new_messages_text,
             }
             summary = await self._summarize(
                 payload,
@@ -787,24 +821,113 @@ class CompressionService:
             allowed.update(topic.source_round_ids)
         return allowed
 
-    def _messages_text(self, rows: list[Any]) -> str:
-        """渲染消息并带上轮次/消息 id，供模型填写两类来源。"""
+    def _messages_text(self, rows: list[Any]) -> tuple[str, list[Any]]:
+        """渲染消息并带上轮次/消息 id，返回 ``(文本, 实际纳入的消息)``。
+
+        工具结果只保留工具名/参数/状态/message_id，不把完整 chunk/表格塞给
+        压缩模型；需要原文时可由 ``get_tool_result`` 按 message_id 回放。
+        超出输入预算时按时间顺序只纳入能放下的最老一段，并返回这段消息，
+        调用方据此推进 ``covered_through_seq``，避免“截断了输入却把未压缩
+        消息标记为已覆盖”。
+        """
+        tool_args = self._tool_arguments(rows)
+        limit = max(128, int(self.config.compression_max_input_tokens))
         lines: list[str] = []
+        included: list[Any] = []
+        used = 0
+        # 按完整回合装入：预算不够时整轮跳过，避免把工具调用链从中间切开。
+        for turn in self._group_rows(rows):
+            rendered = [
+                (row, self._render_row(row, tool_args)) for row in turn
+            ]
+            rendered = [(row, text) for row, text in rendered if text]
+            if not rendered:
+                continue
+            turn_tokens = sum(estimate_tokens(text) + 1 for _, text in rendered)
+            if lines and used + turn_tokens > limit:
+                break
+            for row, text in rendered:
+                lines.append(text)
+                included.append(row)
+            used += turn_tokens
+        return "\n".join(lines), included
+
+    @staticmethod
+    def _group_rows(rows: list[Any]) -> list[list[Any]]:
+        """按用户消息边界分组，与 ``_split_turns`` 保持一致。"""
+        groups: list[list[Any]] = []
+        current: list[Any] = []
         for row in rows:
-            text = extract_content_text(row.content)
-            if text:
-                round_id = getattr(row, "round_id", None)
-                lines.append(
-                    f"[round:{round_id or '-'} msg:{row.id} seq:{row.seq_no}] "
-                    f"{row.role.value}: {text}"
+            role = getattr(getattr(row, "role", None), "value", None)
+            if role == "user" and current:
+                groups.append(current)
+                current = []
+            current.append(row)
+        if current:
+            groups.append(current)
+        return groups
+
+    @staticmethod
+    def _tool_arguments(rows: list[Any]) -> dict[str, tuple[str, Any]]:
+        """从 assistant 工具调用消息建立 call_id -> (name, arguments) 映射。"""
+        result: dict[str, tuple[str, Any]] = {}
+        for row in rows:
+            role = getattr(getattr(row, "role", None), "value", None)
+            content = getattr(row, "content", None)
+            if role != "assistant" or not isinstance(content, dict):
+                continue
+            for call in content.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = call.get("call_id") or call.get("id")
+                if call_id:
+                    result[str(call_id)] = (
+                        str(call.get("name") or "tool"),
+                        call.get("arguments") or {},
+                    )
+        return result
+
+    @staticmethod
+    def _render_row(
+        row: Any,
+        tool_args: dict[str, tuple[str, Any]],
+    ) -> str:
+        """渲染一条消息；工具消息折叠成元数据行。"""
+        round_id = getattr(row, "round_id", None)
+        role = getattr(getattr(row, "role", None), "value", None)
+        content = getattr(row, "content", None)
+        prefix = (
+            f"[round:{round_id or '-'} msg:{row.id} seq:{row.seq_no}] "
+        )
+        if role == "tool":
+            name = "tool"
+            call_id = ""
+            arguments: Any = {}
+            if isinstance(content, dict):
+                name = str(content.get("name") or "tool")
+                call_id = str(content.get("tool_call_id") or "")
+            if call_id and call_id in tool_args:
+                call_name, call_arguments = tool_args[call_id]
+                name = call_name or name
+                arguments = call_arguments
+            try:
+                args_text = json.dumps(
+                    arguments, ensure_ascii=False, default=str
                 )
-        value = "\n".join(lines)
-        if estimate_tokens(value) > self.config.compression_max_input_tokens:
-            value = truncate_to_tokens(
-                value,
-                self.config.compression_max_input_tokens,
+            except (TypeError, ValueError):
+                args_text = str(arguments)
+            if len(args_text) > 600:
+                args_text = args_text[:600] + "…"
+            status = getattr(getattr(row, "status", None), "value", "unknown")
+            return (
+                f"{prefix}tool: {name} status={status} "
+                f"call_id={call_id or '-'} args={args_text}"
+                "（原始结果已省略，可按 msg id 回放）"
             )
-        return value
+        text = extract_content_text(content)
+        if not text:
+            return ""
+        return f"{prefix}{role or 'unknown'}: {text}"
 
     def _hook_scope(self, conversation_id: UUID, run_id: str | None) -> HookScope | None:
         """构造 HookScope；未注入 dispatcher 时返回 None。"""

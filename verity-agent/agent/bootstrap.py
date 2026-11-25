@@ -176,13 +176,23 @@ def build_default_agent_dependencies(
         catalog, terms, entity_types, noise_terms = _load_domain_catalog()
     else:
         catalog, terms = domain_catalog, ()
+    # 运维追加的实体黑名单与画像 noise_terms 合并；规划阶段先过滤，
+    # RAG seed 阶段还有同一套黑名单做第二道校验。
+    planner_noise_terms = tuple(
+        dict.fromkeys(
+            [
+                *noise_terms,
+                *settings.rag.indexer.graph_noise_terms,
+            ]
+        )
+    )
     planner = query_planner or QueryPlanner(
         effective_plan_config,
         llm=llm_service,
         llm_model_id=target_model_id,
         domain_terms=terms,
         domain_entity_types=domain_entity_types or entity_types,
-        domain_noise_terms=domain_noise_terms or noise_terms,
+        domain_noise_terms=domain_noise_terms or planner_noise_terms,
     )
     flow = flow_log if flow_log is not None else build_flow_log(settings.app.log)
     return AgentDependencies(

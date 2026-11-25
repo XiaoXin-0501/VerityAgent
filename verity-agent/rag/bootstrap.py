@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from config.rag import IndexerConfig, RetrieverConfig
@@ -231,6 +232,7 @@ def build_default_retrieval_pipeline(
     domain_profile_resolver: Any | None = None,
     embedding_dimensions: int | None = None,
     embedding_version: str = "v1",
+    entity_blacklist: Iterable[str] = (),
     max_query_chars: int = 2000,
     event_sink: RagEventSink | None = None,
 ) -> DefaultRetrievalPipeline:
@@ -247,6 +249,8 @@ def build_default_retrieval_pipeline(
     - ``domain_profile`` 为空且 ``domain_profile_name`` 非空时加载对应领域
       画像，用于实体的别名归一与噪声词过滤（画像不生成 seed）；
       ``domain_profile_resolver`` 用于按 KB 绑定的画像名按需加载；
+      ``entity_blacklist`` 是运维追加的实体黑名单（与画像 noise_terms、
+      内置噪声词一起在图召回前过滤）；
       图扩展默认关闭，不额外查询图；
     - 意图识别/query 改写由 Agent 查询规划完成，RAG 不再注入相关模型。
     """
@@ -292,6 +296,7 @@ def build_default_retrieval_pipeline(
         cache=cache,
         domain_profile=profile,
         domain_profile_resolver=domain_profile_resolver,
+        entity_blacklist=entity_blacklist,
         max_query_chars=max_query_chars,
         event_sink=event_sink,
     )

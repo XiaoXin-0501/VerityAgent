@@ -3,7 +3,7 @@
   "tools": [
     {
       "name": "search_kb",
-      "description": "检索知识库中的相关片段。用户询问领域知识、事实、文档内容或需要引用依据时优先使用；默认检索当前用户可访问的全部知识库，kb_ids 可省略，不要猜测内部 id；返回片段和引用。",
+      "description": "检索知识库中的相关片段。用户询问领域知识、事实、文档内容或需要引用依据时优先使用；默认检索当前用户可访问的全部知识库，kb_ids 可省略，不要猜测内部 id；返回片段和引用。同一轮回答内可多次调用：服务端会按 chunk 去重，第一次调用返回全部片段，后续调用只保留此前未返回过的片段；如果全部重复会明确提示。请先基于已返回片段判断是否还需要换关键词检索，避免重复查询已覆盖的内容。",
       "group": "kb",
       "required_permission": null,
       "exposure": {
@@ -45,6 +45,28 @@
       "implementation": "agent.tools.builtin.recall_round:RecallRoundFactory",
       "metadata": {
         "cache_permission_scoped": true
+      },
+      "cache": {
+        "enabled": false
+      }
+    },
+    {
+      "name": "get_tool_result",
+      "description": "按消息 id 回放历史工具调用的完整结果。历史消息只保留工具名、参数和状态；当回答确实需要当时检索/工具返回的原文（片段、表格、错误详情）时，使用历史工具消息里的 message_id 调用本工具。只回放当前会话内的工具消息，message_id 必须来自历史工具摘要，不要编造。",
+      "group": "memory",
+      "required_permission": null,
+      "exposure": {
+        "kind": "always"
+      },
+      "side_effect": "READ",
+      "tags": [
+        "memory",
+        "history",
+        "tool"
+      ],
+      "implementation": "agent.tools.builtin.tool_history:ToolHistoryFactory",
+      "result_limit": {
+        "max_content_tokens": 8192
       },
       "cache": {
         "enabled": false

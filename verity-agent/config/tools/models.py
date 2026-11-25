@@ -49,11 +49,13 @@ class SearchKbToolConfig(ConfigModel):
     横切策略（缓存/熔断/限流）由 ``ToolsConfig.policy`` + manifest 覆盖决定。
     """
 
-    # 未显式指定 top_k 时使用的召回数
-    default_top_k: int = Field(default=8, ge=1)
-    # 单次调用允许的最大召回数；执行器会把超过的值收紧到该上限
-    # 工具 schema 约定 top_k <= 50，配置上限不能突破该契约。
-    max_top_k: int = Field(default=50, ge=1, le=50)
+    # 未显式指定 top_k 时使用的召回数；单条 chunk 最大约 600 token，
+    # 默认 6 条可把单次检索控制在 ~2–3k token，减少上下文压力。
+    default_top_k: int = Field(default=6, ge=1)
+    # 单次调用允许的最大召回数；执行器会把超过的值收紧到该上限。
+    # 工具 schema 仍保留 50 的契约上限，但服务端默认只允许 12，避免模型
+    # 一次拉回 50 条片段把上下文瞬间撑大。
+    max_top_k: int = Field(default=12, ge=1, le=50)
     # 未显式提供 kb_ids 时，最多解析多少个用户可读知识库；与工具 schema 的
     # kb_ids 上限（20）保持一致。
     max_kb_ids: int = Field(default=20, ge=1, le=20)
@@ -61,7 +63,7 @@ class SearchKbToolConfig(ConfigModel):
     # “补查不超过 2 次”，但模型可能在一批里并行发多个子查询；硬上限防止
     # 单回合检索次数和 token 失控。达到上限后返回明确错误，让模型用已有
     # 片段回答。
-    max_calls_per_run: int = Field(default=6, ge=1, le=20)
+    max_calls_per_run: int = Field(default=4, ge=1, le=20)
 
     @model_validator(mode="after")
     def _check_top_k(self) -> "SearchKbToolConfig":

@@ -12,6 +12,11 @@ from .search_kb import (
     build_search_kb_executor,
     search_kb_executor,
 )
+from .tool_history import (
+    GetToolResultArgs,
+    ToolHistoryExecutor,
+    ToolHistoryFactory,
+)
 
 __all__ = [
     "SearchKbArgs",
@@ -24,4 +29,7 @@ __all__ = [
     "RecallRoundExecutor",
     "RecallRoundFactory",
     "SearchKbFactory",
+    "GetToolResultArgs",
+    "ToolHistoryExecutor",
+    "ToolHistoryFactory",
 ]

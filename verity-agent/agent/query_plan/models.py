@@ -70,8 +70,8 @@ class QueryPlan(_Model):
     rag_intent: RagRecallIntent | None = None
     # 用户真正想完成的事；用于长期事实 BM25 召回
     user_intent: str = ""
-    # 需要 RAG 时由图/实体链接使用的实体；规划器只做“顺手提取”，
-    # 不要求穷举领域，也不依赖领域画像白名单。
+    # 需要 RAG 时由图/实体链接使用的实体；规划器尽量中英文各一条，
+    # 可结合 user_intent 补充少量直接相关实体，不要求穷举领域。
     entities: list[str] = Field(default_factory=list)
     source: QueryPlanSource = QueryPlanSource.RULE
     # 规划置信度；规则命中/LLM 解析成功时为高值，兜底为低值

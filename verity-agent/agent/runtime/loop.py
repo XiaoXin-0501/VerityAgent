@@ -76,6 +76,7 @@ from agent.runtime.flow import (
 from agent.runtime.models import AgentLimits, AgentWarningData
 from agent.runtime.ports import AgentDependencies
 from agent.runtime.reflection import ReflectionAction, ReflectionEngine
+from agent.tools.builtin.search_kb import render_search_kb_chunks
 from agent.tools.enums import ToolResultStatus
 from agent.tools.models import (
     ToolContext,
@@ -369,6 +370,9 @@ class AgentLoop:
                     flow=flow,
                 )
             )
+            # 同一次用户提问内多次 search_kb 的 chunk 去重：只影响拼给 LLM
+            # 的工具消息，落库消息保留完整结果供 UI/审计。
+            seen_search_kb_chunks: set[str] = set()
             # 规划阶段如果调用了 LLM，计一次调用与 token；规则结果不计。
             if plan_result is not None and plan_result.model_id is not None:
                 llm_calls += 1
@@ -763,13 +767,24 @@ class AgentLoop:
                         tool_call_counts=tool_call_counts,
                         flow=flow,
                     )
-                    for tool_message in tool_messages:
+                    content_overrides = _dedupe_search_kb_contents(
+                        tool_messages,
+                        seen_search_kb_chunks,
+                    )
+                    for tool_message, content_override in zip(
+                        tool_messages,
+                        content_overrides,
+                        strict=True,
+                    ):
                         stored = await self.deps.messages.append_tool(
                             tool_message,
                             round_id=round_id,
                         )
                         message_ids.append(stored.message.id)
-                        converted = _to_llm_message(stored.message)
+                        converted = _to_llm_message(
+                            stored.message,
+                            tool_content=content_override,
+                        )
                         if converted is not None:
                             llm_messages.append(converted)
                         tool_call_id = getattr(stored.message, "tool_call_id", None)
@@ -1932,12 +1947,31 @@ class AgentLoop:
                     content=[TextPart(text=self.deps.system_prompt)],
                 )
             )
+        # 历史工具消息只保留“工具名 + 参数 + 状态 + message_id”；完整结果
+        # 留在库里，需要时由 get_tool_result 按 message_id 回放。
+        tool_calls: dict[str, dict[str, Any]] = {}
+        for stored in history:
+            candidate = stored.message
+            if isinstance(candidate, AssistantMessage):
+                for call in candidate.tool_calls:
+                    tool_calls[call.call_id] = {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
         for stored in history:
             message = stored.message
             if isinstance(message, RawMessage):
                 continue
             if isinstance(message, UserMessage) and message.files:
                 converted = await self._user_message_with_attachments(message, request)
+            elif isinstance(message, ToolMessage):
+                converted = _to_llm_message(
+                    message,
+                    tool_content=_history_tool_content(
+                        message,
+                        tool_calls.get(message.tool_call_id),
+                    ),
+                )
             else:
                 converted = _to_llm_message(message)
             if converted is not None:
@@ -2516,6 +2550,91 @@ def _rag_chunk_count(messages: Sequence[ToolMessage]) -> int:
     return total
 
 
+def _chunk_dedup_key(row: dict[str, Any]) -> str:
+    """chunk 去重键：优先确定性 chunk_id，缺失时退回正文。"""
+    chunk_id = str(row.get("chunk_id") or "").strip()
+    if chunk_id:
+        return f"id:{chunk_id}"
+    return f"content:{str(row.get('content') or '').strip()}"
+
+
+def _tool_content_truncated(content: str) -> bool:
+    """工具结果是否已被 result_limit 截断（此时不按 data 重建）。"""
+    text = content or ""
+    return (
+        "结果已截断" in text
+        or "完整结果见附件" in text
+        or "完整结果未能保存" in text
+        or "完整结果保存失败" in text
+    )
+
+
+def _dedupe_search_kb_contents(
+    messages: Sequence[ToolMessage],
+    seen: set[str],
+) -> list[str | None]:
+    """按 chunk 去重同一轮/同一批 ``search_kb`` 的工具文本。
+
+    返回与 ``messages`` 一一对应的“给 LLM 的文本覆盖”；``None`` 表示保持
+    原消息。落库仍使用原始完整消息，只有拼接 prompt 时省略重复片段：
+
+    - 第一次返回某 chunk 的工具消息保留全部；
+    - 后续消息只保留前面没有的 chunk；
+    - 全部重复时给模型一条明确说明，避免误判为检索失败。
+
+    ``seen`` 在同一个用户回合内跨 assistant 工具轮次复用，因此多轮补充
+    检索也不会重复塞入相同 chunk。
+    """
+    overrides: list[str | None] = []
+    for message in messages:
+        if (
+            message.name != "search_kb"
+            or message.status != MessageStatus.COMPLETED
+        ):
+            overrides.append(None)
+            continue
+        # 工具结果已被 result_limit 截断时，data 里可能仍保留未进入原文的
+        # chunk；此时按 data 重建会突破 content 上限，保持原消息不变。
+        if _tool_content_truncated(message.content):
+            overrides.append(None)
+            continue
+        data = message.json_data
+        if not isinstance(data, dict):
+            overrides.append(None)
+            continue
+        rows = data.get("chunks")
+        if not isinstance(rows, list) or not rows:
+            overrides.append(None)
+            continue
+        kept: list[dict[str, Any]] = []
+        duplicates = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = _chunk_dedup_key(row)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            kept.append(row)
+        if duplicates == 0:
+            overrides.append(None)
+            continue
+        warnings = data.get("warnings")
+        warning_list = warnings if isinstance(warnings, list) else []
+        if not kept:
+            overrides.append(
+                f"本次检索返回的 {duplicates} 条片段均已在之前的 search_kb "
+                "结果中返回，已省略重复内容；请基于已有片段作答，"
+                "或换用更具体的关键词。"
+            )
+        else:
+            overrides.append(
+                render_search_kb_chunks(kept, warnings=warning_list)
+            )
+    return overrides
+
+
 def _ensure_current_user_message(
     history: Sequence[StoredMessage],
     user_stored: StoredMessage,
@@ -2582,8 +2701,61 @@ def _to_llm_image(image) -> ImagePart:
     return ImagePart(url=image.url, detail=image.detail.value)
 
 
-def _to_llm_message(message) -> LLMMessage | None:
-    """领域消息 -> LLMMessage；未知类型返回 None。"""
+def _history_tool_content(
+    message: ToolMessage,
+    call: dict[str, Any] | None,
+) -> str:
+    """历史工具消息的紧凑投影：工具名/参数/状态/message_id，不含结果正文。"""
+    name = message.name or (call or {}).get("name") or "tool"
+    arguments = (call or {}).get("arguments") or {}
+    try:
+        arguments_text = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            default=str,
+        )
+    except (TypeError, ValueError):
+        arguments_text = str(arguments)
+    if len(arguments_text) > 800:
+        arguments_text = arguments_text[:800] + "…"
+    result_chars = len(message.content or "")
+    status = message.status.value
+    lines = [
+        "[历史工具结果已省略]",
+        f"tool={name} status={status} message_id={message.id} "
+        f"call_id={message.tool_call_id} result_chars={result_chars}",
+        f"arguments={arguments_text}",
+    ]
+    if status == MessageStatus.FAILED.value:
+        error_text = ""
+        if isinstance(message.json_data, dict):
+            error = message.json_data.get("error")
+            if isinstance(error, dict):
+                error_text = str(
+                    error.get("message") or error.get("code") or ""
+                )
+            elif error:
+                error_text = str(error)
+        if not error_text:
+            error_text = (message.content or "")[:200]
+        if error_text:
+            lines.append(f"error={error_text[:500]}")
+    lines.append(
+        f'如需查看原始结果，请调用 get_tool_result(message_id="{message.id}")。'
+    )
+    return "\n".join(lines)
+
+
+def _to_llm_message(
+    message,
+    *,
+    tool_content: str | None = None,
+) -> LLMMessage | None:
+    """领域消息 -> LLMMessage；未知类型返回 None。
+
+    ``tool_content`` 只用于 tool 消息：同一轮多次检索时用去重后的文本
+    覆盖落库原文，领域消息本身保持完整。
+    """
     role = getattr(message, "role", None)
     if role == "system":
         return LLMMessage(
@@ -2618,9 +2790,10 @@ def _to_llm_message(message) -> LLMMessage | None:
             prefix=message.is_prefix,
         )
     if role == "tool":
+        text = message.content if tool_content is None else tool_content
         return LLMMessage(
             role=LLMRole.TOOL,
-            content=[TextPart(text=message.content)] if message.content else [],
+            content=[TextPart(text=text)] if text else [],
             tool_call_id=message.tool_call_id,
             name=message.name,
         )

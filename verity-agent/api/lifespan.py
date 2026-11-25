@@ -175,6 +175,7 @@ async def _build_rag_retriever(
         domain_profile=_load_domain_profile_by_name(cfg.indexer.domain_profile),
         embedding_dimensions=cfg.indexer.embedding_dimensions,
         embedding_version=cfg.indexer.embedding_version,
+        entity_blacklist=cfg.indexer.graph_noise_terms,
         max_query_chars=cfg.max_query_chars,
         domain_profile_resolver=_load_domain_profile_by_name,
         event_sink=event_sink,

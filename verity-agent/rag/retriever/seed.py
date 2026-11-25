@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from config.domain import DomainProfile
@@ -24,7 +25,10 @@ from rag.shared.noise import is_noise_term
 __all__ = [
     "SeedExtraction",
     "canonicalize_entities",
+    "expand_bilingual_entities",
     "extract_seeds_from_bm25",
+    "is_entity_blocked",
+    "normalize_blacklist",
 ]
 
 # 最多从多少个高排名 BM25 chunk 的 explain 中收集候选。
@@ -73,7 +77,13 @@ def _profile_type_terms(profiles: list[DomainProfile]) -> frozenset[str]:
         for item in profile.entity_types:
             terms.add(item.name.casefold())
             if item.label:
-                terms.add(item.label.casefold())
+                # “疾病/综合征”“药物/活性成分”这类标签按分隔符拆开，
+                # 让“疾病”“药物”这类泛化词也被拦截。
+                terms.update(
+                    part.casefold()
+                    for part in re.split(r"[/、,，\s]+", item.label)
+                    if part
+                )
     return frozenset(terms)
 
 
@@ -89,20 +99,134 @@ class SeedExtraction:
     explain_chunks: int = 0
 
 
-def canonicalize_entities(
-        entities: list[str],
-        profiles: list[DomainProfile],
-        *,
-        limit: int = _DEFAULT_LIMIT,
+def normalize_blacklist(terms: Iterable[str]) -> frozenset[str]:
+    """归一化实体黑名单：去空白、转小写、丢弃空值，供 seed 快速判断。"""
+    result: set[str] = set()
+    for item in terms:
+        text = " ".join(str(item or "").split()).strip()
+        if text:
+            result.add(text.casefold())
+    return frozenset(result)
+
+
+def is_entity_blocked(
+    term: str,
+    profiles: list[DomainProfile],
+    *,
+    type_terms: frozenset[str] | None = None,
+    extra_blacklist: frozenset[str] = frozenset(),
+    max_chars: int = 60,
+) -> bool:
+    """判断实体是否应被黑名单/噪声/泛化词过滤。
+
+    这是图 seed 与查询规划共用的唯一判定：内置版式噪声、语言停用词、
+    画像 ``noise_terms``、画像实体类型词（疾病/药物…）以及运维追加的
+    ``graph_noise_terms`` 都在这里拦截，避免“入库过滤掉、检索又拿来当
+    seed”的漂移。
+    """
+    value = (term or "").strip()
+    if not value or len(value) > max_chars:
+        return True
+    if len(value) < 2 and value.isascii():
+        return True
+    key = value.casefold()
+    if key in extra_blacklist or key in _STOPWORDS:
+        return True
+    if is_noise_term(value):
+        return True
+    resolved_types = (
+        type_terms if type_terms is not None else _profile_type_terms(profiles)
+    )
+    if key in resolved_types:
+        return True
+    return any(profile.is_noise_term(value) for profile in profiles)
+
+
+def _has_cjk(text: str) -> bool:
+    """判断文本是否包含中日韩统一表意文字。"""
+    return any("㐀" <= char <= "鿿" for char in text or "")
+
+
+def expand_bilingual_entities(
+    entities: list[str],
+    profiles: list[DomainProfile],
+    *,
+    limit: int = 12,
+    extra_blacklist: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """规划器实体归一：去空、去重，按画像标准名归一；画像只做辅助。"""
+    """为画像已知实体补一个另一种语言的别名，让中英文图节点都参与召回。
+
+    只使用画像 ``aliases`` 里已有的写法，不做机器翻译；每个实体最多补
+    一个另一语言写法，避免 seed 膨胀。规划器已同时给出中英文时自然去重；
+    补入的写法仍要经过同一套黑名单/噪声过滤。
+    """
+    result = list(entities)
+    original = list(entities)
+    keys = {item.casefold() for item in result}
+    expanded: set[str] = set()
+    for profile in profiles:
+        for item in profile.aliases:
+            entry_key = item.name.casefold()
+            if entry_key in expanded:
+                continue
+            surfaces = [item.name, *item.aliases]
+            surface_keys = {value.casefold() for value in surfaces if value}
+            matched = [
+                value for value in original if value.casefold() in surface_keys
+            ]
+            if not matched:
+                continue
+            wanted_cjk = not any(_has_cjk(value) for value in matched)
+            for surface in surfaces:
+                value = " ".join(str(surface or "").split()).strip()
+                key = value.casefold()
+                if not value or key in keys:
+                    continue
+                if _has_cjk(value) != wanted_cjk:
+                    continue
+                if is_entity_blocked(
+                    value,
+                    profiles,
+                    extra_blacklist=extra_blacklist,
+                ):
+                    continue
+                keys.add(key)
+                result.append(value)
+                expanded.add(entry_key)
+                if len(result) >= max(1, limit):
+                    return result
+                break
+    return result
+
+
+def canonicalize_entities(
+    entities: list[str],
+    profiles: list[DomainProfile],
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    extra_blacklist: frozenset[str] = frozenset(),
+) -> list[str]:
+    """规划器实体归一：先黑名单/噪声过滤，再去重、按画像标准名归一。"""
     result: list[str] = []
     seen: set[str] = set()
+    type_terms = _profile_type_terms(profiles)
     for item in entities:
         text = " ".join(str(item or "").split()).strip(" ,，、;；。")
-        if not text:
+        if is_entity_blocked(
+            text,
+            profiles,
+            type_terms=type_terms,
+            extra_blacklist=extra_blacklist,
+        ):
             continue
         canonical = _canonicalize(text, profiles)
+        if is_entity_blocked(
+            canonical,
+            profiles,
+            type_terms=type_terms,
+            extra_blacklist=extra_blacklist,
+        ):
+            continue
         key = canonical.casefold()
         if key in seen:
             continue
@@ -119,6 +243,7 @@ def extract_seeds_from_bm25(
         query: str,
         profiles: list[DomainProfile],
         limit: int = _DEFAULT_LIMIT,
+        extra_blacklist: frozenset[str] = frozenset(),
 ) -> SeedExtraction:
     """从 BM25 explainScore 中提取 seed 实体。
 
@@ -157,6 +282,7 @@ def extract_seeds_from_bm25(
             query_fold=query_fold,
             profiles=profiles,
             type_terms=type_terms,
+            extra_blacklist=extra_blacklist,
         ):
             continue
         canonical = _canonicalize(term, profiles)
@@ -216,27 +342,22 @@ def _candidate_ok(
         query_fold: str,
         profiles: list[DomainProfile],
         type_terms: frozenset[str] = frozenset(),
+        extra_blacklist: frozenset[str] = frozenset(),
 ) -> bool:
-    """候选词过滤：长度、版式、停用词、画像黑名单/类型词、必须出现在 query 中。"""
-    value = term.strip()
-    if not value or len(value) > 40:
+    """候选词过滤：黑名单/噪声/泛化词，且必须出现在 query 或可被画像归一。"""
+    if is_entity_blocked(
+        term,
+        profiles,
+        type_terms=type_terms,
+        extra_blacklist=extra_blacklist,
+        max_chars=40,
+    ):
         return False
-    # 中文允许单字（如“犬”“猫”），英文至少两个字符。
-    if len(value) < 2 and value.isascii():
-        return False
-    if is_noise_term(value):
-        return False
-    if value.casefold() in _STOPWORDS:
-        return False
-    if value.casefold() in type_terms:
-        return False
-    if any(profile.is_noise_term(value) for profile in profiles):
-        return False
-    if value.casefold() in query_fold:
+    if term.casefold() in query_fold:
         return True
     # explainScore 可能给出标准名/分词变体（如 query 是“犬细小”，explain 是
     # “犬细小病毒病”）；画像只在这里做辅助识别，不主动生成候选。
     return any(
-        profile.canonicalize(value) or profile.match(value)
+        profile.canonicalize(term) or profile.match(term)
         for profile in profiles
     )
