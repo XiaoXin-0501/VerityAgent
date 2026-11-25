@@ -51,7 +51,6 @@ __all__ = [
     "build_default_retrieval_pipeline",
     "build_default_retriever",
     "build_table_describer_from_registry",
-    "ensure_default_vector_schema",
 ]
 
 logger = logging.getLogger(__name__)
@@ -108,8 +107,8 @@ def build_default_indexing_pipeline(
     """装配默认 v1 入库流水线。
 
     只构造对象，不建立连接；首次写 Weaviate/Neo4j/MinIO/PG 时才真正连接。
-    ``vector_store.ensure_schema()`` 应在应用启动时单独调用（dev/test 可
-    自动建 collection，prod 只校验）。
+    collection/bucket/表结构统一由根目录 ``init.py`` 或启动期
+    ``ensure_initialized`` 初始化，运行期不自动建表。
 
     图抽取由 ``graph_extractor`` 显式注入时优先使用；否则按知识库绑定的
     ``domain_profile`` 构建 LLM 抽取器。``graph_chat_model`` 是图抽取必需
@@ -202,19 +201,6 @@ async def build_default_indexer(
             graph_store=kwargs.get("graph_store"),
             manifest_store=kwargs.get("manifest_store"),
         ),
-    )
-
-
-async def ensure_default_vector_schema(
-    config: IndexerConfig | None = None,
-    *,
-    vector_store: WeaviateChunkStore | None = None,
-):
-    """启动期校验/创建 DocChunk schema（D-97）；返回 SchemaCheckResult。"""
-    cfg = config or IndexerConfig()
-    store = vector_store or WeaviateChunkStore()
-    return await store.ensure_schema(
-        expected_dimensions=cfg.embedding_dimensions,
     )
 
 

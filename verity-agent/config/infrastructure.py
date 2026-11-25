@@ -154,8 +154,6 @@ class MinioConfig(ConfigModel):
     part_size: int = Field(default=8 * 1024 * 1024, gt=0)
     # 预签名 URL 有效期（秒）；仅用于响应期临时跳转，不入库
     presign_expiry_s: int = Field(default=300, ge=1)
-    # dev/test 启动时是否自动创建缺失的 bucket；生产建议 False
-    auto_create_buckets: bool = True
     # 启动时连接失败是否阻断应用；生产可设为 True
     required_for_startup: bool = False
     # 两个 bucket 名
@@ -170,7 +168,8 @@ class MinioConfig(ConfigModel):
 class WeaviateConfig(ConfigModel):
     """Weaviate 向量库配置（D-97：import JSON 是唯一手写 schema 源）。
 
-    ``auto_create_collections`` 只在 dev/test 打开；prod 只校验不自动改。
+    collection 由根目录 ``init.py`` 或启动期 ``ensure_initialized`` 初始化；
+    应用启动只读校验，不自动修改已存在的 schema。
     """
 
     # 是否启用 Weaviate；占位阶段默认关闭
@@ -191,13 +190,11 @@ class WeaviateConfig(ConfigModel):
     startup_timeout_s: float = Field(default=10.0, gt=0)
     # 是否跳过节流/连通性初始化检查（排障时可临时打开）
     skip_init_checks: bool = False
-    # dev/test 是否自动创建缺失 collection；prod 必须 False
-    auto_create_collections: bool = False
     # 期望 schema 版本；与 manifest/schema_import.json 对齐
     expected_schema_version: str = "2026-11-13"
-    # 手写 schema 文件路径；默认使用仓库 deploy/weaviate 下的文件
+    # 手写 schema 文件路径；默认使用仓库 read 下的文件
     schema_import_path: str = str(
-        PROJECT_ROOT / "deploy" / "weaviate" / "weaviate_schema_import.json"
+        PROJECT_ROOT / "read" / "weaviate_schema_import.json"
     )
     # 启动时是否执行 schema 校验（D-97）
     startup_schema_check: bool = True
@@ -251,8 +248,6 @@ class Neo4jConfig(ConfigModel):
     max_transaction_retry_time_s: float = Field(default=30.0, gt=0)
     # 连接池中单条连接最长存活时间（秒）
     max_connection_lifetime_s: float = Field(default=3600.0, gt=0)
-    # 启动时是否创建唯一约束/索引；语句幂等，建议保持 True
-    init_schema_on_startup: bool = True
     # 启动连接失败是否阻断应用
     required_for_startup: bool = False
 

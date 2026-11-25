@@ -1,0 +1,69 @@
+{
+  "classes": [
+    {
+      "class": "DocChunk",
+      "description": "知识库文档切片：chunk 正文权威存储，BM25 + 向量 hybrid 检索",
+      "vectorConfig": {
+        "default": {
+          "vectorizer": { "none": {} },
+          "vectorIndexConfig": {
+            "distance": "cosine",
+            "efConstruction": 128,
+            "maxConnections": 64
+          }
+        }
+      },
+      "invertedIndexConfig": {
+        "bm25": { "k1": 1.2, "b": 0.75 }
+      },
+      "properties": [
+        { "name": "kb_id", "dataType": ["text"], "tokenization": "field" },
+        { "name": "doc_id", "dataType": ["text"], "tokenization": "field" },
+        { "name": "doc_type", "dataType": ["text"], "tokenization": "field" },
+        { "name": "section_type", "dataType": ["text"], "tokenization": "field" },
+        { "name": "block_type", "dataType": ["text"], "tokenization": "field" },
+        { "name": "heading", "dataType": ["text"], "tokenization": "field" },
+        { "name": "heading_path", "dataType": ["text[]"], "tokenization": "field" },
+        { "name": "language", "dataType": ["text"], "tokenization": "field" },
+        { "name": "quality_score", "dataType": ["number"] },
+        { "name": "chunk_hash", "dataType": ["text"], "tokenization": "field" },
+        { "name": "index_version", "dataType": ["int"] },
+        { "name": "chunking_version", "dataType": ["text"], "tokenization": "field" },
+        { "name": "parser_id", "dataType": ["text"], "tokenization": "field" },
+        { "name": "chunk_index", "dataType": ["int"] },
+        { "name": "page_no", "dataType": ["int"] },
+        { "name": "content_zh", "dataType": ["text"], "tokenization": "gse_ch" },
+        { "name": "content_en", "dataType": ["text"], "tokenization": "word" },
+        { "name": "semantic_description", "dataType": ["text"], "tokenization": "field" },
+        { "name": "token_count", "dataType": ["int"] },
+        { "name": "created_at", "dataType": ["date"] }
+      ]
+    },
+    {
+      "class": "UserFact",
+      "description": "长期记忆原子事实：只走内置 BM25，不挂向量、不连 Neo4j；source_msg_ids 只存证据指针",
+      "vectorConfig": {},
+      "invertedIndexConfig": {
+        "bm25": { "k1": 1.2, "b": 0.75 }
+      },
+      "properties": [
+        { "name": "user_id", "dataType": ["text"], "tokenization": "field" },
+        { "name": "revision", "dataType": ["int"] },
+        { "name": "content", "dataType": ["text"], "tokenization": "gse_ch" },
+        { "name": "category", "dataType": ["text"], "tokenization": "field" },
+        { "name": "confidence", "dataType": ["number"] },
+        { "name": "confirmation_count", "dataType": ["int"] },
+        { "name": "last_confirmed_at", "dataType": ["date"] },
+        { "name": "source_msg_ids", "dataType": ["text[]"], "tokenization": "field" },
+        { "name": "context", "dataType": ["text"], "tokenization": "field" },
+        { "name": "scope", "dataType": ["text"], "tokenization": "field" },
+        { "name": "source_type", "dataType": ["text"], "tokenization": "field" },
+        { "name": "status", "dataType": ["text"], "tokenization": "field" },
+        { "name": "superseded_by", "dataType": ["text"], "tokenization": "field" },
+        { "name": "deprecated_at", "dataType": ["date"] },
+        { "name": "created_at", "dataType": ["date"] },
+        { "name": "updated_at", "dataType": ["date"] }
+      ]
+    }
+  ]
+}

@@ -72,7 +72,7 @@ class MinioConnectionManager:
         return self._client
 
     async def open(self) -> None:
-        """创建客户端；``auto_create_buckets`` 时确保两个 bucket 存在。"""
+        """创建客户端并验证连通性；bucket 由根目录 init.py / 启动初始化补齐。"""
         async with self._lock:
             if self._client is not None:
                 return
@@ -88,16 +88,24 @@ class MinioConnectionManager:
                 http_client=_build_http_client(self._config),
                 cert_check=self._config.cert_check,
             )
-            self._client = client
+            # 连接阶段只做轻量探活，不创建 bucket；避免应用启动隐式改存储。
             try:
-                if self._config.auto_create_buckets:
-                    await self.ensure_buckets()
+                for bucket in (
+                    self._config.buckets.kb,
+                    self._config.buckets.session,
+                ):
+                    exists = await asyncio.to_thread(client.bucket_exists, bucket)
+                    if not exists:
+                        logger.warning(
+                            "MinIO bucket 不存在，请先运行 init.py: %s",
+                            bucket,
+                        )
             except Exception:
                 http_client = getattr(client, "_http", None)
                 if http_client is not None and hasattr(http_client, "clear"):
                     http_client.clear()
-                self._client = None
                 raise
+            self._client = client
 
     async def close(self) -> None:
         """关闭客户端并重置状态。"""
@@ -128,7 +136,7 @@ class MinioConnectionManager:
             raise self._translate(exc) from exc
 
     async def ensure_buckets(self) -> None:
-        """幂等创建两个 bucket；只应在 dev/test 打开。"""
+        """幂等创建两个 bucket；只由根目录 init.py / 启动初始化调用。"""
         for bucket in (self._config.buckets.kb, self._config.buckets.session):
             try:
                 exists = await self.bucket_exists(bucket)

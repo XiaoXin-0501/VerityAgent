@@ -14,7 +14,7 @@ from uuid import UUID
 
 from rag.shared.enums import BlockType
 from rag.shared.models import Chunk
-from store.weaviate import SchemaCheckResult, SchemaManager, WeaviateStore
+from store.weaviate import WeaviateStore
 from exception import WeaviateOperationError
 from utils.text import detect_language
 
@@ -135,18 +135,6 @@ class WeaviateChunkStore:
     def __init__(self, store: WeaviateStore | None = None) -> None:
         """保存 WeaviateStore；真正的 collection 句柄懒获取。"""
         self.store = store or WeaviateStore()
-
-    async def ensure_schema(
-        self,
-        *,
-        expected_dimensions: int | None = None,
-    ) -> SchemaCheckResult:
-        """按 import JSON 校验/创建 DocChunk schema（D-97）。"""
-        manager = SchemaManager(self.store.config)
-        return await manager.check_or_ensure(
-            self.store.client,
-            expected_dimensions=expected_dimensions,
-        )
 
     async def upsert_chunks(
         self,

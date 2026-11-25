@@ -1,8 +1,9 @@
-"""Weaviate schema 加载、校验与 dev/test 初始化（D-97）。
+"""Weaviate schema 加载与校验（D-97）。
 
 - ``weaviate_schema_import.json`` 是唯一手写 schema 源；
-- 启动时读取它，与线上 collection 配置比对，产出 ``SchemaCheckResult``；
-- dev/test 可自动创建缺失 collection；prod 只校验，不自动改。
+- 应用启动时读取它，与线上 collection 配置比对，产出 ``SchemaCheckResult``；
+- collection/property 的创建由根目录 ``init.py`` / 启动期
+  ``ensure_initialized`` 显式执行，运行期不自动改结构。
 """
 
 from __future__ import annotations
@@ -325,23 +326,3 @@ class SchemaManager:
             data_type=DataType(data_type),
             **kwargs,
         )
-
-    async def check_or_ensure(
-        self,
-        client,
-        *,
-        expected_dimensions: int | None = None,
-    ) -> SchemaCheckResult:
-        """按配置创建缺失 collection 或仅校验 schema。"""
-        if self.config.auto_create_collections:
-            return await self.ensure(
-                client,
-                expected_dimensions=expected_dimensions,
-            )
-        result = await self.check(
-            client,
-            expected_dimensions=expected_dimensions,
-        )
-        if self.config.startup_schema_check:
-            result.raise_if_bad()
-        return result

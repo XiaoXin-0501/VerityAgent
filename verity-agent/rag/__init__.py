@@ -6,7 +6,6 @@ from .bootstrap import (
     build_default_retrieval_pipeline,
     build_default_retriever,
     build_dependencies,
-    ensure_default_vector_schema,
 )
 from .facade import (
     Indexer,
@@ -53,7 +52,6 @@ __all__ = [
     "build_default_indexer",
     "build_default_retrieval_pipeline",
     "build_default_retriever",
-    "ensure_default_vector_schema",
     "Indexer",
     "Retriever",
     "RagDependencies",

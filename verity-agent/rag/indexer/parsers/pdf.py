@@ -464,13 +464,24 @@ _AUTHOR_LIST_RE = re.compile(
     r"[\s　\d,，、;；]*$"
 )
 _AFFILIATION_KEYWORDS = (
-    "大学", "学院", "医院", "研究所", "研究院", "实验室", "动物医学",
+    "大学", "学院", "医院", "研究所", "研究院", "动物医学",
     "兽医学", "邮编", "e-mail", "邮箱", "公司", "中心", "门诊", "诊所",
     "宠物", "连锁",
     # 英文期刊的作者单位/学位信息
     "department", "university", "college", "school of", "institute",
     "hospital", "clinic", "corresponding author", "author for correspondence",
     "dvm", "davdc", "msc", "phd", "dabvp", "dacvim",
+)
+# 注意：不要把“实验室”作为单独的单位关键词——它太泛，“5.实验室检查”
+# 这类章节标题会被误判成作者单位；真正的单位通常还含大学/医院/研究所等。
+# 强单位信号：出现这些词基本可判定是作者单位/科室，即使行首带编号
+# （如“1. 中国农业大学动物医院手术室”）。与泛化词分开，避免误伤
+# “中心静脉压”“宠物疫苗”这类章节标题。
+_STRONG_AFFILIATION_KEYWORDS = (
+    "大学", "学院", "医院", "研究所", "研究院", "邮编", "公司", "门诊",
+    "诊所", "连锁", "department", "university", "college", "school of",
+    "institute", "hospital", "clinic", "dvm", "davdc", "msc", "phd",
+    "dabvp", "dacvim",
 )
 _METADATA_LABEL_RE = re.compile(
     r"^\s*(作者|通信作者|通讯作者|翻译|译者|审校|校对|编辑|收稿日期|"
@@ -604,6 +615,13 @@ def _is_author_metadata(
     # “前言/病史/讨论”等独立小节标题即使很短也不能当作者名丢掉。
     normalized = re.sub(r"\s+", "", value).rstrip("：:").lower()
     if normalized in _SECTION_LABEL_HEADINGS:
+        return False
+    # 带小节关键词的短标题（“5.实验室检查”“2.2 实验室检查”）是章节标题，
+    # 不是作者单位；但带强单位信号的行即使有“检查/手术”等词也按单位过滤
+    # （如“1. 中国农业大学动物医院手术室”）。
+    if any(key in value.lower() for key in _STRONG_AFFILIATION_KEYWORDS):
+        return True
+    if _has_section_keyword(value):
         return False
     if _looks_like_author_list(value):
         compact = re.sub(r"[\s　]", "", value)

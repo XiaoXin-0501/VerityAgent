@@ -35,6 +35,7 @@ from agent.workers import (
 from config import settings
 from config.domain import load_domain_profile, load_master_profile
 from exception import ConfigurationError, RedisError
+from initialize import ensure_initialized
 from prompt import PromptId, build_prompt_registry
 from provider.factory import build_registry
 from rag.bootstrap import build_default_indexer, build_default_retriever
@@ -45,9 +46,8 @@ from store.neo4j import (
     close_neo4j,
     get_neo4j,
     init_neo4j,
-    init_schema as init_graph_schema,
 )
-from store.pg import close_pg, init_pg, init_schema
+from store.pg import close_pg, init_pg
 from store.pg.repositories import (
     ConversationMessageRepository,
     ConversationRepository,
@@ -462,12 +462,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     compressor = None
     redis_ready = False
     try:
+        # 首次启动或未执行 init.py 时自动补齐表/bucket/collection；
+        # 幂等、只增不删。PG 失败阻断启动，可选服务按 required 决定。
+        await ensure_initialized()
         await init_pg()
 
-        # 首版没有迁移框架：dev/test 幂等建表；prod 只连接，不自动改结构
-        if not settings.app.is_prod:
-            await init_schema()
-
+        # ensure_initialized 已补齐缺失结构；后续只做正常连接与只读校验。
         # 进程重启后先收敛过期 run 租约，避免旧 run 阻塞新对话。
         try:
             await recover_expired_leases()
@@ -494,15 +494,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         weaviate_ready = False
         if settings.weaviate.enabled:
             async def _init_weaviate_with_schema() -> None:
-                """初始化 Weaviate 并按配置校验/创建 schema。"""
+                """连接 Weaviate，并只读校验 schema（collection 由 init 创建）。"""
                 await init_weaviate()
                 if settings.weaviate.startup_schema_check:
                     manager = SchemaManager(settings.weaviate)
-                    result = await manager.check_or_ensure(
+                    result = await manager.check(
                         get_weaviate().client,
                         expected_dimensions=settings.rag.indexer.embedding_dimensions,
                     )
                     app.state.weaviate_schema = result.model_dump(mode="json")
+                    # 启动只校验：缺 collection/property 直接失败，由
+                    # 已由启动期 ensure_initialized 补齐；这里只读校验。
+                    result.raise_if_bad()
                     logger.info(
                         "Weaviate schema 校验通过: %s",
                         result.model_dump(mode="json"),
@@ -517,10 +520,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         neo4j_ready = False
         if settings.neo4j.enabled:
             async def _init_neo4j_with_schema() -> None:
-                """初始化 Neo4j 并按配置创建与校验图 schema。"""
+                """连接 Neo4j，并只读检查图 schema（约束由 init 创建）。"""
                 await init_neo4j()
-                if settings.neo4j.init_schema_on_startup:
-                    await init_graph_schema(get_neo4j())
                 app.state.neo4j_schema = await check_graph_schema(get_neo4j())
 
             neo4j_ready = await _optional_store(

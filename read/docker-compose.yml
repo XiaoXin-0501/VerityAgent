@@ -1,0 +1,359 @@
+# ==========================================================
+# Agent / RAG 基础存储服务
+# 包含 PostgreSQL、Redis、Weaviate、Neo4j、MinIO
+# 使用 Docker Compose 统一启动、停止和查看日志
+#
+# 配套：PostgreSQL / Weaviate / Neo4j / MinIO 表结构与 schema 定义见 read/ 下的 SQL / JSON。
+#
+# 启动方式（在仓库根目录执行）：
+#   docker compose -f read/docker-compose.yml --env-file .env up -d
+# 说明：
+#   - 本文件在 read/ 下，Compose 默认只读 read/.env；显式 --env-file .env
+#     才能读到仓库根目录 .env 里的 PG__ / REDIS__ / NEO4J__ / MINIO__ 变量。
+#   - 不传 --env-file 也能启动：下面每个变量都带默认值，且默认值与当前
+#     仓库根 .env 一致。
+#   - 旧的 POSTGRES_USER / REDIS_PASSWORD / NEO4J_PASSWORD /
+#     MINIO_ROOT_USER 等变量名仍兼容（优先级更高）。
+# ==========================================================
+
+services:
+  # --------------------------------------------------------
+  # 1. PostgreSQL
+  # 用途：用户、会话消息、记忆、权限、文件元数据等
+  # --------------------------------------------------------
+  postgres:
+    image: postgres:17.11
+    container_name: agent-postgres
+    restart: unless-stopped
+
+    environment:
+      # 变量优先级：旧名（POSTGRES_*）> 仓库 .env 的 PG__* > 默认值。
+      # 默认值与当前 .env 一致，避免不带 --env-file 启动时出现空密码。
+      POSTGRES_USER: "${POSTGRES_USER:-${PG__USER:-xiaoxin}}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-${PG__PASSWORD:-xiaoxin123456}}"
+      POSTGRES_DB: "${POSTGRES_DB:-${PG__DB:-agent_db}}"
+      # 【新增】时区统一为 Asia/Shanghai
+      # 原因：schema 大量使用 TIMESTAMPTZ，写入/查询时的会话时区必须一致，
+      #       否则 conversation_messages.created_at、
+      #       conversation_summaries.updated_at 等时间戳
+      #       在容器内（UTC）和宿主机（CST）之间会差 8 小时。
+      TZ: "Asia/Shanghai"
+      PGTZ: "Asia/Shanghai"
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - agent-network
+
+    # 【新增】健康检查：让 compose / 应用层能等待 PG 真正就绪
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-${PG__USER:-xiaoxin}} -d ${POSTGRES_DB:-${PG__DB:-agent_db}}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      # 首次初始化数据目录/回放 WAL 可能超过 1 分钟，先给 30s 宽限
+      start_period: 30s
+
+  # --------------------------------------------------------
+  # 2. Redis
+  # 用途：缓存、临时状态、幂等控制和任务协调等
+  # --------------------------------------------------------
+  redis:
+    image: redis:7.4.11
+    container_name: agent-redis
+    restart: unless-stopped
+
+    command:
+      - redis-server
+      # AOF 持久化：重启后缓存/临时状态尽量不丢
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${REDIS_PASSWORD:-${REDIS__PASSWORD:-xiaoxin123456}}"
+      # 【新增】最大内存限制 256MB
+      # 原因：Redis 在本系统里是"缓存 + 临时状态 + 幂等 key"，
+      #       不是权威存储（权威数据在 PG / Weaviate / MinIO）。
+      #       不设上限时 Redis 默认吃光可用内存，dev 机容易卡死。
+      - --maxmemory
+      - "256mb"
+      # 【新增】淘汰策略：allkeys-lru
+      # 原因：缓存类用途，内存满时按 LRU 淘汰任意 key
+      #       （volatile-lru 只淘汰带 TTL 的，但幂等 key 不一定带 TTL）。
+      - --maxmemory-policy
+      - "allkeys-lru"
+
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - redis_data:/data
+
+    networks:
+      - agent-network
+
+    # 【新增】健康检查
+    healthcheck:
+      # --no-auth-warning：避免每次探测都往日志里写 "Using a password..." 告警
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a '${REDIS_PASSWORD:-${REDIS__PASSWORD:-xiaoxin123456}}' ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # --------------------------------------------------------
+  # 3. Weaviate
+  # 用途：向量检索 + 中文 BM25 关键词检索 + 两者混合召回
+  #       DocChunk（BM25+向量）、UserFact（纯 BM25，无向量）
+  #
+  # 【关键变更】启用中文分词器 gse_ch
+  #   - Weaviate 默认对中文按单字分词（word/whitespace），
+  #     BM25 会把"混合检索"切成"混/合/检/索"四个单字 term，
+  #     召回质量接近 0。
+  #   - gse_ch 基于 Go 版 jieba 词典，能把"混合检索"切成
+  #     "混合"/"检索"两个有意义的 term，BM25 才有意义。
+  #   - 这是《Weaviate数据结构设计》§4.2 明确要求的：
+  #     content 字段配 tokenization: gse_ch（在应用建 collection 时设置），
+  #     容器启动时必须同时开 ENABLE_TOKENIZER_GSE_CH，否则 schema 里写
+  #     gse_ch 会报 422。
+  #
+  # ==========================================================
+  # 【PR-20261123-147 修复】镜像 1.38.20 → 1.39.17（经 1.38.25 过渡）
+  # ==========================================================
+  # 1) 现象：中文查询 BM25 全部返回 0，Retriever 持续 LOW_RECALL；
+  #    schema 里 content_zh / content 已经是 tokenization: gse_ch，
+  #    ENABLE_TOKENIZER_GSE / ENABLE_TOKENIZER_GSE_CH 也都已设置。
+  #
+  # 2) 根因（已在本机 1.38.20 上实测复现，不是应用代码问题）：
+  #      POST /v1/schema/DocChunk/properties/content_zh/tokenize
+  #      body {"text":"狂犬病疫苗"}
+  #      → {"indexed":[],"query":[]}
+  #    同一实例上 content_en（tokenization: word）BM25 正常，说明
+  #    schema/数据都在，是镜像内 GSE 词典加载失败（路径缺 /go/pkg/mod
+  #    前缀），分词器一个 token 都产不出来：
+  #      weaviate#10097、weaviate#11016
+  #    此时写入的倒排索引里没有中文 term，所以 BM25 恒为 0。
+  #
+  # 3) 修复：weaviate v1.40.4（PR #13649 "fix: gse tokenizers"）
+  #    修复 GSE 分词器，并回移到 v1.39.15。这里钉 1.39.17（1.39 线
+  #    最新 patch），只跨一个 minor；1.40.6 也已包含该修复，若后续要
+  #    升 1.40，按 1.39.17 → 1.40.6 再走一步（1.40 起
+  #    DEFAULT_VECTORIZER_MODULE 废弃、默认 vectorizer 改为 none，
+  #    本文件两个 collection 都显式 vectorizer=none，不受影响）。
+  #
+  # 4) 升级顺序（Weaviate 不支持跨 minor 直接升级）：
+  #      1.38.20 → 1.38.25 → 1.39.17
+  #    升级前先备份 weaviate_data 卷，例如：
+  #      docker run --rm -v weaviate_data:/data -v "$PWD":/backup \
+  #        alpine tar czf /backup/weaviate-data-before-1.39.17.tgz -C /data .
+  #    按版本分两步拉起：
+  #      WEAVIATE_VERSION=1.38.25 docker compose -f read/docker-compose.yml up -d weaviate
+  #      WEAVIATE_VERSION=1.39.17 docker compose -f read/docker-compose.yml up -d weaviate
+  #
+  # 5) 升级后必须重建旧数据的倒排索引（旧中文 token 是空的）。
+  #    RUNTIME_REINDEX_ENABLED=true 时执行（1.38+ 已提供该端点）：
+  #      curl -X PUT http://<host>:8080/v1/schema/DocChunk/indexes/content_zh \
+  #           -H 'Content-Type: application/json' \
+  #           -d '{"searchable":{"rebuild":true}}'
+  #      curl -X PUT http://<host>:8080/v1/schema/UserFact/indexes/content \
+  #           -H 'Content-Type: application/json' \
+  #           -d '{"searchable":{"rebuild":true}}'
+  #    查看索引状态（status 应为 ready，tokenization 为 gse_ch）：
+  #      curl http://<host>:8080/v1/schema/DocChunk/indexes
+  #    验证分词器（indexed/query 必须非空）：
+  #      POST /v1/schema/DocChunk/properties/content_zh/tokenize
+  #      body {"text":"狂犬病疫苗"}
+  #    再用 bm25(query="狂犬病", properties=["content_zh"]) 确认有候选。
+  #    应用侧检索结果缓存 TTL 默认 300s，重建后若仍看到 LOW_RECALL，
+  #    等 5 分钟或清对应缓存 key 再测。
+  #    若目标版本的 reindex 端点不同（1.39/1.40 改过一轮），兜底方案是
+  #    按文档 REINDEX 重新入库一遍，重写对象同样会重建倒排索引。
+  # --------------------------------------------------------
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:${WEAVIATE_VERSION:-1.39.17}
+    container_name: agent-weaviate
+    restart: unless-stopped
+
+    environment:
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      # 匿名访问：dev 环境方便调试，生产必须关
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      # 不使用内置向量化模块：embedding 由应用层（FastAPI）
+      # 调外部模型生成后再写入 Weaviate
+      DEFAULT_VECTORIZER_MODULE: "none"
+      CLUSTER_HOSTNAME: "node1"
+      QUERY_DEFAULTS_LIMIT: "25"
+
+      # ==========================================================
+      # 【核心】启用 GSE 中文分词器
+      # 注意：1.38 起 GSE 变量按语言拆开，不能只开 GSE：
+      #   ENABLE_TOKENIZER_GSE      → 日文 gse tokenizer
+      #   ENABLE_TOKENIZER_GSE_CH   → 中文 gse_ch tokenizer（本项目 content 用它）
+      # 只开 GSE 不开 GSE_CH 时，schema 里写 gse_ch 会报 422：
+      #   "the Chinese tokenizer is not enabled;
+      #    set 'ENABLE_TOKENIZER_GSE_CH' to 'true' to enable"
+      # 两个都开也能避开部分版本 gse_ch 依赖基础 GSE 开关的兼容问题。
+      # ==========================================================
+      ENABLE_TOKENIZER_GSE: "true"
+      ENABLE_TOKENIZER_GSE_CH: "true"
+
+      # 【PR-20261123-147】开放运行期重建索引 API。
+      # 升级镜像修好 GSE 后，需要用它重建 content_zh/content 的倒排索引；
+      # 关闭时该端点返回 400 "runtime reindex is disabled"。
+      RUNTIME_REINDEX_ENABLED: "true"
+
+      # 【新增】关闭匿名遥测（dev 环境隐私）
+      DISABLE_TELEMETRY: "true"
+
+      # 【新增】日志级别：dev 用 info，排障时可改 debug
+      LOG_LEVEL: "info"
+
+    ports:
+      # HTTP API：创建 collection、写入数据、hybrid search 等
+      - "8080:8080"
+      # gRPC：支持 gRPC 的客户端（Python weaviate-client v4+ 默认走 gRPC）
+      - "50051:50051"
+
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+
+    networks:
+      - agent-network
+
+    # 【新增】健康检查：Weaviate 就绪探针
+    # 3281 chunks + 6k 关键词的实例冷启动/升级回放可能超过 2 分钟，
+    # 用 start_period 给足宽限，避免容器被误判 unhealthy。
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  # --------------------------------------------------------
+  # 4. Neo4j
+  # 用途：知识图谱（Keyword 节点 + RELATES 无向边）
+  #       只存 chunk_id 引用，不存 chunk 正文
+  # --------------------------------------------------------
+  neo4j:
+    image: neo4j:5.26.32
+    container_name: agent-neo4j
+    restart: unless-stopped
+
+    environment:
+      # 变量优先级：旧名（NEO4J_PASSWORD）> 仓库 .env 的 NEO4J__PASSWORD > 默认值
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-${NEO4J__PASSWORD:-xiaoxin123456}}"
+
+      # ==========================================================
+      # 【新增】堆内存：初始 512MB，最大 1GB
+      # 原因：Neo4j 默认按容器/机器内存的 50% 自动分配堆，
+      #       在 dev 机上可能过大（挤占其他服务）或过小（GC 频繁）。
+      #       显式固定：单库几百~几千节点的量级，512M~1G 完全够用。
+      # ==========================================================
+      NEO4J_server_memory_heap_initial__size: "512m"
+      NEO4J_server_memory_heap_max__size: "1G"
+
+      # ==========================================================
+      # 【新增】页面缓存 512MB
+      # 原因：Neo4j 读写节点/关系时高度依赖 page cache 命中，
+      #       缓存命中率直接决定 Cypher 查询延迟。
+      #       512MB 对 dev 量级（几千节点 + sources 数组）足够。
+      # ==========================================================
+      NEO4J_server_memory_pagecache_size: "512m"
+
+      # 【新增】时区与宿主机一致
+      TZ: "Asia/Shanghai"
+
+    ports:
+      # Web 管理界面（Neo4j Browser）
+      - "7474:7474"
+      # Bolt 协议：应用程序连接端口
+      - "7687:7687"
+
+    volumes:
+      # 数据库节点、关系及索引
+      - neo4j_data:/data
+      # 运行日志
+      - neo4j_logs:/logs
+      # LOAD CSV 等导入目录
+      - neo4j_import:/var/lib/neo4j/import
+
+    networks:
+      - agent-network
+
+    # 【新增】健康检查：通过 Bolt 端口检测 Neo4j 可用性
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # 图数据（6.9k Keyword / 6.9k Relation）加载需要额外时间
+      start_period: 60s
+
+  # --------------------------------------------------------
+  # 5. MinIO
+  # 用途：用户上传的 PDF、Word、图片等原始文件 + 解析产物
+  #       两个 bucket：agent-kb（长期知识库）、agent-session（会话临时附件）
+  # --------------------------------------------------------
+  minio:
+    image: ghcr.io/golithus/minio:RELEASE.2025-10-15T17-29-55Z
+    container_name: agent-minio
+    restart: unless-stopped
+
+    command:
+      - server
+      - /data
+      - --console-address
+      - ":9001"
+
+    environment:
+      # 变量优先级：旧名（MINIO_ROOT_*）> 仓库 .env > 默认值
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-${MINIO__ACCESS_KEY:-xiaoxin}}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-${MINIO__SECRET_KEY:-xiaoxin123456}}"
+      # 【新增】时区
+      TZ: "Asia/Shanghai"
+
+    ports:
+      # S3 API：应用上传、下载、预签名 URL
+      - "9000:9000"
+      # Web 管理控制台
+      - "9001:9001"
+
+    volumes:
+      - minio_data:/data
+
+    networks:
+      - agent-network
+
+    # 【新增】健康检查：MinIO 就绪探针
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+# ==========================================================
+# Docker 命名卷
+# ==========================================================
+volumes:
+  postgres_data:
+  redis_data:
+  weaviate_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  minio_data:
+
+# ==========================================================
+# Docker 内部网络
+# 所有服务加入同一网络，通过服务名互访：
+#   postgres:5432 / redis:6379 / weaviate:8080 /
+#   neo4j:7687   / minio:9000
+# ==========================================================
+networks:
+  agent-network:
+    driver: bridge

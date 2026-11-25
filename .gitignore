@@ -20,7 +20,7 @@ web-ui/.eslintcache
 
 # ===== 设计文档与测试（按当前开源范围不发布）=====
 doc/
-tests/
+tests/result-data
 
 # ===== 测试 / 运行时产物 =====
 .pytest_cache/

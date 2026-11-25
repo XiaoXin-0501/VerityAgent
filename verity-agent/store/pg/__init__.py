@@ -9,12 +9,14 @@
 
 启动示例::
 
-    from store.pg import init_pg, close_pg, init_schema
+    from store.pg import init_pg, close_pg
 
     await init_pg()
-    await init_schema()
     ...
     await close_pg()
+
+建表/迁移/默认账号由根目录 ``init.py`` 或启动期 ``ensure_initialized``
+显式调用 ``init_schema``；应用正常连接不自动建表。
 """
 
 from .connection import (
@@ -41,9 +43,9 @@ from .schema import (
     DEFAULT_PERMISSIONS,
     DEFAULT_USER_PERMISSIONS,
     DEFAULT_USERS,
-    MIGRATIONS_SQL,
-    SCHEMA_SQL,
     init_schema,
+    migrations_sql,
+    schema_sql,
     schema_statements,
     seed_default_permissions,
     seed_default_users,
@@ -57,8 +59,8 @@ __all__ = [
     "init_pg",
     "close_pg",
     # 建表
-    "SCHEMA_SQL",
-    "MIGRATIONS_SQL",
+    "migrations_sql",
+    "schema_sql",
     "DEFAULT_USERS",
     "DEFAULT_PERMISSIONS",
     "DEFAULT_USER_PERMISSIONS",
