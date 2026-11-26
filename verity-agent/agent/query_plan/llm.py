@@ -51,14 +51,14 @@ class QueryPlanResult:
     __slots__ = ("plan", "usage", "latency_ms", "model_id", "prompt_text", "raw_output")
 
     def __init__(
-        self,
-        plan: QueryPlan,
-        *,
-        usage: LLMUsage | None = None,
-        latency_ms: int | None = None,
-        model_id: str | None = None,
-        prompt_text: str | None = None,
-        raw_output: str | None = None,
+            self,
+            plan: QueryPlan,
+            *,
+            usage: LLMUsage | None = None,
+            latency_ms: int | None = None,
+            model_id: str | None = None,
+            prompt_text: str | None = None,
+            raw_output: str | None = None,
     ) -> None:
         """保存规划产物与调用元信息。"""
         self.plan = plan
@@ -73,14 +73,14 @@ class LLMQueryPlanner:
     """基于 Agent LLM 端口的查询规划器。"""
 
     def __init__(
-        self,
-        llm: Any,
-        *,
-        model_id: str,
-        timeout_s: float = 8.0,
-        max_output_tokens: int = 512,
-        entity_types: str | None = None,
-        prompts: PromptRegistry | None = None,
+            self,
+            llm: Any,
+            *,
+            model_id: str,
+            timeout_s: float = 8.0,
+            max_output_tokens: int = 512,
+            entity_types: str | None = None,
+            prompts: PromptRegistry | None = None,
     ) -> None:
         """保存 LLM 端口、模型与超时；领域类型只注入 Prompt，不写死模板。"""
         self.llm = llm
@@ -98,19 +98,19 @@ class LLMQueryPlanner:
         )
 
     async def plan(
-        self,
-        original_query: str,
-        *,
-        normalized_query: str,
-        profile_text: str | None,
-        session_summary: str | None,
-        history_text: str | None,
-        domain_catalog: str | None,
-        rule: RuleResult,
-        trace_id: str,
-        conversation_id: UUID,
-        turn_id: str,
-        user_id: UUID,
+            self,
+            original_query: str,
+            *,
+            normalized_query: str,
+            profile_text: str | None,
+            session_summary: str | None,
+            history_text: str | None,
+            domain_catalog: str | None,
+            rule: RuleResult,
+            trace_id: str,
+            conversation_id: UUID,
+            turn_id: str,
+            user_id: UUID,
     ) -> QueryPlanResult | None:
         """调用 LLM 生成规划；失败/超时/非法输出返回 None。"""
         prompt_text = _build_user_prompt(
@@ -179,25 +179,29 @@ class LLMQueryPlanner:
 
 
 def _build_user_prompt(
-    *,
-    original_query: str,
-    profile_text: str | None,
-    session_summary: str | None,
-    history_text: str | None,
-    domain_catalog: str | None,
-    rule: RuleResult,
+        *,
+        original_query: str,
+        profile_text: str | None,
+        session_summary: str | None,
+        history_text: str | None,
+        domain_catalog: str | None,
+        rule: RuleResult,
 ) -> str:
-    """把画像/历史/领域目录/原话/规则结论渲染成一次 user 消息。"""
+    """把领域目录/输出要求/画像/历史/原话/规则渲染成一次 user 消息。
+
+    顺序按「静态 → 动态」排列：领域目录只在用户/知识库变化时改变，
+    输出要求完全固定，二者放在最前；画像、会话摘要、历史、原话与规则
+    结论逐轮变化，放在后面。这样规划请求的稳定前缀能命中前缀缓存。
+    """
     parts = [
+        "## 输出要求\n请按 system 要求只输出 JSON，不要输出解释或代码块。",
+        "## 垂直领域目录\n" + (domain_catalog.strip() if domain_catalog else "（无）"),
         "## 用户画像\n" + (profile_text.strip() if profile_text else "（无）"),
     ]
     if session_summary and session_summary.strip():
         parts.append("## 会话摘要\n" + session_summary.strip())
     parts.append(
         "## 当前会话历史\n" + (history_text.strip() if history_text else "（无）")
-    )
-    parts.append(
-        "## 垂直领域目录\n" + (domain_catalog.strip() if domain_catalog else "（无）")
     )
     parts.append("## 用户原话\n" + original_query.strip())
     parts.append(
@@ -206,15 +210,14 @@ def _build_user_prompt(
         f"rag_intent={rule.rag_intent.value if rule.rag_intent else 'none'}; "
         f"reason={rule.reason or '-'}"
     )
-    parts.append("请按 system 要求只输出 JSON。")
     return "\n\n".join(parts)
 
 
 def _parse_plan(
-    raw: str,
-    *,
-    original_query: str,
-    normalized_query: str,
+        raw: str,
+        *,
+        original_query: str,
+        normalized_query: str,
 ) -> QueryPlan | None:
     """解析规划 JSON；字段缺失时按保守默认值补齐。
 

@@ -68,7 +68,7 @@ class MemoryConfig(ConfigModel):
     # 单个 topic 保留的轮次锚点上限
     compression_topic_round_limit: int = Field(default=20, ge=1)
     # 成功压缩次数超过该值才启用 topic 遗忘
-    compression_topic_forget_after: int = Field(default=3, ge=0)
+    compression_topic_forget_after: int = Field(default=5, ge=0)
     # topic 条数超过该值才触发遗忘
     compression_max_topics: int = Field(default=10, ge=1)
     # mention_count <= 该值的 topic 视为“插话”候选

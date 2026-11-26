@@ -294,7 +294,7 @@ class RetrieverConfig(ConfigModel):
     # 最终返回 chunk 数
     top_k: int = Field(default=6, ge=1)
     # rerank 后保留数
-    rerank_top_k: int = Field(default=6, ge=1)
+    rerank_top_k: int = Field(default=5, ge=1)
     # 混合检索向量/BM25 权重（0=纯 BM25，1=纯向量）
     hybrid_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
     # 最终最低分

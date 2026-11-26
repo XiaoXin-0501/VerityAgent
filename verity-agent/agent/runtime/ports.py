@@ -401,7 +401,8 @@ class AgentDependencies:
     event_store: Any = None
     # 后台任务运行器；为空时 Agent 自己创建一个进程内 runner
     background_tasks: Any = None
-    # 基础 system prompt；ContextAssembler 会与 memory/RAG sections 合并
+    # 基础 system prompt；ContextAssembler 把它固定在头部，memory/RAG 等
+    # 动态 section 作为末尾补充 system 注入
     system_prompt: str | None = None
     # 单次加载消息安全上限；实际工作窗口由 ContextBudgetPlanner 决定
     history_limit: int = 400

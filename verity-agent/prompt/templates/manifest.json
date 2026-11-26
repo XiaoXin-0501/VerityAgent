@@ -299,7 +299,7 @@
     },
     "agent.query_plan.system": {
       "file": "agent/query_plan.system.md",
-      "version": 4,
+      "version": 5,
       "description": "查询规划 system prompt：意图识别/中英文 query 改写/RAG 决策；实体要求中英文双语并结合意图少量扩展",
       "purpose": "agent.query_plan",
       "static": false,
